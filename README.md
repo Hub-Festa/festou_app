@@ -11,6 +11,16 @@ Este guia é o passo a passo definitivo para adicionar um novo tenant ao projeto
 
 O bootstrap Flutter usa a origem de `main_domain` retornada pelo endpoint de ambiente e monta o transporte em `/api/v1/`. `APP_URL` não deve ser transformada em subdomínio do tenant para esse fluxo.
 
+## Ambiente dev da Festou
+
+O app usa defines de compilacao para resolver o bootstrap publico de dev:
+
+```bash
+fvm flutter run --dart-define-from-file=config/defines/dev.json
+```
+
+`config/defines/dev.json` aponta para `https://festoudemo.site`. Neste codigo, `LANDLORD_DOMAIN` e apenas o host (`festoudemo.site`) e `LANDLORD_SCHEMA` define o protocolo; `BOOTSTRAP_BASE_URL` guarda a origem completa para evitar ambiguidade em execucoes mobile/dev.
+
 O backend pode fornecer configurações opcionais em `telemetry_settings.trackers` e `firebase_settings`. Sem essas configurações, o app mantém o startup funcional, não usa credenciais hardcoded e deixa a entrega externa desabilitada. A integração usa `event_tracker_handler` e `push_handler` na linha `0.2.x`, com `$insert_id`, outcomes, bearer token, fetch de dados e action reporting fornecidos pelos pacotes.
 
 O boilerplate possui rota própria para detalhe de evento (`/agenda/:event_id`), mas não possui domínio ou rota de convites. Payloads de convite são ignorados com segurança até existir um TODO específico para essa superfície. Chrome/web é um alvo aceito para testes; configuração real Android/iOS, Firebase files e credenciais não fazem parte do baseline genérico.

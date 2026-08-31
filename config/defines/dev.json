@@ -1,0 +1,6 @@
+{
+  "APP_ENVIRONMENT": "dev",
+  "LANDLORD_DOMAIN": "festoudemo.site",
+  "LANDLORD_SCHEMA": "https",
+  "BOOTSTRAP_BASE_URL": "https://festoudemo.site"
+}
