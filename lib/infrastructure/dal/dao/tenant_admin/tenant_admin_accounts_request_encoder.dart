@@ -1,0 +1,89 @@
+import 'package:festou_app/domain/tenant_admin/ownership_state.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_document.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_profile_group.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_terms.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_admin/support/tenant_admin_nested_profile_group_payload_encoder.dart';
+
+class TenantAdminAccountsRequestEncoder {
+  const TenantAdminAccountsRequestEncoder();
+
+  Map<String, dynamic> encodeCreateAccount({
+    required String name,
+    required TenantAdminOwnershipState ownershipState,
+    String? organizationId,
+    TenantAdminDocument? document,
+  }) {
+    final payload = <String, dynamic>{
+      'name': name,
+      'ownership_state': ownershipState.apiValue,
+      if (organizationId != null && organizationId.trim().isNotEmpty)
+        'organization_id': organizationId.trim(),
+    };
+    if (document != null) {
+      payload['document'] = {'type': document.type, 'number': document.number};
+    }
+    return payload;
+  }
+
+  Map<String, dynamic> encodeCreateOnboarding({
+    required String name,
+    required TenantAdminOwnershipState ownershipState,
+    required String profileType,
+    TenantAdminLocation? location,
+    TenantAdminTaxonomyTerms taxonomyTerms =
+        const TenantAdminTaxonomyTerms.empty(),
+    String? bio,
+    String? content,
+    List<TenantAdminNestedProfileGroup> nestedProfileGroups =
+        const <TenantAdminNestedProfileGroup>[],
+  }) {
+    return {
+      'name': name,
+      'ownership_state': ownershipState.apiValue,
+      'profile_type': profileType,
+      if (location != null)
+        'location': {'lat': location.latitude, 'lng': location.longitude},
+      if (taxonomyTerms.isNotEmpty)
+        'taxonomy_terms': taxonomyTerms
+            .map((term) => {'type': term.type, 'value': term.value})
+            .toList(growable: false),
+      'bio': ?bio,
+      'content': ?content,
+      if (nestedProfileGroups.isNotEmpty)
+        'nested_profile_groups': encodeTenantAdminNestedProfileGroups(
+          nestedProfileGroups,
+        ),
+    };
+  }
+
+  Map<String, dynamic> encodeUpdateAccount({
+    String? name,
+    String? slug,
+    TenantAdminDocument? document,
+    TenantAdminOwnershipState? ownershipState,
+    String? publicationStatus,
+  }) {
+    final payload = <String, dynamic>{};
+    if (name != null && name.trim().isNotEmpty) {
+      payload['name'] = name.trim();
+    }
+    if (slug != null && slug.trim().isNotEmpty) {
+      payload['slug'] = slug.trim();
+    }
+    if (document != null) {
+      payload['document'] = {'type': document.type, 'number': document.number};
+    }
+    if (ownershipState != null) {
+      payload['ownership_state'] = ownershipState.apiValue;
+    }
+    final normalizedPublicationStatus = publicationStatus?.trim();
+    if (normalizedPublicationStatus != null &&
+        normalizedPublicationStatus.isNotEmpty) {
+      payload['publication'] = <String, dynamic>{
+        'status': normalizedPublicationStatus,
+      };
+    }
+    return payload;
+  }
+}

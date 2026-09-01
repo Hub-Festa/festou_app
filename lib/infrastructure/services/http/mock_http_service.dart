@@ -1,0 +1,40 @@
+import 'dart:async';
+
+import 'package:festou_app/domain/map/filters/poi_filter_options.dart';
+import 'package:festou_app/domain/map/map_region_definition.dart';
+import 'package:festou_app/domain/map/queries/poi_query.dart';
+import 'package:festou_app/infrastructure/dal/datasources/mock_poi_database.dart';
+import 'package:festou_app/infrastructure/dal/dto/map/city_poi_dto.dart';
+import 'package:get_it/get_it.dart';
+
+class MockHttpService {
+  MockHttpService({
+    MockPoiDatabase? database,
+    Duration latency = const Duration(milliseconds: 350),
+  }) : this._internal(database ?? GetIt.I.get<MockPoiDatabase>(), latency);
+
+  MockHttpService._internal(this._database, this._latency);
+
+  final MockPoiDatabase _database;
+  final Duration _latency;
+
+  Future<List<CityPoiDTO>> getPois(PoiQuery query) async {
+    await Future<void>.delayed(_latency);
+    return _database.findPois(query: query);
+  }
+
+  Future<PoiFilterOptions> getFilters() async {
+    await Future<void>.delayed(_latency);
+    return _database.availableFilters();
+  }
+
+  Future<List<MapRegionDefinition>> getRegions() async {
+    await Future<void>.delayed(_latency);
+    return _database.availableRegions();
+  }
+
+  Future<String> getFallbackEventImage() async {
+    await Future<void>.delayed(_latency);
+    return _database.eventFallbackImage();
+  }
+}

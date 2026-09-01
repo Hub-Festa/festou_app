@@ -1,0 +1,858 @@
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_settings_repository_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_paged_result.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_settings.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_count_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_discovery_filters_settings_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_lowercase_token_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_required_text_value.dart';
+import 'package:festou_app/infrastructure/dal/dao/http/json_object_response_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/http/raw_json_envelope_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_admin/tenant_admin_domains_request_encoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_admin/tenant_admin_domains_response_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_admin/tenant_admin_settings_request_encoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_admin/tenant_admin_settings_response_decoder.dart';
+import 'package:festou_app/infrastructure/repositories/tenant_admin/tenant_admin_pagination_utils.dart';
+import 'package:festou_app/infrastructure/repositories/tenant_admin/support/tenant_admin_validation_failure_resolver.dart';
+import 'package:dio/dio.dart';
+import 'package:get_it/get_it.dart';
+import 'package:http_parser/http_parser.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+class TenantAdminSettingsRepository
+    extends TenantAdminSettingsRepositoryContract {
+  TenantAdminSettingsRepository({
+    Dio? dio,
+    TenantAdminTenantScopeContract? tenantScope,
+  }) : this._internal(dio ?? Dio(), tenantScope);
+
+  TenantAdminSettingsRepository._internal(this._dio, [this._tenantScope]);
+
+  final Dio _dio;
+  final TenantAdminTenantScopeContract? _tenantScope;
+  final JsonObjectResponseDecoder _jsonObjectResponseDecoder =
+      const JsonObjectResponseDecoder();
+  final RawJsonEnvelopeDecoder _envelopeDecoder =
+      const RawJsonEnvelopeDecoder();
+  final TenantAdminDomainsRequestEncoder _domainsRequestEncoder =
+      const TenantAdminDomainsRequestEncoder();
+  final TenantAdminDomainsResponseDecoder _domainsResponseDecoder =
+      const TenantAdminDomainsResponseDecoder();
+  final TenantAdminSettingsRequestEncoder _requestEncoder =
+      const TenantAdminSettingsRequestEncoder();
+  final TenantAdminSettingsResponseDecoder _responseDecoder =
+      const TenantAdminSettingsResponseDecoder();
+  final StreamValue<TenantAdminBrandingSettings?> _brandingSettingsStreamValue =
+      StreamValue<TenantAdminBrandingSettings?>(defaultValue: null);
+  int _brandingFetchSequence = 0;
+
+  @override
+  StreamValue<TenantAdminBrandingSettings?> get brandingSettingsStreamValue =>
+      _brandingSettingsStreamValue;
+
+  @override
+  void clearBrandingSettings() {
+    _brandingSettingsStreamValue.addValue(null);
+  }
+
+  @override
+  Future<TenantAdminMapUiSettings> fetchMapUiSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeMapUiSettings(
+        response.data,
+        tenantOrigin: _resolveTenantOriginUri(),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load map_ui settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminMapUiSettings> updateMapUiSettings({
+    required TenantAdminMapUiSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'map_ui'),
+        data: _requestEncoder.encodeMapUiSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeMapUiSettings(
+        response.data,
+        tenantOrigin: _resolveTenantOriginUri(),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update map_ui settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminDiscoveryFiltersSettingsValue>
+  fetchDiscoveryFiltersSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeDiscoveryFiltersSettings(
+        response.data,
+        tenantOrigin: _resolveTenantOriginUri(),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load discovery_filters settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminDiscoveryFiltersSettingsValue>
+  updateDiscoveryFiltersSettings({
+    required TenantAdminDiscoveryFiltersSettingsValue settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'discovery_filters'),
+        data: _requestEncoder.encodeDiscoveryFiltersSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeDiscoveryFiltersSettings(
+        response.data,
+        tenantOrigin: _resolveTenantOriginUri(),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update discovery_filters settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminAppLinksSettings> fetchAppLinksSettings() async {
+    try {
+      final settingsFuture = _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      final appDomainIdentifiersFuture = _fetchAppDomainIdentifiers();
+
+      final settingsResponse = await settingsFuture;
+      final appDomainIdentifiers = await appDomainIdentifiersFuture;
+      return _responseDecoder.decodeAppLinksSettings(
+        settingsResponse.data,
+        appDomainIdentifiers: appDomainIdentifiers,
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load app_links settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminAppLinksSettings> updateAppLinksSettings({
+    required TenantAdminAppLinksSettings settings,
+  }) async {
+    try {
+      var appDomainIdentifiers = await _fetchAppDomainIdentifiers();
+      appDomainIdentifiers = await _syncAppDomainIdentifier(
+        platform: 'android',
+        desiredIdentifier: settings.androidAppIdentifier,
+        currentIdentifiers: appDomainIdentifiers,
+      );
+      appDomainIdentifiers = await _syncAppDomainIdentifier(
+        platform: 'ios',
+        desiredIdentifier: settings.iosBundleId,
+        currentIdentifiers: appDomainIdentifiers,
+      );
+
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'app_links'),
+        data: _requestEncoder.encodeAppLinksSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeAppLinksSettings(
+        response.data,
+        appDomainIdentifiers: appDomainIdentifiers,
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update app_links settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminPagedResult<TenantAdminDomainEntry>> fetchDomainsPage({
+    required TenantAdminCountValue page,
+    required TenantAdminCountValue pageSize,
+  }) async {
+    try {
+      final requestUri = _buildTenantDomainsUri().replace(
+        queryParameters: {
+          'page': '${page.value}',
+          'per_page': '${pageSize.value}',
+        },
+      );
+      final response = await _dio.getUri(
+        requestUri,
+        options: Options(headers: _buildHeaders()),
+      );
+      final items = _domainsResponseDecoder.decodeDomainList(response.data);
+      return tenantAdminPagedResultFromRaw(
+        items: items,
+        hasMore: tenantAdminResolveHasMore(
+          rawResponse: response.data,
+          requestedPage: page.value,
+        ),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load domains page');
+    }
+  }
+
+  @override
+  Future<TenantAdminDomainEntry> createDomain({
+    required TenantAdminRequiredTextValue path,
+  }) async {
+    try {
+      final response = await _dio.postUri(
+        _buildTenantDomainsUri(),
+        data: _domainsRequestEncoder.encodeCreate(path: path),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _domainsResponseDecoder.decodeDomainItem(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'create domain');
+    }
+  }
+
+  @override
+  Future<void> deleteDomain(TenantAdminRequiredTextValue domainId) async {
+    try {
+      await _dio.deleteUri(
+        _buildTenantDomainsUri(domainId: domainId.value),
+        options: Options(headers: _buildHeaders()),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'delete domain');
+    }
+  }
+
+  @override
+  Future<String> uploadMapFilterImage({
+    required TenantAdminLowercaseTokenValue key,
+    required TenantAdminMediaUpload upload,
+  }) async {
+    final normalizedKey = key.value.trim();
+    try {
+      final payload = FormData.fromMap({'key': normalizedKey});
+      _appendUpload(payload, fieldName: 'image', upload: upload);
+
+      final response = await _dio.post(
+        '$_apiBaseUrl/v1/media/map-filter-image',
+        data: payload,
+        options: Options(
+          headers: _buildHeaders(),
+          contentType: 'multipart/form-data',
+        ),
+      );
+      return _responseDecoder.decodeMapFilterImageUpload(
+        response.data,
+        key: normalizedKey,
+        tenantOrigin: _resolveTenantOriginUri(),
+      );
+    } on DioException catch (error) {
+      throw _wrapError(error, 'upload map filter image');
+    }
+  }
+
+  String get _apiBaseUrl =>
+      (_tenantScope ?? GetIt.I.get<TenantAdminTenantScopeContract>())
+          .selectedTenantAdminBaseUrl;
+
+  Map<String, String> _buildHeaders() {
+    final token = GetIt.I.get<LandlordAuthRepositoryContract>().token;
+    return {'Authorization': 'Bearer $token', 'Accept': 'application/json'};
+  }
+
+  @override
+  Future<TenantAdminFirebaseSettings?> fetchFirebaseSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantPublicApiUri('/settings/firebase'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeFirebaseSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load firebase settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminFirebaseSettings> updateFirebaseSettings({
+    required TenantAdminFirebaseSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantPublicApiUri('/settings/firebase'),
+        data: _requestEncoder.encodeFirebaseSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      final mapped = _responseDecoder.decodeFirebaseSettings(response.data);
+      if (mapped == null) {
+        throw Exception('Firebase settings response is empty.');
+      }
+      return mapped;
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update firebase settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushSettings> fetchPushSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantPublicApiUri('/settings/push'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load push settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushStatus> fetchPushStatus() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantPublicApiUri('/settings/push/status'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushStatus(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load push status');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushSettings> enablePush() async {
+    try {
+      final response = await _dio.postUri(
+        _buildTenantPublicApiUri('/settings/push/enable'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'enable push');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushSettings> disablePush() async {
+    try {
+      final response = await _dio.postUri(
+        _buildTenantPublicApiUri('/settings/push/disable'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'disable push');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushCredentials?> fetchPushCredentials() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantPublicApiUri('/settings/push/credentials'),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushCredentials(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load push credentials');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushCredentials> upsertPushCredentials({
+    required TenantAdminPushCredentials credentials,
+  }) async {
+    try {
+      final response = await _dio.putUri(
+        _buildTenantPublicApiUri('/settings/push/credentials'),
+        data: _requestEncoder.encodePushCredentialsUpsert(credentials),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushCredentialItem(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'save push credentials');
+    }
+  }
+
+  @override
+  Future<TenantAdminResendEmailSettings> fetchResendEmailSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeResendEmailSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load resend_email settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminResendEmailSettings> updateResendEmailSettings({
+    required TenantAdminResendEmailSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'resend_email'),
+        data: _requestEncoder.encodeResendEmailSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeResendEmailSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update resend_email settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminOutboundIntegrationsSettings>
+  fetchOutboundIntegrationsSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeOutboundIntegrationsSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load outbound_integrations settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminOutboundIntegrationsSettings>
+  updateOutboundIntegrationsSettings({
+    required TenantAdminOutboundIntegrationsSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'outbound_integrations'),
+        data: _requestEncoder.encodeOutboundIntegrationsSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeOutboundIntegrationsSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update outbound_integrations settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminPhoneOtpReviewAccessSettings>
+  fetchPhoneOtpReviewAccessSettings() async {
+    try {
+      final response = await _dio.getUri(
+        _buildTenantSettingsValuesUri(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePhoneOtpReviewAccessSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load phone_otp_review_access settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminPhoneOtpReviewAccessSettings>
+  updatePhoneOtpReviewAccessSettings({
+    required TenantAdminPhoneOtpReviewAccessSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantSettingsValuesUri(namespace: 'phone_otp_review_access'),
+        data: _requestEncoder.encodePhoneOtpReviewAccessSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePhoneOtpReviewAccessSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update phone_otp_review_access settings');
+    }
+  }
+
+  @override
+  Future<String> generatePhoneOtpReviewAccessCodeHash({
+    required TenantAdminRequiredTextValue code,
+  }) async {
+    try {
+      final response = await _dio.postUri(
+        _buildTenantSettingsValuesNamespaceActionUri(
+          namespace: 'phone_otp_review_access',
+          action: 'hash',
+        ),
+        data: _requestEncoder.encodePhoneOtpReviewAccessCodeHashRequest(
+          code: code,
+        ),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePhoneOtpReviewAccessCodeHash(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'generate phone_otp_review_access code hash');
+    }
+  }
+
+  @override
+  Future<TenantAdminPushSettings> updatePushSettings({
+    required TenantAdminPushSettings settings,
+  }) async {
+    try {
+      final response = await _dio.patchUri(
+        _buildTenantPublicApiUri('/settings/push'),
+        data: _requestEncoder.encodePushSettingsPatch(settings),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodePushSettings(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update push settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminTelemetrySettingsSnapshot> fetchTelemetrySettings() async {
+    try {
+      final response = await _dio.get(
+        '$_apiBaseUrl/v1/settings/telemetry',
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeTelemetrySnapshot(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load telemetry settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminTelemetrySettingsSnapshot> upsertTelemetryIntegration({
+    required TenantAdminTelemetryIntegration integration,
+  }) async {
+    try {
+      final response = await _dio.post(
+        '$_apiBaseUrl/v1/settings/telemetry',
+        data: integration.toUpsertPayload(),
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeTelemetrySnapshot(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'save telemetry integration');
+    }
+  }
+
+  @override
+  Future<TenantAdminTelemetrySettingsSnapshot> deleteTelemetryIntegration({
+    required TenantAdminLowercaseTokenValue type,
+  }) async {
+    try {
+      final encodedType = Uri.encodeComponent(type.value.trim());
+      final response = await _dio.delete(
+        '$_apiBaseUrl/v1/settings/telemetry/$encodedType',
+        options: Options(headers: _buildHeaders()),
+      );
+      return _responseDecoder.decodeTelemetrySnapshot(response.data);
+    } on DioException catch (error) {
+      throw _wrapError(error, 'delete telemetry integration');
+    }
+  }
+
+  @override
+  Future<TenantAdminBrandingSettings> fetchBrandingSettings() async {
+    final requestedApiBaseUrl = _apiBaseUrl;
+    final requestSequence = ++_brandingFetchSequence;
+    try {
+      final response = await _dio.getUri(
+        _buildEnvironmentEndpointUri(apiBaseUrl: requestedApiBaseUrl),
+        options: Options(headers: _buildBrandingReadHeaders()),
+      );
+      final payload = _envelopeDecoder.decodeEnvironmentMap(
+        _jsonObjectResponseDecoder.decode(
+          response.data,
+          endpoint: response.requestOptions.uri,
+        ),
+        label: 'environment',
+      );
+      final settings = _responseDecoder.decodeBrandingFromEnvironment(
+        payload,
+        tenantOrigin: _resolveTenantOriginUri(apiBaseUrl: requestedApiBaseUrl),
+      );
+      if (_shouldPublishBrandingResponse(
+        requestSequence: requestSequence,
+        requestedApiBaseUrl: requestedApiBaseUrl,
+      )) {
+        _brandingSettingsStreamValue.addValue(settings);
+      }
+      return settings;
+    } on DioException catch (error) {
+      throw _wrapError(error, 'load branding settings');
+    }
+  }
+
+  @override
+  Future<TenantAdminBrandingSettings> updateBranding({
+    required TenantAdminBrandingUpdateInput input,
+  }) async {
+    final requestedApiBaseUrl = _apiBaseUrl;
+    try {
+      final payload = FormData.fromMap({
+        'name': input.tenantName.trim(),
+        'theme_data_settings[brightness_default]':
+            input.brightnessDefault.rawValue,
+        'theme_data_settings[primary_seed_color]': input.primarySeedColor,
+        'theme_data_settings[secondary_seed_color]': input.secondarySeedColor,
+        'public_web_metadata[default_title]':
+            input.publicWebDefaultTitle?.trim() ?? '',
+        'public_web_metadata[default_description]':
+            input.publicWebDefaultDescription?.trim() ?? '',
+      });
+
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[light_logo_uri]',
+        upload: input.lightLogoUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[dark_logo_uri]',
+        upload: input.darkLogoUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[light_icon_uri]',
+        upload: input.lightIconUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[dark_icon_uri]',
+        upload: input.darkIconUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[favicon_uri]',
+        upload: input.faviconUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'logo_settings[pwa_icon]',
+        upload: input.pwaIconUpload,
+      );
+      _appendUpload(
+        payload,
+        fieldName: 'public_web_metadata[default_image]',
+        upload: input.publicWebDefaultImageUpload,
+      );
+
+      final response = await _dio.post(
+        '$requestedApiBaseUrl/v1/branding/update',
+        data: payload,
+        options: Options(
+          headers: _buildHeaders(),
+          contentType: 'multipart/form-data',
+        ),
+      );
+      if (response.statusCode != null && response.statusCode! >= 400) {
+        throw Exception(
+          'Failed to update branding settings [status=${response.statusCode}]',
+        );
+      }
+      return await fetchBrandingSettings();
+    } on DioException catch (error) {
+      throw _wrapError(error, 'update branding settings');
+    }
+  }
+
+  Uri _buildEnvironmentEndpointUri({String? apiBaseUrl}) {
+    final origin = _resolveTenantOriginUri(apiBaseUrl: apiBaseUrl);
+    return origin.replace(
+      path: '/api/v1/environment',
+      queryParameters: {
+        '_ts': DateTime.now().microsecondsSinceEpoch.toString(),
+      },
+    );
+  }
+
+  Uri _buildTenantPublicApiUri(String path) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    return _resolveTenantOriginUri().replace(path: '/api/v1$normalizedPath');
+  }
+
+  Uri _buildTenantSettingsValuesUri({String? namespace}) {
+    final origin = _resolveTenantOriginUri();
+    final encodedNamespace = namespace == null || namespace.trim().isEmpty
+        ? null
+        : Uri.encodeComponent(namespace.trim());
+    final path = encodedNamespace == null
+        ? '/admin/api/v1/settings/values'
+        : '/admin/api/v1/settings/values/$encodedNamespace';
+    return origin.replace(path: path);
+  }
+
+  Uri _buildTenantSettingsValuesNamespaceActionUri({
+    required String namespace,
+    required String action,
+  }) {
+    final origin = _resolveTenantOriginUri();
+    final encodedNamespace = Uri.encodeComponent(namespace.trim());
+    final encodedAction = Uri.encodeComponent(action.trim());
+    return origin.replace(
+      path: '/admin/api/v1/settings/values/$encodedNamespace/$encodedAction',
+    );
+  }
+
+  Uri _buildTenantAppDomainsUri() {
+    final origin = _resolveTenantOriginUri();
+    return origin.replace(path: '/admin/api/v1/appdomains');
+  }
+
+  Uri _buildTenantDomainsUri({String? domainId}) {
+    final origin = _resolveTenantOriginUri();
+    final encodedDomainId = domainId == null || domainId.trim().isEmpty
+        ? null
+        : Uri.encodeComponent(domainId.trim());
+    final path = switch (encodedDomainId) {
+      null => '/admin/api/v1/domains',
+      final id => '/admin/api/v1/domains/$id',
+    };
+    return origin.replace(path: path);
+  }
+
+  Uri _resolveTenantOriginUri({String? apiBaseUrl}) {
+    final adminBaseUri = _parseToOriginUri(apiBaseUrl ?? _apiBaseUrl);
+    if (adminBaseUri != null) {
+      return adminBaseUri;
+    }
+    throw Exception(
+      'Could not resolve tenant-scoped admin origin for branding settings.',
+    );
+  }
+
+  bool _shouldPublishBrandingResponse({
+    required int requestSequence,
+    required String requestedApiBaseUrl,
+  }) {
+    if (requestSequence != _brandingFetchSequence) {
+      return false;
+    }
+    return _isBrandingScopeCurrent(requestedApiBaseUrl);
+  }
+
+  bool _isBrandingScopeCurrent(String requestedApiBaseUrl) {
+    return requestedApiBaseUrl == _apiBaseUrl;
+  }
+
+  Uri? _parseToOriginUri(String? raw) {
+    final trimmed = raw?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    final normalized = trimmed.contains('://') ? trimmed : 'https://$trimmed';
+    final parsed = Uri.tryParse(normalized);
+    if (parsed == null || parsed.host.trim().isEmpty) {
+      return null;
+    }
+    return Uri(
+      scheme: parsed.scheme.isEmpty ? 'https' : parsed.scheme,
+      host: parsed.host.trim(),
+      port: parsed.hasPort ? parsed.port : null,
+    );
+  }
+
+  Map<String, String> _buildBrandingReadHeaders() {
+    return {'Accept': 'application/json'};
+  }
+
+  void _appendUpload(
+    FormData formData, {
+    required String fieldName,
+    required TenantAdminMediaUpload? upload,
+  }) {
+    if (upload == null) {
+      return;
+    }
+    formData.files.add(
+      MapEntry(
+        fieldName,
+        MultipartFile.fromBytes(
+          upload.bytes,
+          filename: upload.fileName,
+          contentType: _resolveMediaType(upload),
+        ),
+      ),
+    );
+  }
+
+  MediaType _resolveMediaType(TenantAdminMediaUpload upload) {
+    final mime = upload.mimeType?.trim();
+    if (mime == null || mime.isEmpty) {
+      return MediaType('application', 'octet-stream');
+    }
+    final parts = mime.split('/');
+    if (parts.length != 2) {
+      return MediaType('application', 'octet-stream');
+    }
+    return MediaType(parts[0], parts[1]);
+  }
+
+  Exception _wrapError(DioException error, String label) {
+    return tenantAdminWrapRepositoryError(error, label);
+  }
+
+  Future<TenantAdminAppDomainIdentifiers> _fetchAppDomainIdentifiers() async {
+    final response = await _dio.getUri(
+      _buildTenantAppDomainsUri(),
+      options: Options(headers: _buildHeaders()),
+    );
+    return _responseDecoder.decodeAppDomainIdentifiers(response.data);
+  }
+
+  Future<TenantAdminAppDomainIdentifiers> _syncAppDomainIdentifier({
+    required String platform,
+    required String? desiredIdentifier,
+    required TenantAdminAppDomainIdentifiers currentIdentifiers,
+  }) async {
+    final normalizedDesired = desiredIdentifier?.trim();
+    final current = platform == 'android'
+        ? currentIdentifiers.androidAppIdentifier
+        : currentIdentifiers.iosBundleId;
+
+    if (normalizedDesired == null || normalizedDesired.isEmpty) {
+      if (current == null || current.trim().isEmpty) {
+        return currentIdentifiers;
+      }
+      return _removeAppDomainIdentifier(platform: platform);
+    }
+
+    return _upsertAppDomainIdentifier(
+      platform: platform,
+      identifier: normalizedDesired,
+    );
+  }
+
+  Future<TenantAdminAppDomainIdentifiers> _upsertAppDomainIdentifier({
+    required String platform,
+    required String identifier,
+  }) async {
+    final response = await _dio.postUri(
+      _buildTenantAppDomainsUri(),
+      data: {'platform': platform, 'identifier': identifier},
+      options: Options(headers: _buildHeaders()),
+    );
+    return _responseDecoder.decodeAppDomainIdentifiers(response.data);
+  }
+
+  Future<TenantAdminAppDomainIdentifiers> _removeAppDomainIdentifier({
+    required String platform,
+  }) async {
+    final response = await _dio.deleteUri(
+      _buildTenantAppDomainsUri(),
+      data: {'platform': platform},
+      options: Options(headers: _buildHeaders()),
+    );
+    return _responseDecoder.decodeAppDomainIdentifiers(response.data);
+  }
+}

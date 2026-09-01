@@ -1,0 +1,4930 @@
+export 'tenant_admin_event_form_state.dart';
+export 'tenant_admin_event_type_form_state.dart';
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:festou_app/application/rich_text/safe_rich_html.dart';
+import 'package:festou_app/application/time/timezone_converter.dart';
+import 'package:festou_app/application/tenant_admin/discovery_filters/tenant_admin_taxonomies_sequential_batch_terms_repository.dart';
+import 'package:festou_app/application/tenant_admin/events/tenant_admin_event_account_profile_candidates_page_loader.dart';
+import 'package:festou_app/application/tenant_admin/events/tenant_admin_event_occurrence_group_members_page_loader.dart';
+import 'package:belluga_form_validation/belluga_form_validation.dart';
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_account_profiles_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_taxonomies_repository_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile_candidate_selection_summary.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_event.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_event_account_profile_candidate_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_event_temporal_bucket.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_legacy_event_parties_summary.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_group_member_mutation_result.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_group_member_page.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_paged_result.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_poi_visual.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_definition.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_term_definition.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_unknown_mutation_failure.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_account_profile_id_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_hex_color_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_url_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_required_text_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_value_parsers.dart';
+import 'package:festou_app/presentation/tenant_admin/events/controllers/tenant_admin_event_form_state.dart';
+import 'package:festou_app/presentation/tenant_admin/events/models/tenant_admin_event_form_validation_config.dart';
+import 'package:festou_app/presentation/tenant_admin/events/controllers/tenant_admin_event_type_form_state.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_image_ingestion_service.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_nested_profile_group_operations.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/models/tenant_admin_group_label_mutation_state.dart';
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart' show Disposable, GetIt;
+import 'package:image_picker/image_picker.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+enum _TenantAdminEventFormDependencyMode { full, bootstrapCreate }
+
+class TenantAdminEventsController implements Disposable {
+  TenantAdminEventsController({
+    TenantAdminEventsRepositoryContract? eventsRepository,
+    TenantAdminAccountProfilesRepositoryContract? accountProfilesRepository,
+    TenantAdminTaxonomiesRepositoryContract? taxonomiesRepository,
+    TenantAdminTaxonomiesScopedLookupRepositoryContract?
+    taxonomiesScopedLookupRepository,
+    TenantAdminTaxonomiesBatchTermsRepositoryContract? batchTermsRepository,
+    TenantAdminTenantScopeContract? tenantScope,
+    LandlordAuthRepositoryContract? landlordAuthRepository,
+    TenantAdminImageIngestionService? imageIngestionService,
+    TenantAdminEventOccurrenceGroupMembersPageLoader?
+    occurrenceGroupMembersPageLoader,
+  }) : _eventsRepository =
+           eventsRepository ??
+           GetIt.I.get<TenantAdminEventsRepositoryContract>(),
+       _taxonomiesRepository =
+           taxonomiesRepository ??
+           GetIt.I.get<TenantAdminTaxonomiesRepositoryContract>(),
+       _accountProfilesRepository =
+           accountProfilesRepository ??
+           (GetIt.I.isRegistered<TenantAdminAccountProfilesRepositoryContract>()
+               ? GetIt.I.get<TenantAdminAccountProfilesRepositoryContract>()
+               : null),
+       _taxonomiesScopedLookupRepository =
+           _resolveTaxonomiesScopedLookupRepository(
+             taxonomiesRepository:
+                 taxonomiesRepository ??
+                 GetIt.I.get<TenantAdminTaxonomiesRepositoryContract>(),
+             scopedLookupRepository: taxonomiesScopedLookupRepository,
+           ),
+       _batchTermsRepository = _resolveBatchTermsRepository(
+         taxonomiesRepository:
+             taxonomiesRepository ??
+             GetIt.I.get<TenantAdminTaxonomiesRepositoryContract>(),
+         batchTermsRepository: batchTermsRepository,
+       ),
+       _tenantScope =
+           tenantScope ??
+           (GetIt.I.isRegistered<TenantAdminTenantScopeContract>()
+               ? GetIt.I.get<TenantAdminTenantScopeContract>()
+               : null),
+       _landlordAuthRepository =
+           landlordAuthRepository ??
+           (GetIt.I.isRegistered<LandlordAuthRepositoryContract>()
+               ? GetIt.I.get<LandlordAuthRepositoryContract>()
+               : null),
+       _imageIngestionService =
+           imageIngestionService ??
+           (GetIt.I.isRegistered<TenantAdminImageIngestionService>()
+               ? GetIt.I.get<TenantAdminImageIngestionService>()
+               : TenantAdminImageIngestionService()),
+       _occurrenceGroupMembersPageLoader =
+           occurrenceGroupMembersPageLoader ??
+           TenantAdminEventOccurrenceGroupMembersPageLoader(
+             eventsRepository:
+                 eventsRepository ??
+                 GetIt.I.get<TenantAdminEventsRepositoryContract>(),
+           ) {
+    _bindTenantScope();
+    _bindRepositoryStreams();
+    _bindAccountProfilePickerScroll();
+    _bindEventValidationListeners();
+  }
+
+  static const Object _undefinedDateTime = Object();
+
+  final TenantAdminEventsRepositoryContract _eventsRepository;
+  final TenantAdminAccountProfilesRepositoryContract?
+  _accountProfilesRepository;
+  final TenantAdminTaxonomiesRepositoryContract _taxonomiesRepository;
+  final TenantAdminTaxonomiesScopedLookupRepositoryContract?
+  _taxonomiesScopedLookupRepository;
+  final TenantAdminTaxonomiesBatchTermsRepositoryContract _batchTermsRepository;
+  final TenantAdminTenantScopeContract? _tenantScope;
+  final LandlordAuthRepositoryContract? _landlordAuthRepository;
+  final TenantAdminImageIngestionService _imageIngestionService;
+  final TenantAdminEventOccurrenceGroupMembersPageLoader
+  _occurrenceGroupMembersPageLoader;
+
+  static TenantAdminTaxonomiesScopedLookupRepositoryContract?
+  _resolveTaxonomiesScopedLookupRepository({
+    required TenantAdminTaxonomiesRepositoryContract taxonomiesRepository,
+    TenantAdminTaxonomiesScopedLookupRepositoryContract? scopedLookupRepository,
+  }) {
+    if (scopedLookupRepository != null) {
+      return scopedLookupRepository;
+    }
+    final Object scopedRepository = taxonomiesRepository;
+    if (scopedRepository
+        is TenantAdminTaxonomiesScopedLookupRepositoryContract) {
+      return scopedRepository;
+    }
+    if (GetIt.I
+        .isRegistered<TenantAdminTaxonomiesScopedLookupRepositoryContract>()) {
+      return GetIt.I.get<TenantAdminTaxonomiesScopedLookupRepositoryContract>();
+    }
+
+    return null;
+  }
+
+  static TenantAdminTaxonomiesBatchTermsRepositoryContract
+  _resolveBatchTermsRepository({
+    required TenantAdminTaxonomiesRepositoryContract taxonomiesRepository,
+    TenantAdminTaxonomiesBatchTermsRepositoryContract? batchTermsRepository,
+  }) {
+    if (batchTermsRepository != null) {
+      return batchTermsRepository;
+    }
+    final Object batchRepository = taxonomiesRepository;
+    if (batchRepository is TenantAdminTaxonomiesBatchTermsRepositoryContract) {
+      return batchRepository;
+    }
+    if (GetIt.I
+        .isRegistered<TenantAdminTaxonomiesBatchTermsRepositoryContract>()) {
+      return GetIt.I.get<TenantAdminTaxonomiesBatchTermsRepositoryContract>();
+    }
+
+    return TenantAdminTaxonomiesSequentialBatchTermsRepository(
+      taxonomiesRepository,
+    );
+  }
+
+  StreamValue<List<TenantAdminEvent>?> get eventsStreamValue =>
+      _eventsRepository.eventsStreamValue;
+  final StreamValue<bool> hasMoreEventsStreamValue = StreamValue<bool>(
+    defaultValue: true,
+  );
+  final StreamValue<bool> isEventsPageLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final StreamValue<String?> eventsErrorStreamValue = StreamValue<String?>();
+
+  final StreamValue<DateTime?> specificDateFilterStreamValue =
+      StreamValue<DateTime?>(defaultValue: null);
+  final StreamValue<TenantAdminAccountProfile?> venueFilterStreamValue =
+      StreamValue<TenantAdminAccountProfile?>(defaultValue: null);
+  final StreamValue<TenantAdminAccountProfile?>
+  relatedAccountProfileFilterStreamValue =
+      StreamValue<TenantAdminAccountProfile?>(defaultValue: null);
+  final StreamValue<String> publicationStatusFilterStreamValue =
+      StreamValue<String>(defaultValue: 'published');
+  final StreamValue<Set<TenantAdminEventTemporalBucket>>
+  temporalFilterStreamValue = StreamValue<Set<TenantAdminEventTemporalBucket>>(
+    defaultValue: TenantAdminEventTemporalBucket.defaultSelection,
+  );
+
+  final StreamValue<bool> submitLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final StreamValue<bool> occurrenceProfileGroupMutationBusyStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<String?> submitErrorMessageStreamValue =
+      StreamValue<String?>();
+  final StreamValue<String?> submitSuccessMessageStreamValue =
+      StreamValue<String?>();
+  final StreamValue<List<TenantAdminEventType>> eventTypeCatalogStreamValue =
+      StreamValue<List<TenantAdminEventType>>(defaultValue: const []);
+
+  final StreamValue<List<TenantAdminTaxonomyDefinition>> taxonomiesStreamValue =
+      StreamValue<List<TenantAdminTaxonomyDefinition>>(defaultValue: const []);
+
+  final StreamValue<Map<String, List<TenantAdminTaxonomyTermDefinition>>>
+  taxonomyTermsBySlugStreamValue =
+      StreamValue<Map<String, List<TenantAdminTaxonomyTermDefinition>>>(
+        defaultValue: const {},
+      );
+
+  final StreamValue<bool> taxonomyLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final StreamValue<String?> taxonomyErrorStreamValue = StreamValue<String?>();
+  final Map<String, TenantAdminTaxonomyDefinition>
+  _taxonomyDefinitionsCacheBySlug = <String, TenantAdminTaxonomyDefinition>{};
+  final Map<String, List<TenantAdminTaxonomyTermDefinition>>
+  _taxonomyTermsCacheBySlug =
+      <String, List<TenantAdminTaxonomyTermDefinition>>{};
+  int _taxonomyDefinitionsLoadSerial = 0;
+  String? _loadedTaxonomyTermsKey;
+  String? _loadingTaxonomyTermsKey;
+  int _taxonomyTermsLoadSerial = 0;
+  String? _eventTypeTaxonomyFallbackSlug;
+  Set<String> _eventTypeTaxonomyFallbackAllowedSlugs = const <String>{};
+
+  final StreamValue<List<TenantAdminAccountProfile>>
+  venueCandidatesStreamValue = StreamValue<List<TenantAdminAccountProfile>>(
+    defaultValue: const [],
+  );
+  final StreamValue<List<TenantAdminAccountProfile>>
+  relatedAccountProfileCandidatesStreamValue =
+      StreamValue<List<TenantAdminAccountProfile>>(defaultValue: const []);
+  final StreamValue<List<TenantAdminProfileTypeDefinition>>
+  relatedAccountProfileTypesStreamValue =
+      StreamValue<List<TenantAdminProfileTypeDefinition>>(
+        defaultValue: const [],
+      );
+  final StreamValue<String?> relatedAccountProfileSelectedTypeStreamValue =
+      StreamValue<String?>(defaultValue: null);
+  final StreamValue<List<TenantAdminAccountProfile>>
+  accountProfilePickerResultsStreamValue =
+      StreamValue<List<TenantAdminAccountProfile>>(defaultValue: const []);
+  final StreamValue<bool> accountProfilePickerLoadingStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<bool> accountProfilePickerPageLoadingStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<bool> accountProfilePickerHasMoreStreamValue =
+      StreamValue<bool>(defaultValue: true);
+  final StreamValue<String> accountProfilePickerErrorStreamValue =
+      StreamValue<String>(defaultValue: '');
+  final StreamValue<String> accountProfilePickerQueryStreamValue =
+      StreamValue<String>(defaultValue: '');
+  final StreamValue<bool> accountProfileCandidatesLoadingStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<String?> accountProfileCandidatesErrorStreamValue =
+      StreamValue<String?>();
+
+  StreamValue<List<TenantAdminAccountProfile>>
+  get relatedAccountProfileSearchResultsStreamValue =>
+      accountProfilePickerResultsStreamValue;
+  StreamValue<bool> get relatedAccountProfileSearchLoadingStreamValue =>
+      accountProfilePickerLoadingStreamValue;
+  StreamValue<bool> get relatedAccountProfileSearchPageLoadingStreamValue =>
+      accountProfilePickerPageLoadingStreamValue;
+  StreamValue<bool> get relatedAccountProfileSearchHasMoreStreamValue =>
+      accountProfilePickerHasMoreStreamValue;
+  StreamValue<String> get relatedAccountProfileSearchErrorStreamValue =>
+      accountProfilePickerErrorStreamValue;
+  StreamValue<String> get relatedAccountProfileSearchQueryStreamValue =>
+      accountProfilePickerQueryStreamValue;
+
+  final ScrollController eventsScrollController = ScrollController();
+  final ScrollController accountProfilePickerScrollController =
+      ScrollController();
+  ScrollController get relatedAccountProfileSearchScrollController =>
+      accountProfilePickerScrollController;
+
+  final GlobalKey<FormState> eventFormKey = GlobalKey<FormState>();
+  final TextEditingController accountProfilePickerSearchController =
+      TextEditingController();
+  TextEditingController get relatedAccountProfileSearchController =>
+      accountProfilePickerSearchController;
+  final TextEditingController eventTitleController = TextEditingController();
+  final TextEditingController eventContentController = TextEditingController();
+  final TextEditingController eventStartController = TextEditingController();
+  final TextEditingController eventEndController = TextEditingController();
+  final TextEditingController eventPublishAtController =
+      TextEditingController();
+  final TextEditingController eventOnlineUrlController =
+      TextEditingController();
+  final TextEditingController eventOnlinePlatformController =
+      TextEditingController();
+  final StreamValue<XFile?> eventCoverFileStreamValue = StreamValue<XFile?>(
+    defaultValue: null,
+  );
+  final StreamValue<bool> eventCoverBusyStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final StreamValue<bool> eventCoverRemoveStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+
+  final StreamValue<TenantAdminEventFormState> eventFormStateStreamValue =
+      StreamValue<TenantAdminEventFormState>(
+        defaultValue: TenantAdminEventFormState.initial(),
+      );
+  final FormValidationControllerAdapter eventValidationController =
+      FormValidationControllerAdapter(
+        config: tenantAdminEventFormValidationConfig,
+      );
+
+  final GlobalKey<FormState> eventTypeFormKey = GlobalKey<FormState>();
+  final TextEditingController eventTypeNameController = TextEditingController();
+  final TextEditingController eventTypeSlugController = TextEditingController();
+  final TextEditingController eventTypeDescriptionController =
+      TextEditingController();
+  StreamValue<FormValidationState> get eventValidationStreamValue =>
+      eventValidationController.stateStreamValue;
+  final StreamValue<TenantAdminPoiVisualMode>
+  eventTypePoiVisualModeStreamValue = StreamValue<TenantAdminPoiVisualMode>(
+    defaultValue: TenantAdminPoiVisualMode.icon,
+  );
+  final StreamValue<TenantAdminPoiVisualImageSource>
+  eventTypePoiVisualImageSourceStreamValue =
+      StreamValue<TenantAdminPoiVisualImageSource>(
+        defaultValue: TenantAdminPoiVisualImageSource.cover,
+      );
+  final TextEditingController eventTypePoiVisualIconController =
+      TextEditingController();
+  final TextEditingController eventTypePoiVisualColorController =
+      TextEditingController();
+  final TextEditingController eventTypePoiVisualIconColorController =
+      TextEditingController();
+  final StreamValue<XFile?> eventTypeTypeAssetFileStreamValue =
+      StreamValue<XFile?>(defaultValue: null);
+  final StreamValue<String> eventTypeTypeAssetUrlStreamValue =
+      StreamValue<String>(defaultValue: '');
+  final StreamValue<bool> eventTypeRemoveTypeAssetStreamValue =
+      StreamValue<bool>(defaultValue: false);
+
+  final StreamValue<TenantAdminEventTypeFormState>
+  eventTypeFormStateStreamValue = StreamValue<TenantAdminEventTypeFormState>(
+    defaultValue: TenantAdminEventTypeFormState.initial(),
+  );
+  final StreamValue<List<String>> eventTypeAllowedTaxonomiesStreamValue =
+      StreamValue<List<String>>(defaultValue: const []);
+
+  bool _isDisposed = false;
+  final Map<String, StreamValue<TenantAdminGroupLabelMutationState>>
+  _occurrenceGroupLabelStates = {};
+
+  String _occurrenceGroupLabelKey(
+    String eventId,
+    String occurrenceId,
+    String groupId,
+  ) {
+    final tenantScope = _lastTenantDomain ?? 'unscoped';
+    return 'event_occurrence::$tenantScope::$eventId::$occurrenceId::$groupId';
+  }
+
+  StreamValue<TenantAdminGroupLabelMutationState> occurrenceGroupLabelState({
+    required String eventId,
+    required String occurrenceId,
+    required String groupId,
+    required String label,
+  }) => _occurrenceGroupLabelStates.putIfAbsent(
+    _occurrenceGroupLabelKey(eventId, occurrenceId, groupId),
+    () => StreamValue<TenantAdminGroupLabelMutationState>(
+      defaultValue: TenantAdminGroupLabelMutationState(draft: label),
+    ),
+  );
+
+  void _clearOccurrenceGroupLabelStates() {
+    for (final state in _occurrenceGroupLabelStates.values) {
+      state.dispose();
+    }
+    _occurrenceGroupLabelStates.clear();
+  }
+
+  void beginOccurrenceGroupLabelEdit({
+    required String eventId,
+    required String occurrenceId,
+    required String groupId,
+    required String label,
+  }) {
+    final state = occurrenceGroupLabelState(
+      eventId: eventId,
+      occurrenceId: occurrenceId,
+      groupId: groupId,
+      label: label,
+    );
+    state.addValue(
+      TenantAdminGroupLabelMutationState(
+        draft: state.value.draft,
+        isEditing: true,
+      ),
+    );
+  }
+
+  void changeOccurrenceGroupLabelDraft({
+    required String eventId,
+    required String occurrenceId,
+    required String groupId,
+    required String label,
+  }) {
+    final state = occurrenceGroupLabelState(
+      eventId: eventId,
+      occurrenceId: occurrenceId,
+      groupId: groupId,
+      label: label,
+    );
+    state.addValue(
+      TenantAdminGroupLabelMutationState(draft: label, isEditing: true),
+    );
+  }
+
+  Future<void> saveOccurrenceGroupLabel({
+    required String eventId,
+    required String occurrenceId,
+    required String occurrenceKey,
+    required String groupId,
+    required String authoritativeLabel,
+  }) async {
+    final key = _occurrenceGroupLabelKey(eventId, occurrenceId, groupId);
+    final state = occurrenceGroupLabelState(
+      eventId: eventId,
+      occurrenceId: occurrenceId,
+      groupId: groupId,
+      label: authoritativeLabel,
+    );
+    bool isCurrentState() => identical(_occurrenceGroupLabelStates[key], state);
+    if (state.value.isLoading) return;
+    final label = state.value.draft.trim();
+    if (label == authoritativeLabel.trim()) {
+      state.addValue(
+        TenantAdminGroupLabelMutationState(draft: authoritativeLabel),
+      );
+      return;
+    }
+    if (label.isEmpty) {
+      state.addValue(
+        TenantAdminGroupLabelMutationState(
+          draft: state.value.draft,
+          isEditing: true,
+          errorText: 'Nome da aba é obrigatório.',
+        ),
+      );
+      return;
+    }
+    if (label.length > TenantAdminGroupLabelMutationState.maxLabelLength) {
+      state.addValue(
+        TenantAdminGroupLabelMutationState(
+          draft: state.value.draft,
+          isEditing: true,
+          errorText: 'Nome da aba deve ter no máximo 255 caracteres.',
+        ),
+      );
+      return;
+    }
+    state.addValue(
+      TenantAdminGroupLabelMutationState(
+        draft: label,
+        isEditing: true,
+        isLoading: true,
+      ),
+    );
+    try {
+      final result = await _eventsRepository.patchOccurrenceProfileGroupLabel(
+        eventId: _toEventsText(eventId),
+        occurrenceId: _toEventsText(occurrenceId),
+        groupId: _toEventsText(groupId),
+        label: _toEventsText(label),
+      );
+      if (_isDisposed || !isCurrentState()) {
+        return;
+      }
+      if (result.id != groupId) {
+        throw const FormatException(
+          'Occurrence group label response id mismatch.',
+        );
+      }
+      _replaceOccurrenceByKey(
+        occurrenceKey,
+        (occurrence) => _copyOccurrence(
+          occurrence,
+          profileGroups: occurrence.profileGroups
+              .map(
+                (entry) => entry.id == groupId
+                    ? entry.copyWith(
+                        labelValue: TenantAdminNestedProfileGroupTextValue(
+                          result.label,
+                        ),
+                      )
+                    : entry,
+              )
+              .toList(growable: false),
+        ),
+        sort: false,
+      );
+      state.addValue(TenantAdminGroupLabelMutationState(draft: result.label));
+    } on TenantAdminUnknownMutationFailure {
+      if (!_isDisposed && isCurrentState()) {
+        state.addValue(
+          TenantAdminGroupLabelMutationState(
+            draft: label,
+            isEditing: true,
+            errorText:
+                'Não foi possível confirmar o salvamento. Tente novamente.',
+          ),
+        );
+      }
+    } catch (error) {
+      if (!_isDisposed && isCurrentState()) {
+        state.addValue(
+          TenantAdminGroupLabelMutationState(
+            draft: label,
+            isEditing: true,
+            errorText: _describeGroupLabelError(
+              error,
+              'Não foi possível salvar o grupo.',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  bool _eventValidationListenersBound = false;
+  bool _submitInFlight = false;
+  bool _isFetchingAccountProfilePickerPage = false;
+  bool _hasPendingAccountProfilePickerReload = false;
+  bool _pendingInitialRichContentBaselineRefresh = false;
+  StreamSubscription<String?>? _tenantScopeSubscription;
+  StreamSubscription<TenantAdminEventsRepoBool>? _hasMoreEventsSubscription;
+  StreamSubscription<TenantAdminEventsRepoBool>?
+  _isEventsPageLoadingSubscription;
+  StreamSubscription<TenantAdminEventsRepoString?>? _eventsErrorSubscription;
+  String? _lastTenantDomain;
+  VoidCallback? _eventTypeNameSyncListener;
+  Timer? _accountProfilePickerDebounce;
+  String? _accountProfilePickerAccountSlug;
+  String? _formAccountProfileCandidatesAccountSlug;
+  TenantAdminPagedResult<TenantAdminAccountProfile>?
+  _bootstrapVenueCandidatesPage;
+  TenantAdminPagedResult<TenantAdminAccountProfile>?
+  _bootstrapRelatedAccountProfileCandidatesPage;
+  int _accountProfilePickerCurrentPage = 0;
+  int _accountProfilePickerRequestToken = 0;
+  int _formDependenciesLoadSerial = 0;
+  _TenantAdminEventFormDependencyMode _formDependencyMode =
+      _TenantAdminEventFormDependencyMode.full;
+  int _eventFormLocalIdSerial = 0;
+  String? _eventFormInitialFingerprint;
+  TenantAdminEventAccountProfileCandidateType? _accountProfilePickerType;
+  String? _relatedAccountProfileSelectedType;
+  List<String> _initialEventTypeAllowedTaxonomies = const <String>[];
+
+  String? get relatedAccountProfileSelectedType =>
+      _relatedAccountProfileSelectedType;
+
+  static const Duration _accountProfilePickerDebounceDuration = Duration(
+    milliseconds: 300,
+  );
+  void _bindTenantScope() {
+    if (_tenantScopeSubscription != null || _tenantScope == null) {
+      return;
+    }
+    final tenantScope = _tenantScope;
+    _lastTenantDomain = _normalizeTenantDomain(
+      tenantScope.selectedTenantDomain,
+    );
+    _tenantScopeSubscription = tenantScope
+        .selectedTenantDomainStreamValue
+        .stream
+        .listen((tenantDomain) {
+          if (_isDisposed) {
+            return;
+          }
+          final normalized = _normalizeTenantDomain(tenantDomain);
+          if (normalized == _lastTenantDomain) {
+            return;
+          }
+          _lastTenantDomain = normalized;
+          _resetTenantScopedState();
+          if (normalized != null) {
+            unawaited(loadEvents());
+          }
+        });
+  }
+
+  void _bindRepositoryStreams() {
+    hasMoreEventsStreamValue.addValue(
+      _eventsRepository.hasMoreEventsStreamValue.value.value,
+    );
+    isEventsPageLoadingStreamValue.addValue(
+      _eventsRepository.isEventsPageLoadingStreamValue.value.value,
+    );
+    eventsErrorStreamValue.addValue(
+      _eventsRepository.eventsErrorStreamValue.value?.value,
+    );
+
+    _hasMoreEventsSubscription = _eventsRepository
+        .hasMoreEventsStreamValue
+        .stream
+        .listen((value) {
+          if (_isDisposed) {
+            return;
+          }
+          hasMoreEventsStreamValue.addValue(value.value);
+        });
+
+    _isEventsPageLoadingSubscription = _eventsRepository
+        .isEventsPageLoadingStreamValue
+        .stream
+        .listen((value) {
+          if (_isDisposed) {
+            return;
+          }
+          isEventsPageLoadingStreamValue.addValue(value.value);
+        });
+
+    _eventsErrorSubscription = _eventsRepository.eventsErrorStreamValue.stream
+        .listen((value) {
+          if (_isDisposed) {
+            return;
+          }
+          eventsErrorStreamValue.addValue(value?.value);
+        });
+  }
+
+  TenantAdminEventsRepoString _toEventsText(String value) {
+    return TenantAdminEventsRepoString.fromRaw(value, defaultValue: value);
+  }
+
+  TenantAdminEventsRepoString? _toNullableEventsText(String? value) {
+    if (value == null) {
+      return null;
+    }
+    return _toEventsText(value);
+  }
+
+  TenantAdminEventsRepoString? _toNullablePublicationStatusFilter() {
+    final normalized = publicationStatusFilterStreamValue.value.trim();
+    if (normalized.isEmpty || normalized == 'todos') {
+      return null;
+    }
+    return _toEventsText(normalized);
+  }
+
+  String? _normalizeOptionalText(String? value) {
+    final trimmed = value?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  bool get isEventFormDirty {
+    final baseline = _eventFormInitialFingerprint;
+    return baseline != null && baseline != _eventFormFingerprint();
+  }
+
+  bool canManageOccurrenceRelatedProfiles(String? occurrenceId) {
+    final normalizedOccurrenceId = occurrenceId?.trim();
+    if (normalizedOccurrenceId == null || normalizedOccurrenceId.isEmpty) {
+      return false;
+    }
+    return true;
+  }
+
+  String occurrenceRelatedProfilesManageBlockedReason(String? occurrenceId) {
+    final normalizedOccurrenceId = occurrenceId?.trim();
+    if (normalizedOccurrenceId == null || normalizedOccurrenceId.isEmpty) {
+      return 'Salve o evento para gerenciar perfis desta ocorrência.';
+    }
+    return '';
+  }
+
+  void markEventFormClean() {
+    _eventFormInitialFingerprint = _eventFormFingerprint();
+  }
+
+  TenantAdminOptionalUrlValue? _buildOptionalUrlValue(String? value) {
+    final normalized = _normalizeOptionalText(value);
+    if (normalized == null) {
+      return null;
+    }
+    final urlValue = TenantAdminOptionalUrlValue();
+    urlValue.parse(normalized);
+    return urlValue;
+  }
+
+  Future<void> loadEvents() async {
+    if (_isDisposed) {
+      return;
+    }
+    if (!_hasLandlordToken()) {
+      _eventsRepository.resetEventsState();
+      _eventsRepository.setEventsState(const <TenantAdminEvent>[]);
+      return;
+    }
+    await _eventsRepository.loadEvents(
+      specificDate: _toNullableEventsText(_specificDateQueryValue()),
+      status: _toNullablePublicationStatusFilter(),
+      venueProfileId: _toNullableEventsText(venueFilterStreamValue.value?.id),
+      relatedAccountProfileId: _toNullableEventsText(
+        relatedAccountProfileFilterStreamValue.value?.id,
+      ),
+      temporalBuckets: temporalFilterStreamValue.value,
+    );
+  }
+
+  Future<void> loadNextEventsPage() async {
+    if (_isDisposed) {
+      return;
+    }
+    if (!_hasLandlordToken()) {
+      return;
+    }
+    await _eventsRepository.loadNextEventsPage(
+      specificDate: _toNullableEventsText(_specificDateQueryValue()),
+      status: _toNullablePublicationStatusFilter(),
+      venueProfileId: _toNullableEventsText(venueFilterStreamValue.value?.id),
+      relatedAccountProfileId: _toNullableEventsText(
+        relatedAccountProfileFilterStreamValue.value?.id,
+      ),
+      temporalBuckets: temporalFilterStreamValue.value,
+    );
+  }
+
+  void selectSpecificDateFilter(DateTime? value) {
+    if (value == null) {
+      specificDateFilterStreamValue.addValue(null);
+      temporalFilterStreamValue.addValue(
+        TenantAdminEventTemporalBucket.defaultSelection,
+      );
+      return;
+    }
+
+    specificDateFilterStreamValue.addValue(
+      DateTime(value.year, value.month, value.day),
+    );
+    temporalFilterStreamValue.addValue(
+      Set<TenantAdminEventTemporalBucket>.unmodifiable(
+        TenantAdminEventTemporalBucket.values.toSet(),
+      ),
+    );
+  }
+
+  void clearSpecificDateFilter() {
+    selectSpecificDateFilter(null);
+  }
+
+  void selectVenueFilter(TenantAdminAccountProfile? profile) {
+    venueFilterStreamValue.addValue(profile);
+  }
+
+  void clearVenueFilter() {
+    venueFilterStreamValue.addValue(null);
+  }
+
+  void selectRelatedAccountProfileFilter(TenantAdminAccountProfile? profile) {
+    relatedAccountProfileFilterStreamValue.addValue(profile);
+  }
+
+  void clearRelatedAccountProfileFilter() {
+    relatedAccountProfileFilterStreamValue.addValue(null);
+  }
+
+  void selectPublicationStatusFilter(String status) {
+    final normalized = status.trim();
+    if (normalized.isEmpty ||
+        normalized == publicationStatusFilterStreamValue.value) {
+      return;
+    }
+
+    publicationStatusFilterStreamValue.addValue(normalized);
+  }
+
+  void resetEventFilters() {
+    specificDateFilterStreamValue.addValue(null);
+    venueFilterStreamValue.addValue(null);
+    relatedAccountProfileFilterStreamValue.addValue(null);
+    publicationStatusFilterStreamValue.addValue('published');
+    temporalFilterStreamValue.addValue(
+      TenantAdminEventTemporalBucket.defaultSelection,
+    );
+  }
+
+  void toggleTemporalFilter(TenantAdminEventTemporalBucket bucket) {
+    final current = Set<TenantAdminEventTemporalBucket>.from(
+      temporalFilterStreamValue.value,
+    );
+    if (current.contains(bucket)) {
+      if (current.length == 1) {
+        return;
+      }
+      current.remove(bucket);
+    } else {
+      current.add(bucket);
+    }
+    temporalFilterStreamValue.addValue(Set.unmodifiable(current));
+  }
+
+  Future<void> applyFilters() async {
+    await loadEvents();
+  }
+
+  void initEventForm({TenantAdminEvent? existingEvent}) {
+    clearEventValidation();
+    occurrenceProfileGroupMutationBusyStreamValue.addValue(false);
+    _eventFormLocalIdSerial = 0;
+    final selectedTaxonomyTerms = <String, Set<String>>{};
+    for (final term
+        in existingEvent?.taxonomyTerms ??
+            const TenantAdminTaxonomyTerms.empty()) {
+      final bucket = selectedTaxonomyTerms.putIfAbsent(
+        term.type,
+        () => <String>{},
+      );
+      bucket.add(term.value);
+    }
+    final initialEventTypeSlug = existingEvent?.type.slug.trim();
+    final fallbackAllowedSlugs = <String>{
+      ...?existingEvent?.type.allowedTaxonomies.value
+          .map((slug) => slug.trim())
+          .where((slug) => slug.isNotEmpty),
+    };
+    _eventTypeTaxonomyFallbackSlug =
+        initialEventTypeSlug == null || initialEventTypeSlug.isEmpty
+        ? null
+        : initialEventTypeSlug;
+    _eventTypeTaxonomyFallbackAllowedSlugs = Set<String>.unmodifiable(
+      fallbackAllowedSlugs,
+    );
+    final localOccurrences = _hydrateSingleOccurrenceProfileGroups(
+      existingEvent: existingEvent,
+      occurrences:
+          existingEvent?.occurrences
+              .map(_toLocalOccurrence)
+              .toList(growable: false) ??
+          const <TenantAdminEventOccurrence>[],
+    );
+    final occurrenceLocalIds = localOccurrences
+        .map(_eventFormOccurrenceKeyFor)
+        .toList(growable: false);
+    final programmingItemLocalIdsByOccurrenceKey = <String, List<String>>{};
+    for (var index = 0; index < localOccurrences.length; index++) {
+      programmingItemLocalIdsByOccurrenceKey[occurrenceLocalIds[index]] =
+          _newProgrammingItemKeys(localOccurrences[index].programmingItems);
+    }
+    final firstOccurrence = localOccurrences.firstOrNull;
+    final profileGroups =
+        localOccurrences.length == 1 &&
+            localOccurrences.first.profileGroups.isNotEmpty
+        ? localOccurrences.first.profileGroups
+        : existingEvent?.profileGroups ??
+              const <TenantAdminNestedProfileGroup>[];
+    final nextState = _mirrorSingleOccurrenceEventProfileGroups(
+      TenantAdminEventFormState(
+        startAt: firstOccurrence?.dateTimeStart == null
+            ? null
+            : TimezoneConverter.utcToLocal(firstOccurrence!.dateTimeStart),
+        endAt: firstOccurrence?.dateTimeEnd == null
+            ? null
+            : TimezoneConverter.utcToLocal(firstOccurrence!.dateTimeEnd!),
+        publishAt: existingEvent?.publication.publishAt == null
+            ? null
+            : TimezoneConverter.utcToLocal(
+                existingEvent!.publication.publishAt!,
+              ),
+        locationMode: existingEvent?.location?.mode ?? 'physical',
+        publicationStatus: existingEvent?.publication.status ?? 'draft',
+        selectedVenue: _selectedVenueCandidateFromEvent(existingEvent),
+        selectedTypeSlug: existingEvent?.type.slug.trim(),
+        selectedRelatedAccountProfileIds: const <String>[],
+        profileGroups: profileGroups,
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(
+          localOccurrences,
+        ),
+        occurrenceLocalIds: List<String>.unmodifiable(occurrenceLocalIds),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          programmingItemLocalIdsByOccurrenceKey,
+        ),
+        selectedTaxonomyTerms: selectedTaxonomyTerms,
+        hasHydratedDefaultVenue: false,
+      ),
+    );
+
+    eventTitleController.text = existingEvent?.title ?? '';
+    eventContentController.text = SafeRichHtml.canonicalize(
+      existingEvent?.content ?? '',
+      allowExplicitHttpsLinks: true,
+    );
+    eventOnlineUrlController.text = existingEvent?.location?.online?.url ?? '';
+    eventOnlinePlatformController.text =
+        existingEvent?.location?.online?.platform ?? '';
+    eventCoverFileStreamValue.addValue(null);
+    eventCoverBusyStreamValue.addValue(false);
+    eventCoverRemoveStreamValue.addValue(false);
+    relatedAccountProfileCandidatesStreamValue.addValue(const []);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+    markEventFormClean();
+    _pendingInitialRichContentBaselineRefresh = existingEvent != null;
+  }
+
+  Future<XFile?> pickImageFromDevice({required TenantAdminImageSlot slot}) {
+    return _imageIngestionService.pickFromDevice(slot: slot);
+  }
+
+  Future<XFile> fetchImageFromUrlForCrop({required String imageUrl}) {
+    return _imageIngestionService.fetchFromUrlForCrop(imageUrl: imageUrl);
+  }
+
+  Future<Uint8List> readImageBytesForCrop(XFile sourceFile) {
+    return _imageIngestionService.readBytesForCrop(sourceFile);
+  }
+
+  Future<XFile> prepareCroppedImage(
+    Uint8List croppedData, {
+    required TenantAdminImageSlot slot,
+  }) {
+    return _imageIngestionService.prepareBytesAsXFile(
+      croppedData,
+      slot: slot,
+      applyAspectCrop: false,
+    );
+  }
+
+  Future<TenantAdminMediaUpload?> buildImageUpload(
+    XFile? file, {
+    required TenantAdminImageSlot slot,
+  }) {
+    return _imageIngestionService.buildUpload(file, slot: slot);
+  }
+
+  void updateEventCoverFile(XFile? file) {
+    eventCoverFileStreamValue.addValue(file);
+    if (file != null) {
+      eventCoverRemoveStreamValue.addValue(false);
+    }
+  }
+
+  void setEventCoverBusy(bool isBusy) {
+    eventCoverBusyStreamValue.addValue(isBusy);
+  }
+
+  void removeEventCover() {
+    eventCoverFileStreamValue.addValue(null);
+    eventCoverRemoveStreamValue.addValue(true);
+  }
+
+  void restoreEventCover() {
+    eventCoverRemoveStreamValue.addValue(false);
+  }
+
+  void updateEventTypeSelection(String? slug) {
+    final current = eventFormStateStreamValue.value.copyWith(
+      selectedTypeSlug: slug,
+    );
+    clearEventFieldValidation(TenantAdminEventFormValidationTargets.eventType);
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.taxonomies);
+    _replaceEventFormState(_sanitizeEventTaxonomyTermsForSelectedType(current));
+    if (_formDependencyMode == _TenantAdminEventFormDependencyMode.full) {
+      unawaited(_refreshSelectedEventTypeTaxonomyDependencies());
+    }
+  }
+
+  void updateEventPublicationStatus(String status) {
+    final current = eventFormStateStreamValue.value;
+    var nextPublishAt = current.publishAt;
+    if (status != 'publish_scheduled') {
+      nextPublishAt = null;
+    }
+    final nextState = current.copyWith(
+      publicationStatus: status,
+      publishAt: nextPublishAt,
+    );
+    clearEventGroupValidation(
+      TenantAdminEventFormValidationTargets.publication,
+    );
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void updateEventLocationMode(String mode) {
+    final current = eventFormStateStreamValue.value;
+    if (mode == current.locationMode) {
+      return;
+    }
+    if (mode == 'physical') {
+      eventOnlineUrlController.clear();
+      eventOnlinePlatformController.clear();
+    }
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.location);
+    _replaceEventFormState(current.copyWith(locationMode: mode));
+  }
+
+  void updateEventVenueSelection(String? venueId) {
+    final current = eventFormStateStreamValue.value;
+    final normalizedVenueId = _normalizeOptionalText(venueId);
+    final selectedVenue = normalizedVenueId == null
+        ? null
+        : _resolveKnownVenueCandidate(
+                normalizedVenueId,
+                includeSelectedVenueFromState: false,
+              ) ??
+              (current.selectedVenue?.id == normalizedVenueId
+                  ? current.selectedVenue
+                  : null);
+    if (selectedVenue != null) {
+      venueCandidatesStreamValue.addValue(
+        List.unmodifiable(
+          _mergeBootstrapVenueCandidates(venueCandidatesStreamValue.value),
+        ),
+      );
+    }
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.location);
+    _replaceEventFormState(current.copyWith(selectedVenue: selectedVenue));
+  }
+
+  void addRelatedAccountProfile(
+    String profileId, {
+    TenantAdminAccountProfile? profile,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    if (current.selectedRelatedAccountProfileIds.contains(profileId)) {
+      return;
+    }
+    if (profile != null) {
+      _mergeKnownRelatedAccountProfiles([profile]);
+    }
+    final next = <String>[
+      ...current.selectedRelatedAccountProfileIds,
+      profileId,
+    ];
+    _replaceEventFormState(
+      current.copyWith(selectedRelatedAccountProfileIds: next),
+    );
+  }
+
+  void removeRelatedAccountProfile(String profileId) {
+    final current = eventFormStateStreamValue.value;
+    if (!current.selectedRelatedAccountProfileIds.contains(profileId)) {
+      return;
+    }
+    final next = current.selectedRelatedAccountProfileIds
+        .where((candidateId) => candidateId != profileId)
+        .toList(growable: false);
+    _replaceEventFormState(
+      current.copyWith(selectedRelatedAccountProfileIds: next),
+    );
+  }
+
+  void addEventProfileGroup() {
+    final current = eventFormStateStreamValue.value;
+    final currentGroups = _eventLevelProfileGroups(current);
+    if (currentGroups.length >= 12) {
+      submitErrorMessageStreamValue.addValue('Limite de grupos atingido.');
+      return;
+    }
+    _replaceEventFormState(
+      _withEventLevelProfileGroups(
+        current,
+        TenantAdminNestedProfileGroupOperations.append(currentGroups),
+      ),
+    );
+  }
+
+  void renameEventProfileGroup(String groupId, String label) {
+    final current = eventFormStateStreamValue.value;
+    _replaceEventFormState(
+      _withEventLevelProfileGroups(
+        current,
+        TenantAdminNestedProfileGroupOperations.rename(
+          _eventLevelProfileGroups(current),
+          groupId: groupId,
+          label: label,
+        ),
+      ),
+    );
+  }
+
+  void removeEventProfileGroup(String groupId) {
+    final current = eventFormStateStreamValue.value;
+    _applyEventProfileGroups(
+      TenantAdminNestedProfileGroupOperations.remove(
+        _eventLevelProfileGroups(current),
+        groupId: groupId,
+      ),
+    );
+  }
+
+  void moveEventProfileGroup(String groupId, int delta) {
+    final current = eventFormStateStreamValue.value;
+    _replaceEventFormState(
+      _withEventLevelProfileGroups(
+        current,
+        TenantAdminNestedProfileGroupOperations.move(
+          _eventLevelProfileGroups(current),
+          groupId: groupId,
+          delta: delta,
+        ),
+      ),
+    );
+  }
+
+  void reorderRelatedAccountProfile({
+    required String profileId,
+    required int newIndex,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final currentIndex = current.selectedRelatedAccountProfileIds.indexOf(
+      profileId,
+    );
+    if (currentIndex < 0) {
+      return;
+    }
+
+    final next = current.selectedRelatedAccountProfileIds.toList();
+    final normalizedNewIndex = newIndex.clamp(0, next.length - 1).toInt();
+    if (normalizedNewIndex == currentIndex) {
+      return;
+    }
+
+    next.removeAt(currentIndex);
+    next.insert(normalizedNewIndex, profileId);
+    _replaceEventFormState(
+      current.copyWith(selectedRelatedAccountProfileIds: next),
+    );
+  }
+
+  void toggleEventTaxonomyTerm({
+    required String taxonomySlug,
+    required String termSlug,
+    required bool isSelected,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    if (!_isTaxonomyAllowedForSelectedEventType(taxonomySlug, current)) {
+      return;
+    }
+    final next = <String, Set<String>>{
+      for (final entry in current.selectedTaxonomyTerms.entries)
+        entry.key: {...entry.value},
+    };
+    final bucket = next.putIfAbsent(taxonomySlug, () => <String>{});
+    if (isSelected) {
+      bucket.add(termSlug);
+    } else {
+      bucket.remove(termSlug);
+      if (bucket.isEmpty) {
+        next.remove(taxonomySlug);
+      }
+    }
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.taxonomies);
+    _replaceEventFormState(current.copyWith(selectedTaxonomyTerms: next));
+  }
+
+  List<TenantAdminTaxonomyDefinition>
+  allowedTaxonomyDefinitionsForSelectedEventType() {
+    final allowedTaxonomies = _allowedTaxonomiesForEventType(
+      eventFormStateStreamValue.value.selectedTypeSlug,
+    );
+    if (allowedTaxonomies.isEmpty) {
+      return const <TenantAdminTaxonomyDefinition>[];
+    }
+    return taxonomiesStreamValue.value
+        .where((taxonomy) => allowedTaxonomies.contains(taxonomy.slug.trim()))
+        .toList(growable: false);
+  }
+
+  Set<String> get allowedTaxonomySlugsForSelectedEventType =>
+      Set<String>.unmodifiable(
+        _allowedTaxonomiesForEventType(
+          eventFormStateStreamValue.value.selectedTypeSlug,
+        ),
+      );
+
+  void toggleOccurrenceTaxonomyTerm({
+    required String occurrenceKey,
+    required String taxonomySlug,
+    required String termSlug,
+    required bool isSelected,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    if (!_isTaxonomyAllowedForSelectedEventType(taxonomySlug, current)) {
+      return;
+    }
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      final next = _taxonomyTermsToSelectionMap(occurrence.taxonomyTerms);
+      final bucket = next.putIfAbsent(taxonomySlug, () => <String>{});
+      if (isSelected) {
+        bucket.add(termSlug);
+      } else {
+        bucket.remove(termSlug);
+        if (bucket.isEmpty) {
+          next.remove(taxonomySlug);
+        }
+      }
+      return _copyOccurrence(
+        occurrence,
+        taxonomyTerms: _taxonomyTermsFromSelectionMap(next),
+      );
+    }, sort: false);
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.taxonomies);
+  }
+
+  void applyEventStartAt(DateTime value) {
+    final current = eventFormStateStreamValue.value;
+    var nextEndAt = current.endAt;
+    if (nextEndAt != null && nextEndAt.isBefore(value)) {
+      nextEndAt = value;
+    }
+    final nextStateWithPrimary = _replacePrimaryOccurrenceInState(
+      current,
+      startAt: value,
+      endAt: nextEndAt,
+    );
+    final nextState = nextStateWithPrimary.copyWith(
+      startAt: value,
+      endAt: nextEndAt,
+    );
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void applyEventEndAt(DateTime value) {
+    final current = eventFormStateStreamValue.value;
+    final nextState = _replacePrimaryOccurrenceInState(
+      current,
+      startAt: current.startAt,
+      endAt: value,
+    ).copyWith(endAt: value);
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void clearEventEndAt() {
+    final current = eventFormStateStreamValue.value;
+    final nextState = _replacePrimaryOccurrenceInState(
+      current,
+      startAt: current.startAt,
+      endAt: null,
+    ).copyWith(endAt: null);
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void replacePrimaryOccurrenceDetails({
+    List<TenantAdminAccountProfileIdValue>? relatedAccountProfileIdValues,
+    List<TenantAdminAccountProfile>? relatedAccountProfiles,
+    List<TenantAdminEventProgrammingItem>? programmingItems,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final nextState = _replacePrimaryOccurrenceInState(
+      current,
+      startAt: current.startAt,
+      endAt: current.endAt,
+      relatedAccountProfileIdValues: relatedAccountProfileIdValues,
+      relatedAccountProfiles: relatedAccountProfiles,
+      programmingItems: programmingItems,
+    );
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void upsertOccurrence({
+    required int? index,
+    required TenantAdminEventOccurrence occurrence,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final next = current.occurrences.toList(growable: true);
+    final nextKeys = _normalizedOccurrenceKeys(current).toList(growable: true);
+    final nextItemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    String occurrenceKey;
+    if (index == null || index < 0 || index >= next.length) {
+      occurrenceKey = _newEventFormLocalId('occurrence');
+      next.add(occurrence);
+      nextKeys.add(occurrenceKey);
+    } else {
+      occurrenceKey = nextKeys[index];
+      next[index] = occurrence;
+    }
+    nextItemKeysByOccurrenceKey[occurrenceKey] = _reconcileProgrammingItemKeys(
+      currentKeys: nextItemKeysByOccurrenceKey[occurrenceKey],
+      items: occurrence.programmingItems,
+    );
+    final sorted = _sortOccurrenceEntries(
+      occurrences: next,
+      occurrenceKeys: nextKeys,
+    );
+    final primary = sorted.firstOrNull?.occurrence;
+    final nextState = _mirrorSingleOccurrenceEventProfileGroups(
+      current.copyWith(
+        startAt: primary?.dateTimeStart,
+        endAt: primary?.dateTimeEnd,
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(
+          sorted.map((entry) => entry.occurrence),
+        ),
+        occurrenceLocalIds: List<String>.unmodifiable(
+          sorted.map((entry) => entry.key),
+        ),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          nextItemKeysByOccurrenceKey,
+        ),
+      ),
+    );
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void removeOccurrenceAt(int index) {
+    final current = eventFormStateStreamValue.value;
+    if (current.occurrences.length <= 1 ||
+        index < 0 ||
+        index >= current.occurrences.length) {
+      return;
+    }
+    final next = current.occurrences.toList(growable: true)..removeAt(index);
+    final nextKeys = _normalizedOccurrenceKeys(current).toList(growable: true);
+    final removedKey = nextKeys.removeAt(index);
+    final nextItemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current)
+          ..remove(removedKey);
+    final primary = next.firstOrNull;
+    final nextState = _mirrorSingleOccurrenceEventProfileGroups(
+      current.copyWith(
+        startAt: primary?.dateTimeStart,
+        endAt: primary?.dateTimeEnd,
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(next),
+        occurrenceLocalIds: List<String>.unmodifiable(nextKeys),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          nextItemKeysByOccurrenceKey,
+        ),
+      ),
+    );
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  String createOccurrenceDraft() {
+    final current = eventFormStateStreamValue.value;
+    if (current.occurrences.isEmpty) {
+      return _materializePrimaryOccurrenceDraft(current);
+    }
+    final fallbackStart = current.occurrences.isNotEmpty
+        ? current.occurrences.last.dateTimeStart.add(const Duration(days: 1))
+        : current.startAt ?? DateTime.now();
+    final fallbackEnd = current.endAt == null || current.startAt == null
+        ? null
+        : fallbackStart.add(current.endAt!.difference(current.startAt!));
+    final occurrence = TenantAdminEventOccurrence(
+      dateTimeStartValue: tenantAdminDateTime(fallbackStart),
+      dateTimeEndValue: tenantAdminOptionalDateTime(fallbackEnd),
+    );
+    final occurrenceKey = _newEventFormLocalId('occurrence');
+    final occurrences = [...current.occurrences, occurrence];
+    final occurrenceKeys = [
+      ..._normalizedOccurrenceKeys(current),
+      occurrenceKey,
+    ];
+    final itemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    itemKeysByOccurrenceKey[occurrenceKey] = const <String>[];
+    final sorted = _sortOccurrenceEntries(
+      occurrences: occurrences,
+      occurrenceKeys: occurrenceKeys,
+    );
+    final primary = sorted.firstOrNull?.occurrence;
+    _replaceEventFormState(
+      current.copyWith(
+        startAt: primary?.dateTimeStart,
+        endAt: primary?.dateTimeEnd,
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(
+          sorted.map((entry) => entry.occurrence),
+        ),
+        occurrenceLocalIds: List<String>.unmodifiable(
+          sorted.map((entry) => entry.key),
+        ),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          itemKeysByOccurrenceKey,
+        ),
+      ),
+    );
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _syncEventDateTimeControllers(eventFormStateStreamValue.value);
+    return occurrenceKey;
+  }
+
+  String? occurrenceKeyAt(int index) {
+    final keys = _normalizedOccurrenceKeys(eventFormStateStreamValue.value);
+    if (index < 0 || index >= keys.length) {
+      return null;
+    }
+    return keys[index];
+  }
+
+  String? primaryOccurrenceKey() {
+    return occurrenceKeyAt(0);
+  }
+
+  String ensurePrimaryOccurrenceDraft() {
+    final existingKey = primaryOccurrenceKey();
+    if (existingKey != null) {
+      return existingKey;
+    }
+    return _materializePrimaryOccurrenceDraft(eventFormStateStreamValue.value);
+  }
+
+  TenantAdminEventOccurrence? occurrenceForKey(String occurrenceKey) {
+    final state = eventFormStateStreamValue.value;
+    final index = _occurrenceIndexByKey(state, occurrenceKey);
+    if (index < 0) {
+      return null;
+    }
+    return state.occurrences[index];
+  }
+
+  List<MapEntry<String, TenantAdminEventProgrammingItem>>
+  programmingItemsForOccurrenceKey(String occurrenceKey) {
+    final state = eventFormStateStreamValue.value;
+    final occurrence = occurrenceForKey(occurrenceKey);
+    if (occurrence == null) {
+      return const [];
+    }
+    final itemKeys = _programmingItemKeysForOccurrence(
+      state,
+      occurrenceKey,
+      occurrence.programmingItems,
+    );
+    return [
+      for (var index = 0; index < occurrence.programmingItems.length; index++)
+        MapEntry(itemKeys[index], occurrence.programmingItems[index]),
+    ];
+  }
+
+  void updateOccurrenceStart(String occurrenceKey, DateTime value) {
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      final nextEnd =
+          occurrence.dateTimeEnd != null &&
+              occurrence.dateTimeEnd!.isBefore(value)
+          ? value
+          : occurrence.dateTimeEnd;
+      return _copyOccurrence(occurrence, startAt: value, endAt: nextEnd);
+    });
+  }
+
+  void updateOccurrenceEnd(String occurrenceKey, DateTime? value) {
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(occurrence, endAt: value),
+    );
+  }
+
+  Future<TenantAdminNestedGroupMemberPage>
+  fetchOccurrenceProfileGroupMembersPage({
+    required String eventId,
+    required String occurrenceId,
+    required String groupId,
+    String? cursor,
+  }) {
+    return _occurrenceGroupMembersPageLoader.loadPage(
+      eventId: eventId,
+      occurrenceId: occurrenceId,
+      groupId: groupId,
+      cursor: cursor,
+    );
+  }
+
+  Future<List<TenantAdminAccountProfileSelectionSummary>>
+  fetchAllOccurrenceProfileGroupMembers({
+    required String eventId,
+    required String occurrenceId,
+    required String groupId,
+  }) {
+    return _eventsRepository.fetchAllOccurrenceProfileGroupMembers(
+      eventId: _toEventsText(eventId),
+      occurrenceId: _toEventsText(occurrenceId),
+      groupId: _toEventsText(groupId),
+    );
+  }
+
+  Future<List<TenantAdminAccountProfile>>
+  fetchOccurrenceRelatedProfilesForProgramming({
+    required String eventId,
+    required String occurrenceId,
+    required List<TenantAdminNestedProfileGroup> profileGroups,
+  }) async {
+    final profilesById = <String, TenantAdminAccountProfile>{};
+    final orderedGroups = profileGroups.toList(growable: false)
+      ..sort((left, right) => left.order.compareTo(right.order));
+
+    for (final group in orderedGroups) {
+      final members = await fetchAllOccurrenceProfileGroupMembers(
+        eventId: eventId,
+        occurrenceId: occurrenceId,
+        groupId: group.id,
+      );
+      for (final member in members) {
+        profilesById.putIfAbsent(
+          member.id,
+          () => tenantAdminAccountProfileFromRaw(
+            id: member.id,
+            accountId: member.id,
+            profileType: 'account_profile',
+            displayName: (member.displayName?.trim().isNotEmpty ?? false)
+                ? member.displayName!.trim()
+                : member.id,
+          ),
+        );
+      }
+    }
+
+    return List<TenantAdminAccountProfile>.unmodifiable(profilesById.values);
+  }
+
+  Future<TenantAdminNestedGroupMemberMutationResult>
+  addOccurrenceProfileGroupMembers({
+    required String eventId,
+    required String occurrenceId,
+    required String occurrenceKey,
+    required String groupId,
+    required List<String> addIds,
+  }) async {
+    final result = await _eventsRepository.patchOccurrenceProfileGroupMembers(
+      eventId: _toEventsText(eventId),
+      occurrenceId: _toEventsText(occurrenceId),
+      groupId: _toEventsText(groupId),
+      addIds: addIds.map(_toEventsText).toList(growable: false),
+    );
+    _syncOccurrenceProfileGroupMembers(
+      occurrenceKey: occurrenceKey,
+      groupId: groupId,
+      memberCount: result.memberCount,
+      addIds: addIds,
+    );
+    return result;
+  }
+
+  Future<TenantAdminNestedGroupMemberMutationResult>
+  removeOccurrenceProfileGroupMembers({
+    required String eventId,
+    required String occurrenceId,
+    required String occurrenceKey,
+    required String groupId,
+    required List<String> removeIds,
+  }) async {
+    final result = await _eventsRepository.patchOccurrenceProfileGroupMembers(
+      eventId: _toEventsText(eventId),
+      occurrenceId: _toEventsText(occurrenceId),
+      groupId: _toEventsText(groupId),
+      removeIds: removeIds.map(_toEventsText).toList(growable: false),
+    );
+    _syncOccurrenceProfileGroupMembers(
+      occurrenceKey: occurrenceKey,
+      groupId: groupId,
+      memberCount: result.memberCount,
+      removeIds: removeIds,
+    );
+    return result;
+  }
+
+  Future<void> createOccurrenceProfileGroupHead({
+    required String eventId,
+    required String occurrenceId,
+    required String occurrenceKey,
+    required String label,
+  }) async {
+    if (occurrenceProfileGroupMutationBusyStreamValue.value) {
+      return;
+    }
+
+    occurrenceProfileGroupMutationBusyStreamValue.addValue(true);
+    try {
+      final result = await _eventsRepository.createOccurrenceProfileGroup(
+        eventId: _toEventsText(eventId),
+        occurrenceId: _toEventsText(occurrenceId),
+        label: _toEventsText(label),
+      );
+      _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+        final nextGroups = _mergeProfileGroupMetadata(
+          currentGroups: occurrence.profileGroups,
+          metadataGroups: result.groups,
+        );
+        return _copyOccurrence(occurrence, profileGroups: nextGroups);
+      }, sort: false);
+      submitErrorMessageStreamValue.addValue(null);
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      submitErrorMessageStreamValue.addValue(
+        _describeControllerError(error, 'Não foi possível criar o grupo.'),
+      );
+    } finally {
+      if (!_isDisposed) {
+        occurrenceProfileGroupMutationBusyStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<void> deleteOccurrenceProfileGroupHead({
+    required String eventId,
+    required String occurrenceId,
+    required String occurrenceKey,
+    required String groupId,
+  }) async {
+    if (occurrenceProfileGroupMutationBusyStreamValue.value) {
+      return;
+    }
+
+    occurrenceProfileGroupMutationBusyStreamValue.addValue(true);
+    try {
+      final result = await _eventsRepository.deleteOccurrenceProfileGroup(
+        eventId: _toEventsText(eventId),
+        occurrenceId: _toEventsText(occurrenceId),
+        groupId: _toEventsText(groupId),
+      );
+      _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+        final nextGroups = _mergeProfileGroupMetadata(
+          currentGroups: occurrence.profileGroups,
+          metadataGroups: result.groups,
+        );
+        return _copyOccurrence(occurrence, profileGroups: nextGroups);
+      }, sort: false);
+      submitErrorMessageStreamValue.addValue(null);
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      submitErrorMessageStreamValue.addValue(
+        _describeControllerError(error, 'Não foi possível remover o grupo.'),
+      );
+    } finally {
+      if (!_isDisposed) {
+        occurrenceProfileGroupMutationBusyStreamValue.addValue(false);
+      }
+    }
+  }
+
+  void removeOccurrenceRelatedProfile(String occurrenceKey, String profileId) {
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      final programmingItems = occurrence.programmingItems
+          .map((item) => _withoutProgrammingProfile(item, profileId))
+          .toList(growable: false);
+      return _copyOccurrence(
+        occurrence,
+        relatedAccountProfileIds: occurrence.relatedAccountProfileIds
+            .where((entry) => entry.value != profileId)
+            .toList(growable: false),
+        relatedAccountProfiles: occurrence.relatedAccountProfiles
+            .where((profile) => profile.id != profileId)
+            .toList(growable: false),
+        programmingItems: programmingItems,
+      );
+    }, sort: false);
+  }
+
+  void _syncOccurrenceProfileGroupMembers({
+    required String occurrenceKey,
+    required String groupId,
+    required int memberCount,
+    List<String> addIds = const [],
+    List<String> removeIds = const [],
+  }) {
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      final currentGroup = _occurrenceProfileGroupById(occurrence, groupId);
+      final nextGroupMemberIds = _applyOccurrenceProfileGroupMemberDelta(
+        currentGroup?.accountProfileIdValues.map((entry) => entry.value) ??
+            const <String>[],
+        addIds: addIds,
+        removeIds: removeIds,
+      );
+      final nextGroups = TenantAdminNestedProfileGroupOperations.replaceMembers(
+        occurrence.profileGroups,
+        groupId: groupId,
+        profileIds: nextGroupMemberIds,
+        memberCount: memberCount,
+      );
+      final allowedProfileIds =
+          TenantAdminNestedProfileGroupOperations.memberIds(nextGroups);
+      final allowedProfileIdSet = allowedProfileIds.toSet();
+      return _copyOccurrence(
+        occurrence,
+        profileGroups: nextGroups,
+        relatedAccountProfileIds: allowedProfileIds
+            .map(TenantAdminAccountProfileIdValue.new)
+            .toList(growable: false),
+        relatedAccountProfiles: _knownOccurrenceRelatedProfiles(
+          occurrence,
+          allowedProfileIds,
+        ),
+        programmingItems: occurrence.programmingItems
+            .map(
+              (item) => _withoutProgrammingProfilesOutsideAllowedSet(
+                item,
+                allowedProfileIdSet,
+              ),
+            )
+            .toList(growable: false),
+      );
+    }, sort: false);
+  }
+
+  List<TenantAdminNestedProfileGroup> _mergeProfileGroupMetadata({
+    required List<TenantAdminNestedProfileGroup> currentGroups,
+    required List<TenantAdminNestedProfileGroup> metadataGroups,
+  }) {
+    final currentById = <String, TenantAdminNestedProfileGroup>{
+      for (final group in currentGroups) group.id: group,
+    };
+    return List<TenantAdminNestedProfileGroup>.unmodifiable([
+      for (final metadataGroup in metadataGroups)
+        metadataGroup.copyWith(
+          accountProfileIdValues:
+              currentById[metadataGroup.id]?.accountProfileIdValues ??
+              const <TenantAdminNestedProfileGroupTextValue>[],
+        ),
+    ]);
+  }
+
+  TenantAdminNestedProfileGroup? _occurrenceProfileGroupById(
+    TenantAdminEventOccurrence occurrence,
+    String groupId,
+  ) {
+    for (final group in occurrence.profileGroups) {
+      if (group.id == groupId) {
+        return group;
+      }
+    }
+    return null;
+  }
+
+  List<String> _applyOccurrenceProfileGroupMemberDelta(
+    Iterable<String> currentIds, {
+    Iterable<String> addIds = const <String>[],
+    Iterable<String> removeIds = const <String>[],
+  }) {
+    final next = <String>[];
+    for (final rawId in currentIds) {
+      final normalized = rawId.trim();
+      if (normalized.isEmpty || next.contains(normalized)) {
+        continue;
+      }
+      next.add(normalized);
+    }
+    for (final rawId in removeIds) {
+      final normalized = rawId.trim();
+      if (normalized.isEmpty) {
+        continue;
+      }
+      next.removeWhere((entry) => entry == normalized);
+    }
+    for (final rawId in addIds) {
+      final normalized = rawId.trim();
+      if (normalized.isEmpty || next.contains(normalized)) {
+        continue;
+      }
+      next.add(normalized);
+    }
+    return List<String>.unmodifiable(next);
+  }
+
+  List<TenantAdminAccountProfile> _knownOccurrenceRelatedProfiles(
+    TenantAdminEventOccurrence occurrence,
+    List<String> allowedProfileIds,
+  ) {
+    final knownProfiles =
+        _mergeAccountProfiles(occurrence.relatedAccountProfiles, [
+          ...relatedAccountProfileCandidatesStreamValue.value,
+          for (final item in occurrence.programmingItems)
+            ...item.linkedAccountProfiles,
+        ]);
+    final byId = <String, TenantAdminAccountProfile>{
+      for (final profile in knownProfiles) profile.id: profile,
+    };
+    return List<TenantAdminAccountProfile>.unmodifiable([
+      for (final profileId in allowedProfileIds)
+        if (byId.containsKey(profileId)) byId[profileId]!,
+    ]);
+  }
+
+  TenantAdminEventProgrammingItem _withoutProgrammingProfilesOutsideAllowedSet(
+    TenantAdminEventProgrammingItem item,
+    Set<String> allowedProfileIds,
+  ) {
+    return TenantAdminEventProgrammingItem(
+      timeValue: tenantAdminOptionalText(item.time),
+      endTimeValue: tenantAdminOptionalText(item.endTime),
+      titleValue: tenantAdminOptionalText(item.title),
+      accountProfileIdValues: item.accountProfileIds
+          .where((entry) => allowedProfileIds.contains(entry.value))
+          .toList(growable: false),
+      linkedAccountProfiles: item.linkedAccountProfiles
+          .where((profile) => allowedProfileIds.contains(profile.id))
+          .toList(growable: false),
+      locationProfile: item.locationProfile,
+      placeRef: item.placeRef,
+    );
+  }
+
+  void addOccurrenceProfileGroup(String occurrenceKey) {
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      if (occurrence.profileGroups.length >= 12) {
+        submitErrorMessageStreamValue.addValue('Limite de grupos atingido.');
+        return occurrence;
+      }
+      return _copyOccurrence(
+        occurrence,
+        profileGroups: TenantAdminNestedProfileGroupOperations.append(
+          occurrence.profileGroups,
+        ),
+      );
+    }, sort: false);
+  }
+
+  void renameOccurrenceProfileGroup({
+    required String occurrenceKey,
+    required String groupId,
+    required String label,
+  }) {
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(
+        occurrence,
+        profileGroups: TenantAdminNestedProfileGroupOperations.rename(
+          occurrence.profileGroups,
+          groupId: groupId,
+          label: label,
+        ),
+      ),
+      sort: false,
+    );
+  }
+
+  void removeOccurrenceProfileGroup({
+    required String occurrenceKey,
+    required String groupId,
+  }) {
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(
+        occurrence,
+        profileGroups: TenantAdminNestedProfileGroupOperations.remove(
+          occurrence.profileGroups,
+          groupId: groupId,
+        ),
+      ),
+      sort: false,
+    );
+  }
+
+  void moveOccurrenceProfileGroup({
+    required String occurrenceKey,
+    required String groupId,
+    required int delta,
+  }) {
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(
+        occurrence,
+        profileGroups: TenantAdminNestedProfileGroupOperations.move(
+          occurrence.profileGroups,
+          groupId: groupId,
+          delta: delta,
+        ),
+      ),
+      sort: false,
+    );
+  }
+
+  void addOccurrenceProgrammingItem(
+    String occurrenceKey,
+    TenantAdminEventProgrammingItem item,
+  ) {
+    final occurrence = occurrenceForKey(occurrenceKey);
+    if (occurrence == null) {
+      return;
+    }
+    insertOccurrenceProgrammingItem(
+      occurrenceKey: occurrenceKey,
+      index: occurrence.programmingItems.length,
+      item: item,
+    );
+  }
+
+  void insertOccurrenceProgrammingItem({
+    required String occurrenceKey,
+    required int index,
+    required TenantAdminEventProgrammingItem item,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final occurrence = occurrenceForKey(occurrenceKey);
+    if (occurrence == null ||
+        index < 0 ||
+        index > occurrence.programmingItems.length) {
+      return;
+    }
+    final itemKeys = _programmingItemKeysForOccurrence(
+      current,
+      occurrenceKey,
+      occurrence.programmingItems,
+    ).toList(growable: true);
+    final items = occurrence.programmingItems.toList(growable: true);
+    items.insert(index, item);
+    itemKeys.insert(index, _newEventFormLocalId('programming'));
+    final itemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    itemKeysByOccurrenceKey[occurrenceKey] = List.unmodifiable(itemKeys);
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(occurrence, programmingItems: items),
+      sort: false,
+      programmingItemLocalIdsByOccurrenceKey: itemKeysByOccurrenceKey,
+    );
+  }
+
+  void moveOccurrenceProgrammingItem({
+    required String occurrenceKey,
+    required String itemKey,
+    required int targetIndex,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final occurrence = occurrenceForKey(occurrenceKey);
+    if (occurrence == null ||
+        targetIndex < 0 ||
+        targetIndex >= occurrence.programmingItems.length) {
+      return;
+    }
+    final itemKeys = _programmingItemKeysForOccurrence(
+      current,
+      occurrenceKey,
+      occurrence.programmingItems,
+    ).toList(growable: true);
+    final sourceIndex = itemKeys.indexOf(itemKey);
+    if (sourceIndex < 0 ||
+        sourceIndex >= occurrence.programmingItems.length ||
+        !occurrence.programmingItems[sourceIndex].isSequential) {
+      return;
+    }
+
+    final items = occurrence.programmingItems.toList(growable: true);
+    final item = items.removeAt(sourceIndex);
+    final stableItemKey = itemKeys.removeAt(sourceIndex);
+    items.insert(targetIndex, item);
+    itemKeys.insert(targetIndex, stableItemKey);
+
+    final itemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    itemKeysByOccurrenceKey[occurrenceKey] = List.unmodifiable(itemKeys);
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) => _copyOccurrence(occurrence, programmingItems: items),
+      sort: false,
+      programmingItemLocalIdsByOccurrenceKey: itemKeysByOccurrenceKey,
+    );
+  }
+
+  void updateOccurrenceProgrammingItem({
+    required String occurrenceKey,
+    required String itemKey,
+    required TenantAdminEventProgrammingItem item,
+  }) {
+    _replaceOccurrenceByKey(occurrenceKey, (occurrence) {
+      final itemKeys = _programmingItemKeysForOccurrence(
+        eventFormStateStreamValue.value,
+        occurrenceKey,
+        occurrence.programmingItems,
+      );
+      final itemIndex = itemKeys.indexOf(itemKey);
+      if (itemIndex < 0 || itemIndex >= occurrence.programmingItems.length) {
+        return occurrence;
+      }
+      final items = occurrence.programmingItems.toList(growable: true);
+      items[itemIndex] = item;
+      return _copyOccurrence(occurrence, programmingItems: items);
+    }, sort: false);
+  }
+
+  void removeOccurrenceProgrammingItem({
+    required String occurrenceKey,
+    required String itemKey,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final occurrence = occurrenceForKey(occurrenceKey);
+    if (occurrence == null) {
+      return;
+    }
+    final itemKeys = _programmingItemKeysForOccurrence(
+      current,
+      occurrenceKey,
+      occurrence.programmingItems,
+    ).toList(growable: true);
+    final itemIndex = itemKeys.indexOf(itemKey);
+    if (itemIndex < 0 || itemIndex >= occurrence.programmingItems.length) {
+      return;
+    }
+    itemKeys.removeAt(itemIndex);
+    final itemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    itemKeysByOccurrenceKey[occurrenceKey] = List.unmodifiable(itemKeys);
+    _replaceOccurrenceByKey(
+      occurrenceKey,
+      (occurrence) {
+        final items = occurrence.programmingItems.toList(growable: true)
+          ..removeAt(itemIndex);
+        return _copyOccurrence(occurrence, programmingItems: items);
+      },
+      sort: false,
+      programmingItemLocalIdsByOccurrenceKey: itemKeysByOccurrenceKey,
+    );
+  }
+
+  void applyEventPublishAt(DateTime value) {
+    final nextState = eventFormStateStreamValue.value.copyWith(
+      publishAt: value,
+    );
+    clearEventGroupValidation(
+      TenantAdminEventFormValidationTargets.publication,
+    );
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void clearEventPublishAt() {
+    final nextState = eventFormStateStreamValue.value.copyWith(publishAt: null);
+    clearEventGroupValidation(
+      TenantAdminEventFormValidationTargets.publication,
+    );
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  void _hydrateDefaultEventVenueFromCandidates() {
+    final venues = venueCandidatesStreamValue.value;
+    final current = eventFormStateStreamValue.value;
+    if (current.hasHydratedDefaultVenue) {
+      return;
+    }
+    final selectedVenueId = current.selectedVenueId?.trim();
+    if (selectedVenueId != null && selectedVenueId.isNotEmpty) {
+      _replaceEventFormState(current.copyWith(hasHydratedDefaultVenue: true));
+      return;
+    }
+    if ((current.locationMode == 'physical' ||
+            current.locationMode == 'hybrid') &&
+        venues.isNotEmpty) {
+      _replaceEventFormState(
+        current.copyWith(
+          selectedVenue: venues.first,
+          hasHydratedDefaultVenue: true,
+        ),
+      );
+      return;
+    }
+    _replaceEventFormState(current.copyWith(hasHydratedDefaultVenue: true));
+  }
+
+  void _hydrateDefaultEventTypeFromCatalog() {
+    final eventTypes = eventTypeCatalogStreamValue.value;
+    final current = eventFormStateStreamValue.value;
+    if (eventTypes.isEmpty) {
+      return;
+    }
+    final selectedTypeSlug = current.selectedTypeSlug?.trim();
+    if (selectedTypeSlug != null &&
+        selectedTypeSlug.isNotEmpty &&
+        eventTypes.any((type) => type.slug.trim() == selectedTypeSlug)) {
+      final sanitized = _sanitizeEventTaxonomyTermsForSelectedType(current);
+      if (!identical(sanitized, current)) {
+        _replaceEventFormState(sanitized);
+      }
+      return;
+    }
+    _replaceEventFormState(
+      _sanitizeEventTaxonomyTermsForSelectedType(
+        current.copyWith(selectedTypeSlug: eventTypes.first.slug.trim()),
+      ),
+    );
+  }
+
+  TenantAdminEventFormState _sanitizeEventTaxonomyTermsForSelectedType(
+    TenantAdminEventFormState state,
+  ) {
+    final allowedTaxonomies = _allowedTaxonomiesForEventType(
+      state.selectedTypeSlug,
+    );
+    final sanitizedSelectedTaxonomyTerms = _sanitizeTaxonomySelectionMap(
+      state.selectedTaxonomyTerms,
+      allowedTaxonomies,
+    );
+    final sanitizedOccurrences = state.occurrences
+        .map((occurrence) {
+          final sanitizedTerms = _sanitizeTaxonomyTerms(
+            occurrence.taxonomyTerms,
+            allowedTaxonomies,
+          );
+          if (_taxonomyTermMapsEqual(
+            _taxonomyTermsToSelectionMap(occurrence.taxonomyTerms),
+            _taxonomyTermsToSelectionMap(sanitizedTerms),
+          )) {
+            return occurrence;
+          }
+          return _copyOccurrence(occurrence, taxonomyTerms: sanitizedTerms);
+        })
+        .toList(growable: false);
+
+    final selectedUnchanged = _taxonomyTermMapsEqual(
+      state.selectedTaxonomyTerms,
+      sanitizedSelectedTaxonomyTerms,
+    );
+    final occurrencesUnchanged = _occurrenceTaxonomyTermsEqual(
+      state.occurrences,
+      sanitizedOccurrences,
+    );
+
+    if (selectedUnchanged && occurrencesUnchanged) {
+      return state;
+    }
+    return state.copyWith(
+      selectedTaxonomyTerms: Map<String, Set<String>>.unmodifiable(
+        sanitizedSelectedTaxonomyTerms.map(
+          (key, value) => MapEntry(key, Set<String>.unmodifiable(value)),
+        ),
+      ),
+      occurrences: List<TenantAdminEventOccurrence>.unmodifiable(
+        sanitizedOccurrences,
+      ),
+    );
+  }
+
+  Map<String, Set<String>> _sanitizeTaxonomySelectionMap(
+    Map<String, Set<String>> termsByTaxonomy,
+    Set<String> allowedTaxonomies,
+  ) {
+    if (allowedTaxonomies.isEmpty) {
+      return const <String, Set<String>>{};
+    }
+
+    final sanitized = <String, Set<String>>{};
+    for (final entry in termsByTaxonomy.entries) {
+      final taxonomySlug = entry.key.trim();
+      if (!allowedTaxonomies.contains(taxonomySlug)) {
+        continue;
+      }
+      final values = entry.value
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toSet();
+      if (values.isNotEmpty) {
+        sanitized[taxonomySlug] = values;
+      }
+    }
+    return sanitized;
+  }
+
+  TenantAdminTaxonomyTerms _sanitizeTaxonomyTerms(
+    TenantAdminTaxonomyTerms taxonomyTerms,
+    Set<String> allowedTaxonomies,
+  ) {
+    return _taxonomyTermsFromSelectionMap(
+      _sanitizeTaxonomySelectionMap(
+        _taxonomyTermsToSelectionMap(taxonomyTerms),
+        allowedTaxonomies,
+      ),
+    );
+  }
+
+  bool _isTaxonomyAllowedForSelectedEventType(
+    String taxonomySlug,
+    TenantAdminEventFormState state,
+  ) {
+    final normalized = taxonomySlug.trim();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return _allowedTaxonomiesForEventType(
+      state.selectedTypeSlug,
+    ).contains(normalized);
+  }
+
+  Set<String> _allowedTaxonomiesForEventType(String? typeSlug) {
+    final normalizedTypeSlug = typeSlug?.trim();
+    if (normalizedTypeSlug == null || normalizedTypeSlug.isEmpty) {
+      return const <String>{};
+    }
+    for (final type in eventTypeCatalogStreamValue.value) {
+      if (type.slug.trim() != normalizedTypeSlug) {
+        continue;
+      }
+      final allowed = type.allowedTaxonomies.value
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toSet();
+      if (allowed.isNotEmpty) {
+        return allowed;
+      }
+      break;
+    }
+    if (_eventTypeTaxonomyFallbackSlug == normalizedTypeSlug &&
+        _eventTypeTaxonomyFallbackAllowedSlugs.isNotEmpty) {
+      return _eventTypeTaxonomyFallbackAllowedSlugs;
+    }
+    return const <String>{};
+  }
+
+  bool _taxonomyTermMapsEqual(
+    Map<String, Set<String>> left,
+    Map<String, Set<String>> right,
+  ) {
+    if (left.length != right.length) {
+      return false;
+    }
+    for (final entry in left.entries) {
+      final rightValues = right[entry.key];
+      if (rightValues == null ||
+          rightValues.length != entry.value.length ||
+          !rightValues.containsAll(entry.value)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _occurrenceTaxonomyTermsEqual(
+    List<TenantAdminEventOccurrence> left,
+    List<TenantAdminEventOccurrence> right,
+  ) {
+    if (left.length != right.length) {
+      return false;
+    }
+    for (var index = 0; index < left.length; index++) {
+      if (!_taxonomyTermMapsEqual(
+        _taxonomyTermsToSelectionMap(left[index].taxonomyTerms),
+        _taxonomyTermsToSelectionMap(right[index].taxonomyTerms),
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Map<String, Set<String>> _taxonomyTermsToSelectionMap(
+    TenantAdminTaxonomyTerms taxonomyTerms,
+  ) {
+    final selectedTaxonomyTerms = <String, Set<String>>{};
+    for (final term in taxonomyTerms) {
+      final taxonomySlug = term.type.trim();
+      final termSlug = term.value.trim();
+      if (taxonomySlug.isEmpty || termSlug.isEmpty) {
+        continue;
+      }
+      selectedTaxonomyTerms
+          .putIfAbsent(taxonomySlug, () => <String>{})
+          .add(termSlug);
+    }
+    return selectedTaxonomyTerms;
+  }
+
+  TenantAdminTaxonomyTerms _taxonomyTermsFromSelectionMap(
+    Map<String, Set<String>> termsByTaxonomy,
+  ) {
+    final terms = TenantAdminTaxonomyTerms();
+    final taxonomySlugs = termsByTaxonomy.keys.toList(growable: false)..sort();
+    for (final taxonomySlug in taxonomySlugs) {
+      final termSlugs = termsByTaxonomy[taxonomySlug]!.toList(growable: false)
+        ..sort();
+      for (final termSlug in termSlugs) {
+        terms.add(
+          tenantAdminTaxonomyTermFromRaw(type: taxonomySlug, value: termSlug),
+        );
+      }
+    }
+    return terms;
+  }
+
+  void initEventTypeForm({TenantAdminEventType? existingType}) {
+    if (_eventTypeNameSyncListener != null) {
+      eventTypeNameController.removeListener(_eventTypeNameSyncListener!);
+      _eventTypeNameSyncListener = null;
+    }
+
+    final isEdit = existingType != null;
+    _initialEventTypeAllowedTaxonomies = List<String>.unmodifiable(
+      (existingType?.allowedTaxonomies.value ?? const <String>[])
+          .map((entry) => entry.trim())
+          .where((entry) => entry.isNotEmpty)
+          .toSet()
+          .toList(growable: false),
+    );
+    eventTypeNameController.text = existingType?.name ?? '';
+    eventTypeSlugController.text = existingType?.slug ?? '';
+    eventTypeDescriptionController.text = existingType?.description ?? '';
+    _syncEventTypeVisualForm(existingType?.visual);
+    setEventTypeAllowedTaxonomies(
+      existingType?.allowedTaxonomies.value ?? const [],
+    );
+
+    final nextState = TenantAdminEventTypeFormState(
+      isEdit: isEdit,
+      isSlugAutoEnabled: !isEdit,
+      isSaving: false,
+      formError: null,
+    );
+    eventTypeFormStateStreamValue.addValue(nextState);
+    if (!isEdit) {
+      _eventTypeNameSyncListener = _syncEventTypeSlugFromName;
+      eventTypeNameController.addListener(_eventTypeNameSyncListener!);
+      _syncEventTypeSlugFromName();
+    }
+  }
+
+  void updateEventTypeSlugAutoFlagFromManualInput(String value) {
+    final current = eventTypeFormStateStreamValue.value;
+    if (current.isEdit || !current.isSlugAutoEnabled) {
+      return;
+    }
+    final generated = _tenantAdminSlugify(eventTypeNameController.text);
+    if (value == generated) {
+      return;
+    }
+    eventTypeFormStateStreamValue.addValue(
+      current.copyWith(isSlugAutoEnabled: false),
+    );
+  }
+
+  void setEventTypeFormSaving(bool value) {
+    eventTypeFormStateStreamValue.addValue(
+      eventTypeFormStateStreamValue.value.copyWith(isSaving: value),
+    );
+  }
+
+  void setEventTypeFormError(String? value) {
+    eventTypeFormStateStreamValue.addValue(
+      eventTypeFormStateStreamValue.value.copyWith(formError: value),
+    );
+  }
+
+  List<String> get selectedEventTypeAllowedTaxonomies =>
+      List<String>.unmodifiable(eventTypeAllowedTaxonomiesStreamValue.value);
+
+  void toggleEventTypeAllowedTaxonomy(String taxonomySlug) {
+    final slug = taxonomySlug.trim();
+    if (slug.isEmpty) {
+      return;
+    }
+    final availableSlugs = taxonomiesStreamValue.value
+        .map((taxonomy) => taxonomy.slug)
+        .toSet();
+    if (!availableSlugs.contains(slug)) {
+      return;
+    }
+    final next = <String>[...eventTypeAllowedTaxonomiesStreamValue.value];
+    if (next.contains(slug)) {
+      next.remove(slug);
+    } else {
+      next.add(slug);
+    }
+    _setEventTypeAllowedTaxonomies(next);
+  }
+
+  void setEventTypeAllowedTaxonomies(List<String> slugs) {
+    _setEventTypeAllowedTaxonomies(slugs);
+    _sanitizeEventTypeAllowedTaxonomies();
+  }
+
+  Future<TenantAdminEventType> saveEventType({
+    required String name,
+    required String slug,
+    String? description,
+    List<String> allowedTaxonomies = const [],
+    TenantAdminPoiVisual? visual,
+    TenantAdminMediaUpload? typeAssetUpload,
+    bool removeTypeAsset = false,
+    bool includeVisual = false,
+    TenantAdminEventType? existingType,
+  }) async {
+    final normalizedName = name.trim();
+    final normalizedSlug = slug.trim();
+    final normalizedDescription = description?.trim();
+    final descriptionForCreate =
+        (normalizedDescription == null || normalizedDescription.isEmpty)
+        ? null
+        : normalizedDescription;
+    final descriptionForUpdate =
+        (normalizedDescription == null || normalizedDescription.isEmpty)
+        ? null
+        : normalizedDescription;
+    final allowedTaxonomyValues = allowedTaxonomies
+        .map(
+          (entry) => TenantAdminEventsRepoString.fromRaw(
+            entry,
+            defaultValue: '',
+            isRequired: true,
+          ),
+        )
+        .toList(growable: false);
+
+    final eventTypeId = existingType?.id?.trim();
+    final isEdit = eventTypeId != null && eventTypeId.isNotEmpty;
+
+    final saved = isEdit
+        ? includeVisual
+              ? await _eventsRepository.updateEventTypeWithVisual(
+                  eventTypeId: _toEventsText(eventTypeId),
+                  name: _toEventsText(normalizedName),
+                  slug: _toEventsText(normalizedSlug),
+                  description: _toNullableEventsText(descriptionForUpdate),
+                  allowedTaxonomies: allowedTaxonomyValues,
+                  visual: visual,
+                  typeAssetUpload: typeAssetUpload,
+                  removeTypeAsset: TenantAdminEventsRepoBool.fromRaw(
+                    removeTypeAsset,
+                    defaultValue: false,
+                  ),
+                )
+              : await _eventsRepository.updateEventType(
+                  eventTypeId: _toEventsText(eventTypeId),
+                  name: _toEventsText(normalizedName),
+                  slug: _toEventsText(normalizedSlug),
+                  description: _toNullableEventsText(descriptionForUpdate),
+                  allowedTaxonomies: allowedTaxonomyValues,
+                )
+        : includeVisual
+        ? await _eventsRepository.createEventTypeWithVisual(
+            name: _toEventsText(normalizedName),
+            slug: _toEventsText(normalizedSlug),
+            description: _toNullableEventsText(descriptionForCreate),
+            allowedTaxonomies: allowedTaxonomyValues,
+            visual: visual,
+            typeAssetUpload: typeAssetUpload,
+          )
+        : await _eventsRepository.createEventType(
+            name: _toEventsText(normalizedName),
+            slug: _toEventsText(normalizedSlug),
+            description: _toNullableEventsText(descriptionForCreate),
+            allowedTaxonomies: allowedTaxonomyValues,
+          );
+
+    await _loadEventTypeCatalog();
+    return saved;
+  }
+
+  Future<void> submitDeleteEventType(TenantAdminEventType type) async {
+    final eventTypeId = type.id?.trim();
+    if (eventTypeId == null || eventTypeId.isEmpty) {
+      throw const FormatException(
+        'Event type id is required to delete this entry.',
+      );
+    }
+
+    await _eventsRepository.deleteEventType(_toEventsText(eventTypeId));
+    await _loadEventTypeCatalog();
+  }
+
+  Future<void> loadFormDependencies({String? accountSlug}) async {
+    _formDependencyMode = _TenantAdminEventFormDependencyMode.full;
+    final requestToken = ++_formDependenciesLoadSerial;
+    final normalizedAccountSlug = _normalizeOptionalText(accountSlug);
+    _formAccountProfileCandidatesAccountSlug = normalizedAccountSlug;
+    final cleanBaselineBeforeLoad = _eventFormInitialFingerprint;
+    final tasks = <Future<void>>[
+      _loadEventTypeCatalog(requestToken: requestToken),
+      _loadRelatedAccountProfileTypes(requestToken: requestToken),
+      _loadAccountProfileCandidates(
+        accountSlug: normalizedAccountSlug,
+        requestToken: requestToken,
+      ),
+    ];
+
+    await Future.wait<void>(tasks);
+    if (!_isDisposed && requestToken == _formDependenciesLoadSerial) {
+      final canRefreshCleanBaseline =
+          cleanBaselineBeforeLoad != null &&
+          _eventFormFingerprint() == cleanBaselineBeforeLoad;
+      _hydrateDefaultEventVenueFromCandidates();
+      _hydrateDefaultEventTypeFromCatalog();
+      await _refreshSelectedEventTypeTaxonomyDependencies();
+      if (canRefreshCleanBaseline) {
+        markEventFormClean();
+      }
+    }
+  }
+
+  Future<void> loadBootstrapCreateDependencies({String? accountSlug}) async {
+    _formDependencyMode = _TenantAdminEventFormDependencyMode.bootstrapCreate;
+    final requestToken = ++_formDependenciesLoadSerial;
+    final normalizedAccountSlug = _normalizeOptionalText(accountSlug);
+    _formAccountProfileCandidatesAccountSlug = normalizedAccountSlug;
+    final cleanBaselineBeforeLoad = _eventFormInitialFingerprint;
+    _resetHiddenBootstrapDependencyState();
+
+    await Future.wait<void>(<Future<void>>[
+      _loadEventTypeCatalog(requestToken: requestToken),
+      _loadVenueCandidates(
+        accountSlug: normalizedAccountSlug,
+        requestToken: requestToken,
+      ),
+    ]);
+
+    if (!_isDisposed && requestToken == _formDependenciesLoadSerial) {
+      final canRefreshCleanBaseline =
+          cleanBaselineBeforeLoad != null &&
+          _eventFormFingerprint() == cleanBaselineBeforeLoad;
+      _hydrateDefaultEventVenueFromCandidates();
+      _hydrateDefaultEventTypeFromCatalog();
+      if (canRefreshCleanBaseline) {
+        markEventFormClean();
+      }
+    }
+  }
+
+  Future<void> ensureVenueCandidatesReady() async {
+    await _waitForAccountProfileCandidatesLoad();
+    if (_isDisposed || venueCandidatesStreamValue.value.isNotEmpty) {
+      return;
+    }
+
+    await _loadAccountProfileCandidates(
+      accountSlug: _formAccountProfileCandidatesAccountSlug,
+    );
+    await _waitForAccountProfileCandidatesLoad();
+  }
+
+  Future<void> _loadEventTypeCatalog({int? requestToken}) async {
+    try {
+      final eventTypes = await _eventsRepository.fetchEventTypes();
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+      final sorted = eventTypes.toList(growable: false)
+        ..sort(
+          (left, right) =>
+              left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+        );
+      eventTypeCatalogStreamValue.addValue(List.unmodifiable(sorted));
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      submitErrorMessageStreamValue.addValue(error.toString());
+    }
+  }
+
+  Future<void> _loadRelatedAccountProfileTypes({int? requestToken}) async {
+    final repository = _accountProfilesRepository;
+    if (repository == null) {
+      return;
+    }
+
+    try {
+      await repository.loadAllProfileTypes();
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+      final types =
+          repository.profileTypesStreamValue.value ??
+          const <TenantAdminProfileTypeDefinition>[];
+      relatedAccountProfileTypesStreamValue.addValue(List.unmodifiable(types));
+      if (_relatedAccountProfileSelectedType != null &&
+          !types.any(
+            (profileType) =>
+                profileType.type == _relatedAccountProfileSelectedType,
+          )) {
+        _relatedAccountProfileSelectedType = null;
+        relatedAccountProfileSelectedTypeStreamValue.addValue(null);
+      }
+    } catch (_) {
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+      relatedAccountProfileTypesStreamValue.addValue(const []);
+    }
+  }
+
+  Future<void> _loadTaxonomies() async {
+    taxonomyLoadingStreamValue.addValue(true);
+    try {
+      await _taxonomiesRepository.loadAllTaxonomies();
+      final taxonomies =
+          _taxonomiesRepository.taxonomiesStreamValue.value ??
+          const <TenantAdminTaxonomyDefinition>[];
+      final filtered = taxonomies
+          .where((taxonomy) => taxonomy.appliesToEvent())
+          .toList(growable: false);
+      filtered.sort(
+        (left, right) =>
+            left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+      );
+      if (_isDisposed) {
+        return;
+      }
+      taxonomiesStreamValue.addValue(filtered);
+      _reconcileEventTypeAllowedTaxonomies();
+      _taxonomyTermsCacheBySlug.clear();
+      _loadedTaxonomyTermsKey = null;
+      _loadingTaxonomyTermsKey = null;
+      _taxonomyTermsLoadSerial += 1;
+      taxonomyTermsBySlugStreamValue.addValue(const {});
+      taxonomyErrorStreamValue.addValue(null);
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      taxonomiesStreamValue.addValue(const []);
+      eventTypeAllowedTaxonomiesStreamValue.addValue(const []);
+      taxonomyErrorStreamValue.addValue(error.toString());
+    } finally {
+      if (!_isDisposed) {
+        taxonomyLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<void> _refreshSelectedEventTypeTaxonomyDependencies() async {
+    if (_loadingTaxonomyTermsKey != null) {
+      _cancelInFlightTaxonomyTermsLoad();
+    }
+    final loadedAnyTaxonomy = await _loadTaxonomiesForSelectedEventType();
+    if (!loadedAnyTaxonomy || _isDisposed) {
+      return;
+    }
+
+    await _loadTermsForSelectedEventType();
+  }
+
+  Future<bool> _loadTaxonomiesForSelectedEventType() async {
+    for (final taxonomy in taxonomiesStreamValue.value) {
+      final normalizedSlug = taxonomy.slug.trim();
+      if (normalizedSlug.isEmpty || !taxonomy.appliesToEvent()) {
+        continue;
+      }
+      _taxonomyDefinitionsCacheBySlug.putIfAbsent(
+        normalizedSlug,
+        () => taxonomy,
+      );
+    }
+
+    final allowedTaxonomySlugs = _allowedTaxonomiesForEventType(
+      eventFormStateStreamValue.value.selectedTypeSlug,
+    ).toList(growable: false)..sort();
+
+    if (allowedTaxonomySlugs.isEmpty) {
+      if (_isDisposed) {
+        return false;
+      }
+      taxonomiesStreamValue.addValue(const []);
+      _loadedTaxonomyTermsKey = null;
+      _loadingTaxonomyTermsKey = null;
+      _taxonomyTermsLoadSerial += 1;
+      taxonomyTermsBySlugStreamValue.addValue(const {});
+      taxonomyErrorStreamValue.addValue(null);
+      taxonomyLoadingStreamValue.addValue(false);
+      return false;
+    }
+
+    final loadSerial = ++_taxonomyDefinitionsLoadSerial;
+    final missingSlugs = <String>[];
+    for (final slug in allowedTaxonomySlugs) {
+      if (_taxonomyDefinitionsCacheBySlug[slug] == null) {
+        missingSlugs.add(slug);
+      }
+    }
+
+    if (missingSlugs.isNotEmpty) {
+      final lookupRepository = _taxonomiesScopedLookupRepository;
+      if (lookupRepository == null) {
+        if (!_isDisposed) {
+          taxonomiesStreamValue.addValue(const []);
+          taxonomyTermsBySlugStreamValue.addValue(const {});
+          taxonomyErrorStreamValue.addValue(
+            'Scoped taxonomy lookup repository is not configured.',
+          );
+          taxonomyLoadingStreamValue.addValue(false);
+        }
+        return false;
+      }
+
+      taxonomyLoadingStreamValue.addValue(true);
+      try {
+        final fetched = await lookupRepository.fetchTaxonomiesBySlugs(
+          slugs: missingSlugs
+              .map(
+                (slug) => TenantAdminTaxRepoString.fromRaw(
+                  slug,
+                  defaultValue: '',
+                  isRequired: true,
+                ),
+              )
+              .toList(growable: false),
+          appliesTo: TenantAdminTaxRepoString.fromRaw(
+            'event',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        );
+        if (_isDisposed || loadSerial != _taxonomyDefinitionsLoadSerial) {
+          return false;
+        }
+        for (final taxonomy in fetched) {
+          final normalizedSlug = taxonomy.slug.trim();
+          if (normalizedSlug.isEmpty || !taxonomy.appliesToEvent()) {
+            continue;
+          }
+          _taxonomyDefinitionsCacheBySlug[normalizedSlug] = taxonomy;
+        }
+      } catch (error) {
+        if (_isDisposed || loadSerial != _taxonomyDefinitionsLoadSerial) {
+          return false;
+        }
+        taxonomiesStreamValue.addValue(const []);
+        taxonomyTermsBySlugStreamValue.addValue(const {});
+        taxonomyErrorStreamValue.addValue(error.toString());
+        taxonomyLoadingStreamValue.addValue(false);
+        return false;
+      }
+    }
+
+    if (_isDisposed || loadSerial != _taxonomyDefinitionsLoadSerial) {
+      return false;
+    }
+
+    final scopedDefinitions =
+        allowedTaxonomySlugs
+            .map((slug) => _taxonomyDefinitionsCacheBySlug[slug])
+            .whereType<TenantAdminTaxonomyDefinition>()
+            .toList(growable: false)
+          ..sort(
+            (left, right) =>
+                left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+          );
+
+    taxonomiesStreamValue.addValue(List.unmodifiable(scopedDefinitions));
+    taxonomyErrorStreamValue.addValue(null);
+    taxonomyLoadingStreamValue.addValue(false);
+    return scopedDefinitions.isNotEmpty;
+  }
+
+  Future<void> _loadTermsForSelectedEventType() async {
+    final allowedTaxonomySlugs = _allowedTaxonomiesForEventType(
+      eventFormStateStreamValue.value.selectedTypeSlug,
+    );
+    final sortedAllowedSlugs = allowedTaxonomySlugs.toList(growable: false)
+      ..sort();
+    final cacheKey = sortedAllowedSlugs.join('|');
+
+    if (_loadedTaxonomyTermsKey == cacheKey) {
+      if (_loadingTaxonomyTermsKey != null) {
+        _cancelInFlightTaxonomyTermsLoad();
+      }
+      return;
+    }
+
+    if (_loadingTaxonomyTermsKey == cacheKey) {
+      return;
+    }
+
+    final loadSerial = ++_taxonomyTermsLoadSerial;
+
+    if (sortedAllowedSlugs.isEmpty) {
+      _publishTaxonomyTermsLoadResult(
+        cacheKey: cacheKey,
+        termsBySlug: const {},
+      );
+      return;
+    }
+
+    final taxonomyBySlug = {
+      for (final taxonomy in taxonomiesStreamValue.value)
+        taxonomy.slug: taxonomy,
+    };
+    if (taxonomyBySlug.isEmpty) {
+      _publishTaxonomyTermsLoadResult(
+        cacheKey: cacheKey,
+        termsBySlug: const {},
+      );
+      return;
+    }
+    final missingDefinitions = <TenantAdminTaxonomyDefinition>[];
+    final scopedTerms = <String, List<TenantAdminTaxonomyTermDefinition>>{};
+    for (final taxonomySlug in sortedAllowedSlugs) {
+      final cachedTerms = _taxonomyTermsCacheBySlug[taxonomySlug];
+      if (cachedTerms != null) {
+        scopedTerms[taxonomySlug] = cachedTerms;
+        continue;
+      }
+      final definition = taxonomyBySlug[taxonomySlug];
+      if (definition != null && definition.id.trim().isNotEmpty) {
+        missingDefinitions.add(definition);
+      }
+    }
+
+    if (missingDefinitions.isEmpty) {
+      _publishTaxonomyTermsLoadResult(
+        cacheKey: cacheKey,
+        termsBySlug: scopedTerms,
+      );
+      return;
+    }
+
+    _loadingTaxonomyTermsKey = cacheKey;
+    taxonomyLoadingStreamValue.addValue(true);
+    try {
+      final fetchedById = await _batchTermsRepository.fetchTermsByTaxonomyIds(
+        taxonomyIds: missingDefinitions
+            .map(
+              (taxonomy) => TenantAdminTaxRepoString.fromRaw(
+                taxonomy.id,
+                defaultValue: '',
+                isRequired: true,
+              ),
+            )
+            .toList(growable: false),
+      );
+      if (_isDisposed || loadSerial != _taxonomyTermsLoadSerial) {
+        return;
+      }
+      for (final taxonomy in missingDefinitions) {
+        final terms = fetchedById.termsForId(
+          tenantAdminRequiredText(taxonomy.id),
+        );
+        _taxonomyTermsCacheBySlug[taxonomy.slug] =
+            List<TenantAdminTaxonomyTermDefinition>.unmodifiable(terms);
+        scopedTerms[taxonomy.slug] = _taxonomyTermsCacheBySlug[taxonomy.slug]!;
+      }
+      for (final taxonomySlug in sortedAllowedSlugs) {
+        final cachedTerms = _taxonomyTermsCacheBySlug[taxonomySlug];
+        if (cachedTerms != null) {
+          scopedTerms[taxonomySlug] = cachedTerms;
+        }
+      }
+      _loadedTaxonomyTermsKey = cacheKey;
+      taxonomyTermsBySlugStreamValue.addValue(Map.unmodifiable(scopedTerms));
+      taxonomyErrorStreamValue.addValue(null);
+    } catch (error) {
+      if (_isDisposed || loadSerial != _taxonomyTermsLoadSerial) {
+        return;
+      }
+      taxonomyTermsBySlugStreamValue.addValue(const {});
+      taxonomyErrorStreamValue.addValue(error.toString());
+    } finally {
+      if (!_isDisposed && loadSerial == _taxonomyTermsLoadSerial) {
+        _loadingTaxonomyTermsKey = null;
+        taxonomyLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  void _cancelInFlightTaxonomyTermsLoad() {
+    _taxonomyTermsLoadSerial += 1;
+    _loadingTaxonomyTermsKey = null;
+    taxonomyLoadingStreamValue.addValue(false);
+  }
+
+  void _publishTaxonomyTermsLoadResult({
+    required String cacheKey,
+    required Map<String, List<TenantAdminTaxonomyTermDefinition>> termsBySlug,
+  }) {
+    _loadedTaxonomyTermsKey = cacheKey;
+    _loadingTaxonomyTermsKey = null;
+    taxonomyTermsBySlugStreamValue.addValue(Map.unmodifiable(termsBySlug));
+    taxonomyErrorStreamValue.addValue(null);
+    taxonomyLoadingStreamValue.addValue(false);
+  }
+
+  Future<void> loadEventTypeFormTaxonomies() async {
+    await _loadTaxonomies();
+  }
+
+  Future<void> prepareAccountProfilePicker({
+    required TenantAdminEventAccountProfileCandidateType candidateType,
+    String? accountSlug,
+  }) async {
+    final normalizedAccountSlug = _normalizeOptionalText(accountSlug);
+    final typeChanged = candidateType != _accountProfilePickerType;
+    final accountChanged =
+        normalizedAccountSlug != _accountProfilePickerAccountSlug;
+    final hasSearch = accountProfilePickerQueryStreamValue.value
+        .trim()
+        .isNotEmpty;
+    final needsInitialLoad =
+        _accountProfilePickerCurrentPage <= 0 &&
+        accountProfilePickerResultsStreamValue.value.isEmpty;
+
+    _accountProfilePickerType = candidateType;
+    _accountProfilePickerAccountSlug = normalizedAccountSlug;
+    if (accountProfilePickerSearchController.text.isNotEmpty) {
+      accountProfilePickerSearchController.text = '';
+    }
+    accountProfilePickerQueryStreamValue.addValue('');
+    accountProfilePickerErrorStreamValue.addValue('');
+
+    if (accountProfilePickerScrollController.hasClients) {
+      accountProfilePickerScrollController.jumpTo(0);
+    }
+
+    if (needsInitialLoad &&
+        _seedAccountProfilePickerFromBootstrapPage(
+          candidateType: candidateType,
+          accountSlug: normalizedAccountSlug,
+        )) {
+      return;
+    }
+
+    if (typeChanged || accountChanged || hasSearch || needsInitialLoad) {
+      await _reloadAccountProfilePicker(immediate: true);
+    }
+  }
+
+  Future<void> prepareRelatedAccountProfilePicker({String? accountSlug}) {
+    return prepareAccountProfilePicker(
+      candidateType:
+          TenantAdminEventAccountProfileCandidateType.relatedAccountProfile,
+      accountSlug: accountSlug,
+    );
+  }
+
+  Future<void> preparePhysicalHostAccountProfilePicker({String? accountSlug}) {
+    return prepareAccountProfilePicker(
+      candidateType: TenantAdminEventAccountProfileCandidateType.physicalHost,
+      accountSlug:
+          _normalizeOptionalText(accountSlug) ??
+          _formAccountProfileCandidatesAccountSlug,
+    );
+  }
+
+  Future<void> searchRelatedAccountProfileCandidatesForNestedGroups(
+    String query,
+  ) async {
+    await _ensureRelatedAccountProfilePickerReady();
+    updateRelatedAccountProfileSearchQuery(query);
+    await retryRelatedAccountProfileSearch();
+    await _loadRelatedAccountProfileCandidatePagesUntilQuerySatisfied(query);
+  }
+
+  Future<void> loadNextRelatedAccountProfileCandidatesForNestedGroups() async {
+    await _ensureRelatedAccountProfilePickerReady();
+    await loadNextRelatedAccountProfileSearchPage();
+  }
+
+  Future<void> _ensureRelatedAccountProfilePickerReady() async {
+    final normalizedAccountSlug = _normalizeOptionalText(
+      _formAccountProfileCandidatesAccountSlug,
+    );
+    if (_accountProfilePickerType ==
+            TenantAdminEventAccountProfileCandidateType.relatedAccountProfile &&
+        _accountProfilePickerAccountSlug == normalizedAccountSlug) {
+      return;
+    }
+
+    await prepareRelatedAccountProfilePicker(
+      accountSlug: normalizedAccountSlug,
+    );
+  }
+
+  Future<void> _loadRelatedAccountProfileCandidatePagesUntilQuerySatisfied(
+    String query,
+  ) async {
+    final normalizedQuery = query.trim().toLowerCase();
+    if (normalizedQuery.isEmpty) {
+      return;
+    }
+
+    while (!_isDisposed &&
+        accountProfilePickerHasMoreStreamValue.value &&
+        !_relatedAccountProfileCandidatesContainQuery(normalizedQuery)) {
+      await loadNextRelatedAccountProfileSearchPage();
+    }
+  }
+
+  TenantAdminAccountProfile? knownVenueCandidate(String? profileId) {
+    return _resolveKnownVenueCandidate(
+      profileId,
+      includeSelectedVenueFromState: true,
+    );
+  }
+
+  TenantAdminAccountProfile? _resolveKnownVenueCandidate(
+    String? profileId, {
+    required bool includeSelectedVenueFromState,
+  }) {
+    final normalizedProfileId = _normalizeOptionalText(profileId);
+    if (normalizedProfileId == null) {
+      return null;
+    }
+
+    final candidates = <TenantAdminAccountProfile>[
+      ...accountProfilePickerResultsStreamValue.value,
+      ...venueCandidatesStreamValue.value,
+      ..._knownProgrammingLocationProfiles(),
+    ];
+    final selectedVenue = eventFormStateStreamValue.value.selectedVenue;
+    if (includeSelectedVenueFromState && selectedVenue != null) {
+      candidates.insert(0, selectedVenue);
+    }
+    for (final candidate in candidates) {
+      if (candidate.id == normalizedProfileId) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  List<TenantAdminAccountProfile> _knownProgrammingLocationProfiles() {
+    final state = eventFormStateStreamValue.value;
+    final profiles = <TenantAdminAccountProfile>[];
+    for (final occurrence in state.occurrences) {
+      for (final item in occurrence.programmingItems) {
+        final locationProfile = item.locationProfile;
+        if (locationProfile != null) {
+          profiles.add(locationProfile);
+        }
+      }
+    }
+    return List<TenantAdminAccountProfile>.unmodifiable(
+      _mergeAccountProfiles(const <TenantAdminAccountProfile>[], profiles),
+    );
+  }
+
+  bool _relatedAccountProfileCandidatesContainQuery(String query) {
+    return relatedAccountProfileCandidatesStreamValue.value.any((profile) {
+      final displayName = profile.displayName.toLowerCase();
+      final profileType = profile.profileType.toLowerCase();
+      return displayName.contains(query) || profileType.contains(query);
+    });
+  }
+
+  void updateAccountProfilePickerSearchQuery(String query) {
+    if (accountProfilePickerQueryStreamValue.value == query) {
+      return;
+    }
+    accountProfilePickerQueryStreamValue.addValue(query);
+    _scheduleAccountProfilePickerReload(immediate: false);
+  }
+
+  void updateRelatedAccountProfileSearchQuery(String query) {
+    updateAccountProfilePickerSearchQuery(query);
+  }
+
+  void filterRelatedAccountProfileCandidatesByProfileType(String? profileType) {
+    final normalizedProfileType = _normalizeOptionalText(profileType);
+    if (_relatedAccountProfileSelectedType == normalizedProfileType) {
+      return;
+    }
+    _relatedAccountProfileSelectedType = normalizedProfileType;
+    relatedAccountProfileSelectedTypeStreamValue.addValue(
+      normalizedProfileType,
+    );
+    if (_accountProfilePickerType ==
+        TenantAdminEventAccountProfileCandidateType.relatedAccountProfile) {
+      _scheduleAccountProfilePickerReload(immediate: true);
+    }
+  }
+
+  Future<void> retryAccountProfilePickerSearch() async {
+    await _reloadAccountProfilePicker(immediate: true);
+  }
+
+  Future<void> retryRelatedAccountProfileSearch() async {
+    await retryAccountProfilePickerSearch();
+  }
+
+  Future<void> loadNextAccountProfilePickerPage() async {
+    await _loadAccountProfilePickerPage(
+      isInitial: false,
+      requestToken: _accountProfilePickerRequestToken,
+    );
+  }
+
+  Future<void> loadNextRelatedAccountProfileSearchPage() async {
+    await loadNextAccountProfilePickerPage();
+  }
+
+  Future<void> _loadAccountProfileCandidates({
+    String? accountSlug,
+    int? requestToken,
+  }) async {
+    final normalizedAccountSlug = _normalizeOptionalText(accountSlug);
+    accountProfileCandidatesLoadingStreamValue.addValue(true);
+    accountProfileCandidatesErrorStreamValue.addValue(null);
+
+    try {
+      final results = await Future.wait<Object>([
+        _fetchAccountProfileCandidatesFirstPage(
+          candidateType:
+              TenantAdminEventAccountProfileCandidateType.physicalHost,
+          accountSlug: normalizedAccountSlug,
+        ),
+        _fetchAccountProfileCandidatesFirstPage(
+          candidateType:
+              TenantAdminEventAccountProfileCandidateType.relatedAccountProfile,
+          accountSlug: normalizedAccountSlug,
+        ),
+      ]);
+
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+
+      final venuePage =
+          results[0] as TenantAdminPagedResult<TenantAdminAccountProfile>;
+      final relatedAccountProfilesPage =
+          results[1] as TenantAdminPagedResult<TenantAdminAccountProfile>;
+      final mergedVenueItems = _mergeBootstrapVenueCandidates(venuePage.items);
+      _bootstrapVenueCandidatesPage = tenantAdminPagedResultFromRaw(
+        items: mergedVenueItems,
+        hasMore: venuePage.hasMore,
+      );
+      _bootstrapRelatedAccountProfileCandidatesPage =
+          relatedAccountProfilesPage;
+
+      final venues = _bootstrapVenueCandidatesPage!.items;
+      final relatedAccountProfiles = relatedAccountProfilesPage.items;
+
+      venueCandidatesStreamValue.addValue(List.unmodifiable(venues));
+      _publishVisibleRelatedAccountProfileCandidates(relatedAccountProfiles);
+    } catch (error) {
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+      accountProfileCandidatesErrorStreamValue.addValue(error.toString());
+    } finally {
+      if (!_isDisposed &&
+          (requestToken == null ||
+              requestToken == _formDependenciesLoadSerial)) {
+        accountProfileCandidatesLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<void> _loadVenueCandidates({
+    String? accountSlug,
+    int? requestToken,
+  }) async {
+    final normalizedAccountSlug = _normalizeOptionalText(accountSlug);
+    accountProfileCandidatesLoadingStreamValue.addValue(true);
+    accountProfileCandidatesErrorStreamValue.addValue(null);
+
+    try {
+      final venuePage = await _fetchAccountProfileCandidatesFirstPage(
+        candidateType: TenantAdminEventAccountProfileCandidateType.physicalHost,
+        accountSlug: normalizedAccountSlug,
+      );
+
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+
+      final mergedVenueItems = _mergeBootstrapVenueCandidates(venuePage.items);
+      _bootstrapVenueCandidatesPage = tenantAdminPagedResultFromRaw(
+        items: mergedVenueItems,
+        hasMore: venuePage.hasMore,
+      );
+      venueCandidatesStreamValue.addValue(
+        List.unmodifiable(_bootstrapVenueCandidatesPage!.items),
+      );
+    } catch (error) {
+      if (_isDisposed ||
+          (requestToken != null &&
+              requestToken != _formDependenciesLoadSerial)) {
+        return;
+      }
+      accountProfileCandidatesErrorStreamValue.addValue(error.toString());
+    } finally {
+      if (!_isDisposed &&
+          (requestToken == null ||
+              requestToken == _formDependenciesLoadSerial)) {
+        accountProfileCandidatesLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<TenantAdminPagedResult<TenantAdminAccountProfile>>
+  _fetchAccountProfileCandidatesFirstPage({
+    required TenantAdminEventAccountProfileCandidateType candidateType,
+    String? accountSlug,
+  }) async {
+    return _fetchAccountProfileCandidatesPage(
+      candidateType: candidateType,
+      pageNumber: 1,
+      accountSlug: accountSlug,
+    );
+  }
+
+  Future<TenantAdminPagedResult<TenantAdminAccountProfile>>
+  _fetchAccountProfileCandidatesPage({
+    required TenantAdminEventAccountProfileCandidateType candidateType,
+    required int pageNumber,
+    String? accountSlug,
+    String query = '',
+    String? profileType,
+  }) async {
+    final normalizedQuery = query.trim();
+    return TenantAdminEventAccountProfileCandidatesPageLoader(
+      eventsRepository: _eventsRepository,
+    ).loadPage(
+      candidateType: candidateType,
+      pageNumber: pageNumber,
+      search: normalizedQuery.isEmpty ? null : _toEventsText(normalizedQuery),
+      profileType: _toNullableEventsText(profileType),
+      accountSlug: _toNullableEventsText(accountSlug),
+    );
+  }
+
+  bool _seedAccountProfilePickerFromBootstrapPage({
+    required TenantAdminEventAccountProfileCandidateType candidateType,
+    String? accountSlug,
+  }) {
+    if (_accountProfilePickerCurrentPage > 0 ||
+        accountProfilePickerResultsStreamValue.value.isNotEmpty ||
+        (candidateType ==
+                TenantAdminEventAccountProfileCandidateType
+                    .relatedAccountProfile &&
+            _relatedAccountProfileSelectedType != null) ||
+        _normalizeOptionalText(accountSlug) !=
+            _formAccountProfileCandidatesAccountSlug) {
+      return false;
+    }
+
+    final pageResult = switch (candidateType) {
+      TenantAdminEventAccountProfileCandidateType.relatedAccountProfile =>
+        _bootstrapRelatedAccountProfileCandidatesPage,
+      TenantAdminEventAccountProfileCandidateType.physicalHost =>
+        _bootstrapVenueCandidatesPage,
+    };
+    if (pageResult == null) {
+      return false;
+    }
+
+    accountProfilePickerResultsStreamValue.addValue(
+      List.unmodifiable(pageResult.items),
+    );
+    accountProfilePickerHasMoreStreamValue.addValue(pageResult.hasMore);
+    _accountProfilePickerCurrentPage = 1;
+
+    return true;
+  }
+
+  Future<TenantAdminPagedResult<TenantAdminAccountProfile>>
+  _loadAccountProfilePickerCandidates({
+    required TenantAdminEventAccountProfileCandidateType candidateType,
+    required bool isInitial,
+    required String query,
+    String? accountSlug,
+  }) {
+    return _fetchAccountProfileCandidatesPage(
+      candidateType: candidateType,
+      pageNumber: isInitial ? 1 : _accountProfilePickerCurrentPage + 1,
+      accountSlug: accountSlug,
+      query: query,
+      profileType:
+          candidateType ==
+              TenantAdminEventAccountProfileCandidateType.relatedAccountProfile
+          ? _relatedAccountProfileSelectedType
+          : null,
+    );
+  }
+
+  Future<void> _waitForAccountProfileCandidatesLoad() async {
+    while (accountProfileCandidatesLoadingStreamValue.value) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  void _scheduleAccountProfilePickerReload({required bool immediate}) {
+    _accountProfilePickerDebounce?.cancel();
+    final nextRequestToken = _accountProfilePickerRequestToken + 1;
+    _accountProfilePickerRequestToken = nextRequestToken;
+    if (immediate) {
+      unawaited(
+        _loadAccountProfilePickerPage(
+          isInitial: true,
+          requestToken: nextRequestToken,
+        ),
+      );
+      return;
+    }
+    _accountProfilePickerDebounce = Timer(
+      _accountProfilePickerDebounceDuration,
+      () {
+        unawaited(
+          _loadAccountProfilePickerPage(
+            isInitial: true,
+            requestToken: nextRequestToken,
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _reloadAccountProfilePicker({required bool immediate}) async {
+    _scheduleAccountProfilePickerReload(immediate: immediate);
+    if (!immediate) {
+      return;
+    }
+
+    while (_isFetchingAccountProfilePickerPage ||
+        accountProfilePickerLoadingStreamValue.value) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+  }
+
+  Future<void> _loadAccountProfilePickerPage({
+    required bool isInitial,
+    required int requestToken,
+  }) async {
+    final candidateType = _accountProfilePickerType;
+    if (candidateType == null) {
+      return;
+    }
+    if (_isFetchingAccountProfilePickerPage) {
+      if (isInitial) {
+        _hasPendingAccountProfilePickerReload = true;
+      }
+      return;
+    }
+    if (!isInitial && !accountProfilePickerHasMoreStreamValue.value) {
+      return;
+    }
+
+    _isFetchingAccountProfilePickerPage = true;
+    if (isInitial) {
+      accountProfilePickerLoadingStreamValue.addValue(true);
+      accountProfilePickerErrorStreamValue.addValue('');
+    } else {
+      accountProfilePickerPageLoadingStreamValue.addValue(true);
+    }
+
+    try {
+      final query = accountProfilePickerQueryStreamValue.value.trim();
+      final pageResult = await _loadAccountProfilePickerCandidates(
+        candidateType: candidateType,
+        accountSlug: _accountProfilePickerAccountSlug,
+        isInitial: isInitial,
+        query: query,
+      );
+
+      if (_isDisposed || requestToken != _accountProfilePickerRequestToken) {
+        return;
+      }
+
+      final nextItems = isInitial
+          ? pageResult.items
+          : _mergeAccountProfiles(
+              accountProfilePickerResultsStreamValue.value,
+              pageResult.items,
+            );
+
+      _accountProfilePickerCurrentPage = isInitial
+          ? 1
+          : _accountProfilePickerCurrentPage + 1;
+      accountProfilePickerResultsStreamValue.addValue(
+        List.unmodifiable(nextItems),
+      );
+      if (candidateType ==
+          TenantAdminEventAccountProfileCandidateType.relatedAccountProfile) {
+        _publishVisibleRelatedAccountProfileCandidates(nextItems);
+      }
+      accountProfilePickerHasMoreStreamValue.addValue(pageResult.hasMore);
+      accountProfilePickerErrorStreamValue.addValue('');
+    } catch (error) {
+      if (_isDisposed || requestToken != _accountProfilePickerRequestToken) {
+        return;
+      }
+      if (isInitial) {
+        accountProfilePickerResultsStreamValue.addValue(const []);
+        accountProfilePickerHasMoreStreamValue.addValue(false);
+      }
+      accountProfilePickerErrorStreamValue.addValue(error.toString());
+    } finally {
+      _isFetchingAccountProfilePickerPage = false;
+      if (!_isDisposed && requestToken == _accountProfilePickerRequestToken) {
+        if (isInitial) {
+          accountProfilePickerLoadingStreamValue.addValue(false);
+        } else {
+          accountProfilePickerPageLoadingStreamValue.addValue(false);
+        }
+      }
+
+      if (_hasPendingAccountProfilePickerReload) {
+        _hasPendingAccountProfilePickerReload = false;
+        unawaited(
+          _loadAccountProfilePickerPage(
+            isInitial: true,
+            requestToken: _accountProfilePickerRequestToken,
+          ),
+        );
+      }
+    }
+  }
+
+  void _bindAccountProfilePickerScroll() {
+    accountProfilePickerScrollController.addListener(() {
+      if (_isDisposed || !accountProfilePickerScrollController.hasClients) {
+        return;
+      }
+      final position = accountProfilePickerScrollController.position;
+      if (position.pixels < position.maxScrollExtent - 160) {
+        return;
+      }
+      unawaited(loadNextAccountProfilePickerPage());
+    });
+  }
+
+  void _mergeKnownRelatedAccountProfiles(
+    Iterable<TenantAdminAccountProfile> profiles,
+  ) {
+    if (profiles.isEmpty) {
+      return;
+    }
+    relatedAccountProfileCandidatesStreamValue.addValue(
+      List.unmodifiable(
+        _mergeAccountProfiles(
+          relatedAccountProfileCandidatesStreamValue.value,
+          profiles,
+        ),
+      ),
+    );
+  }
+
+  void _publishVisibleRelatedAccountProfileCandidates(
+    Iterable<TenantAdminAccountProfile> visibleCandidates,
+  ) {
+    final selectedIds = _selectedRelatedAccountProfileIdsAcrossEventState();
+    final selectedProfiles = relatedAccountProfileCandidatesStreamValue.value
+        .where((profile) => selectedIds.contains(profile.id));
+    relatedAccountProfileCandidatesStreamValue.addValue(
+      List.unmodifiable(
+        _mergeAccountProfiles(selectedProfiles, visibleCandidates),
+      ),
+    );
+  }
+
+  Set<String> _selectedRelatedAccountProfileIdsAcrossEventState() {
+    final state = eventFormStateStreamValue.value;
+    final selectedIds = <String>{...state.selectedRelatedAccountProfileIds};
+    for (final occurrence in state.occurrences) {
+      selectedIds.addAll(
+        occurrence.relatedAccountProfileIds.map((profileId) => profileId.value),
+      );
+      selectedIds.addAll(
+        TenantAdminNestedProfileGroupOperations.memberIds(
+          occurrence.profileGroups,
+        ),
+      );
+    }
+    return selectedIds;
+  }
+
+  List<TenantAdminAccountProfile> _mergeAccountProfiles(
+    Iterable<TenantAdminAccountProfile> current,
+    Iterable<TenantAdminAccountProfile> incoming,
+  ) {
+    final orderedIds = <String>[for (final profile in current) profile.id];
+    final byId = <String, TenantAdminAccountProfile>{
+      for (final profile in current) profile.id: profile,
+    };
+
+    for (final profile in incoming) {
+      if (!byId.containsKey(profile.id)) {
+        orderedIds.add(profile.id);
+      }
+      byId[profile.id] = profile;
+    }
+
+    return orderedIds.map((id) => byId[id]!).toList(growable: false);
+  }
+
+  List<TenantAdminAccountProfile> _mergeBootstrapVenueCandidates(
+    Iterable<TenantAdminAccountProfile> bootstrapCandidates,
+  ) {
+    final selectedVenueCandidate =
+        eventFormStateStreamValue.value.selectedVenue;
+    if (selectedVenueCandidate == null) {
+      return List<TenantAdminAccountProfile>.unmodifiable(
+        bootstrapCandidates.toList(growable: false),
+      );
+    }
+
+    return _mergeAccountProfiles([selectedVenueCandidate], bootstrapCandidates);
+  }
+
+  TenantAdminAccountProfile? _selectedVenueCandidateFromEvent(
+    TenantAdminEvent? event,
+  ) {
+    if (event == null) {
+      return null;
+    }
+
+    final selectedVenueId = event.placeRef?.id.trim();
+    if (selectedVenueId == null || selectedVenueId.isEmpty) {
+      return null;
+    }
+
+    final displayName =
+        _normalizeOptionalText(event.venueDisplayName) ?? selectedVenueId;
+    final latitude = event.location?.latitude;
+    final longitude = event.location?.longitude;
+    final location = latitude == null || longitude == null
+        ? null
+        : tenantAdminLocationFromRaw(latitude: latitude, longitude: longitude);
+
+    return tenantAdminAccountProfileFromRaw(
+      id: selectedVenueId,
+      accountId: selectedVenueId,
+      profileType: 'venue',
+      displayName: displayName,
+      location: location,
+    );
+  }
+
+  Future<TenantAdminEvent?> submitCreate(
+    TenantAdminEventDraft draft, {
+    String? accountSlug,
+  }) async {
+    if (_submitInFlight || submitLoadingStreamValue.value == true) {
+      return null;
+    }
+    _submitInFlight = true;
+    submitLoadingStreamValue.addValue(true);
+    submitErrorMessageStreamValue.addValue(null);
+    submitSuccessMessageStreamValue.addValue(null);
+    try {
+      final normalizedAccountSlug = accountSlug?.trim();
+      final isAccountScoped =
+          normalizedAccountSlug != null && normalizedAccountSlug.isNotEmpty;
+      final created = isAccountScoped
+          ? await _eventsRepository.createOwnEvent(
+              accountSlug: _toEventsText(normalizedAccountSlug),
+              draft: draft,
+            )
+          : await _eventsRepository.createEvent(draft: draft);
+      if (_isDisposed) {
+        return null;
+      }
+      clearEventValidation();
+      submitSuccessMessageStreamValue.addValue('Evento criado com sucesso.');
+      markEventFormClean();
+      if (!isAccountScoped) {
+        await loadEvents();
+      }
+      return created;
+    } on FormValidationFailure catch (error) {
+      if (_isDisposed) {
+        return null;
+      }
+      eventValidationController.applyFailure(error);
+      submitErrorMessageStreamValue.addValue(null);
+      return null;
+    } catch (error) {
+      if (_isDisposed) {
+        return null;
+      }
+      clearEventValidation();
+      submitErrorMessageStreamValue.addValue(error.toString());
+      return null;
+    } finally {
+      _submitInFlight = false;
+      if (!_isDisposed) {
+        submitLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<TenantAdminEvent?> submitUpdate({
+    required String eventId,
+    required TenantAdminEventDraft draft,
+  }) async {
+    if (_submitInFlight || submitLoadingStreamValue.value == true) {
+      return null;
+    }
+    _submitInFlight = true;
+    submitLoadingStreamValue.addValue(true);
+    submitErrorMessageStreamValue.addValue(null);
+    submitSuccessMessageStreamValue.addValue(null);
+    try {
+      final updated = await _eventsRepository.updateEvent(
+        eventId: _toEventsText(eventId),
+        draft: draft,
+      );
+      if (_isDisposed) {
+        return null;
+      }
+      clearEventValidation();
+      submitSuccessMessageStreamValue.addValue(
+        'Evento atualizado com sucesso.',
+      );
+      markEventFormClean();
+      await loadEvents();
+      return updated;
+    } on FormValidationFailure catch (error) {
+      if (_isDisposed) {
+        return null;
+      }
+      eventValidationController.applyFailure(error);
+      submitErrorMessageStreamValue.addValue(null);
+      return null;
+    } catch (error) {
+      if (_isDisposed) {
+        return null;
+      }
+      clearEventValidation();
+      submitErrorMessageStreamValue.addValue(error.toString());
+      return null;
+    } finally {
+      _submitInFlight = false;
+      if (!_isDisposed) {
+        submitLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  Future<void> deleteEvent(String eventId) async {
+    try {
+      await _eventsRepository.deleteEvent(_toEventsText(eventId));
+      if (_isDisposed) {
+        return;
+      }
+      await loadEvents();
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      eventsErrorStreamValue.addValue(error.toString());
+      rethrow;
+    }
+  }
+
+  Future<TenantAdminLegacyEventPartiesSummary>
+  inspectLegacyEventParties() async {
+    return _eventsRepository.fetchLegacyEventPartiesSummary();
+  }
+
+  Future<TenantAdminLegacyEventPartiesSummary>
+  repairLegacyEventParties() async {
+    final summary = await _eventsRepository.repairLegacyEventParties();
+    await loadEvents();
+    return summary;
+  }
+
+  void clearSubmitMessages() {
+    submitErrorMessageStreamValue.addValue(null);
+    submitSuccessMessageStreamValue.addValue(null);
+  }
+
+  String _describeControllerError(Object error, String fallback) {
+    final rawMessage = error.toString().trim();
+    if (rawMessage.isEmpty) {
+      return fallback;
+    }
+    final withoutTypePrefix = rawMessage.replaceFirst(
+      RegExp(
+        r'^(Exception|Bad state|FormatException|Invalid argument\(s\)):\s*',
+      ),
+      '',
+    );
+    final trailingMessageMatch = RegExp(
+      r'\):\s*(.+)$',
+    ).firstMatch(withoutTypePrefix);
+    final message =
+        trailingMessageMatch?.group(1)?.trim() ?? withoutTypePrefix.trim();
+    if (message.isEmpty) {
+      return fallback;
+    }
+    return message;
+  }
+
+  String _describeGroupLabelError(Object error, String fallback) {
+    if (error is! FormValidationFailure) {
+      return fallback;
+    }
+
+    final messages = <String>[...?error.fieldErrors['label'], error.message];
+    for (final message in messages) {
+      final normalized = message.trim();
+      if (_isSafeGroupLabelValidationMessage(normalized)) {
+        return normalized;
+      }
+    }
+    return fallback;
+  }
+
+  bool _isSafeGroupLabelValidationMessage(String value) =>
+      value.isNotEmpty &&
+      value.length <= TenantAdminGroupLabelMutationState.maxLabelLength &&
+      !RegExp(
+        r'https?://|<[^>]*>|[\r\n]',
+        caseSensitive: false,
+      ).hasMatch(value);
+
+  void clearEventValidation() {
+    eventValidationController.clearAll();
+  }
+
+  void clearEventFieldValidation(String fieldId) {
+    eventValidationController.clearField(fieldId);
+  }
+
+  void clearEventGroupValidation(String groupId) {
+    eventValidationController.clearGroup(groupId);
+  }
+
+  bool validateEventBeforeSubmit() {
+    final formState = eventFormStateStreamValue.value;
+    final fieldErrors = <String, List<String>>{};
+    final groupErrors = <String, List<String>>{};
+
+    final title = eventTitleController.text.trim();
+    if (title.isEmpty) {
+      fieldErrors[TenantAdminEventFormValidationTargets.title] = const [
+        'Título é obrigatório.',
+      ];
+    }
+
+    final selectedTypeSlug = formState.selectedTypeSlug?.trim();
+    if (selectedTypeSlug == null || selectedTypeSlug.isEmpty) {
+      fieldErrors[TenantAdminEventFormValidationTargets.eventType] = const [
+        'Tipo de evento é obrigatório.',
+      ];
+    } else if (!_eventTypeCatalogContainsSlug(selectedTypeSlug)) {
+      fieldErrors[TenantAdminEventFormValidationTargets.eventType] = const [
+        'Tipo de evento inválido.',
+      ];
+    }
+
+    final scheduleMessages = <String>[];
+    final startAt =
+        formState.startAt ??
+        _parseEventFormLocalDateTime(eventStartController.text);
+    final endAt =
+        formState.endAt ??
+        _parseEventFormLocalDateTime(eventEndController.text);
+    final occurrences = formState.occurrences.isEmpty
+        ? startAt == null
+              ? const <TenantAdminEventOccurrence>[]
+              : <TenantAdminEventOccurrence>[
+                  TenantAdminEventOccurrence(
+                    dateTimeStartValue: tenantAdminDateTime(startAt),
+                    dateTimeEndValue: tenantAdminOptionalDateTime(endAt),
+                  ),
+                ]
+        : formState.occurrences;
+    if (occurrences.isEmpty) {
+      scheduleMessages.add('Início é obrigatório.');
+    } else {
+      for (final occurrence in occurrences) {
+        final occurrenceEnd = occurrence.dateTimeEnd;
+        if (occurrenceEnd != null &&
+            occurrenceEnd.isBefore(occurrence.dateTimeStart)) {
+          scheduleMessages.add('Fim deve ser posterior ao início.');
+          break;
+        }
+      }
+    }
+    if (scheduleMessages.isNotEmpty) {
+      groupErrors[TenantAdminEventFormValidationTargets.schedule] =
+          scheduleMessages;
+    }
+
+    if (formState.publicationStatus == 'publish_scheduled') {
+      final publishAt =
+          formState.publishAt ??
+          _parseEventFormLocalDateTime(eventPublishAtController.text);
+      if (publishAt == null) {
+        groupErrors[TenantAdminEventFormValidationTargets.publication] = const [
+          'Publish at é obrigatório para publish_scheduled.',
+        ];
+      }
+    }
+
+    final locationMessages = <String>[];
+    final requiresPhysicalVenue =
+        formState.locationMode == 'physical' ||
+        formState.locationMode == 'hybrid';
+    if (requiresPhysicalVenue && formState.selectedVenue == null) {
+      locationMessages.add(
+        'Host físico é obrigatório para ${formState.locationMode}.',
+      );
+    }
+
+    final requiresOnlineUrl =
+        formState.locationMode == 'online' ||
+        formState.locationMode == 'hybrid';
+    if (requiresOnlineUrl) {
+      final trimmedOnlineUrl = eventOnlineUrlController.text.trim();
+      if (trimmedOnlineUrl.isEmpty) {
+        locationMessages.add('URL online é obrigatória.');
+      } else {
+        final uri = Uri.tryParse(trimmedOnlineUrl);
+        final valid =
+            uri != null &&
+            (uri.scheme == 'http' || uri.scheme == 'https') &&
+            uri.host.isNotEmpty;
+        if (!valid) {
+          locationMessages.add('URL online inválida.');
+        }
+      }
+    }
+    if (locationMessages.isNotEmpty) {
+      groupErrors[TenantAdminEventFormValidationTargets.location] =
+          locationMessages;
+    }
+
+    if (fieldErrors.isEmpty && groupErrors.isEmpty) {
+      clearEventValidation();
+      return true;
+    }
+
+    eventValidationController.replaceWithResolved(
+      fieldErrors: fieldErrors,
+      groupErrors: groupErrors,
+    );
+    return false;
+  }
+
+  void _resetTenantScopedState() {
+    _submitInFlight = false;
+    _accountProfilePickerDebounce?.cancel();
+    _accountProfilePickerAccountSlug = null;
+    _formAccountProfileCandidatesAccountSlug = null;
+    _bootstrapVenueCandidatesPage = null;
+    _bootstrapRelatedAccountProfileCandidatesPage = null;
+    _accountProfilePickerCurrentPage = 0;
+    _accountProfilePickerRequestToken = 0;
+    _accountProfilePickerType = null;
+    _relatedAccountProfileSelectedType = null;
+    relatedAccountProfileSelectedTypeStreamValue.addValue(null);
+    _isFetchingAccountProfilePickerPage = false;
+    _hasPendingAccountProfilePickerReload = false;
+    _eventsRepository.resetEventsState();
+    specificDateFilterStreamValue.addValue(null);
+    venueFilterStreamValue.addValue(null);
+    relatedAccountProfileFilterStreamValue.addValue(null);
+    publicationStatusFilterStreamValue.addValue('published');
+    temporalFilterStreamValue.addValue(
+      TenantAdminEventTemporalBucket.defaultSelection,
+    );
+    taxonomiesStreamValue.addValue(const []);
+    taxonomyTermsBySlugStreamValue.addValue(const {});
+    _taxonomyDefinitionsCacheBySlug.clear();
+    _taxonomyDefinitionsLoadSerial += 1;
+    _taxonomyTermsCacheBySlug.clear();
+    _loadedTaxonomyTermsKey = null;
+    _loadingTaxonomyTermsKey = null;
+    _taxonomyTermsLoadSerial += 1;
+    _eventTypeTaxonomyFallbackSlug = null;
+    _eventTypeTaxonomyFallbackAllowedSlugs = const <String>{};
+    taxonomyLoadingStreamValue.addValue(false);
+    taxonomyErrorStreamValue.addValue(null);
+    _initialEventTypeAllowedTaxonomies = const <String>[];
+    eventTypeAllowedTaxonomiesStreamValue.addValue(const []);
+    eventTypeCatalogStreamValue.addValue(const []);
+    venueCandidatesStreamValue.addValue(const []);
+    relatedAccountProfileCandidatesStreamValue.addValue(const []);
+    relatedAccountProfileTypesStreamValue.addValue(const []);
+    accountProfilePickerResultsStreamValue.addValue(const []);
+    accountProfilePickerLoadingStreamValue.addValue(false);
+    accountProfilePickerPageLoadingStreamValue.addValue(false);
+    accountProfilePickerHasMoreStreamValue.addValue(true);
+    accountProfilePickerErrorStreamValue.addValue('');
+    accountProfilePickerQueryStreamValue.addValue('');
+    accountProfilePickerSearchController.clear();
+    accountProfileCandidatesLoadingStreamValue.addValue(false);
+    accountProfileCandidatesErrorStreamValue.addValue(null);
+    _pendingInitialRichContentBaselineRefresh = false;
+    clearEventValidation();
+    eventCoverFileStreamValue.addValue(null);
+    eventCoverBusyStreamValue.addValue(false);
+    eventCoverRemoveStreamValue.addValue(false);
+    _eventFormInitialFingerprint = null;
+    occurrenceProfileGroupMutationBusyStreamValue.addValue(false);
+    _clearOccurrenceGroupLabelStates();
+    clearSubmitMessages();
+  }
+
+  void _replaceEventFormState(TenantAdminEventFormState nextState) {
+    eventFormStateStreamValue.addValue(nextState);
+  }
+
+  String _materializePrimaryOccurrenceDraft(TenantAdminEventFormState current) {
+    final nextState = _buildPrimaryOccurrenceDraftState(current);
+    final occurrenceKey = nextState.occurrenceLocalIds.first;
+    _replaceEventFormState(nextState);
+    clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    _syncEventDateTimeControllers(nextState);
+    return occurrenceKey;
+  }
+
+  TenantAdminEventFormState _buildPrimaryOccurrenceDraftState(
+    TenantAdminEventFormState current,
+  ) {
+    final startAt = current.startAt ?? DateTime.now();
+    final endAt = current.endAt;
+    return _replacePrimaryOccurrenceInState(
+      current,
+      startAt: startAt,
+      endAt: endAt,
+    ).copyWith(startAt: startAt, endAt: endAt);
+  }
+
+  void _applyEventProfileGroups(
+    List<TenantAdminNestedProfileGroup> profileGroups,
+  ) {
+    _replaceEventFormState(
+      _withEventLevelProfileGroups(
+        eventFormStateStreamValue.value,
+        profileGroups,
+      ),
+    );
+  }
+
+  List<TenantAdminNestedProfileGroup> _eventLevelProfileGroups(
+    TenantAdminEventFormState state,
+  ) {
+    if (state.occurrences.length == 1) {
+      return state.occurrences.first.profileGroups;
+    }
+    return state.profileGroups;
+  }
+
+  TenantAdminEventFormState _withEventLevelProfileGroups(
+    TenantAdminEventFormState current,
+    List<TenantAdminNestedProfileGroup> profileGroups,
+  ) {
+    var nextState = current.copyWith(profileGroups: profileGroups);
+    if (current.occurrences.length != 1) {
+      return nextState;
+    }
+
+    final occurrences = current.occurrences.toList(growable: true);
+    final nextPrimary = _copyOccurrence(
+      occurrences.first,
+      profileGroups: profileGroups,
+    );
+    occurrences[0] = nextPrimary;
+    final occurrenceKeys = _normalizedOccurrenceKeys(current);
+
+    nextState = nextState.copyWith(
+      occurrences: List<TenantAdminEventOccurrence>.unmodifiable(occurrences),
+      occurrenceLocalIds: List<String>.unmodifiable(occurrenceKeys),
+    );
+    return nextState;
+  }
+
+  TenantAdminEventFormState _mirrorSingleOccurrenceEventProfileGroups(
+    TenantAdminEventFormState state,
+  ) {
+    if (state.occurrences.length != 1) {
+      return state;
+    }
+    final profileGroups = state.occurrences.first.profileGroups;
+    return state.copyWith(profileGroups: profileGroups);
+  }
+
+  void _syncEventDateTimeControllers(TenantAdminEventFormState state) {
+    eventStartController.text = _formatDateTime(state.startAt);
+    eventEndController.text = _formatDateTime(state.endAt);
+    eventPublishAtController.text = _formatDateTime(state.publishAt);
+  }
+
+  TenantAdminEventOccurrence _toLocalOccurrence(
+    TenantAdminEventOccurrence occurrence,
+  ) {
+    return TenantAdminEventOccurrence(
+      occurrenceIdValue: tenantAdminOptionalText(occurrence.occurrenceId),
+      occurrenceSlugValue: tenantAdminOptionalText(occurrence.occurrenceSlug),
+      dateTimeStartValue: tenantAdminDateTime(
+        TimezoneConverter.utcToLocal(occurrence.dateTimeStart),
+      ),
+      dateTimeEndValue: tenantAdminOptionalDateTime(
+        occurrence.dateTimeEnd == null
+            ? null
+            : TimezoneConverter.utcToLocal(occurrence.dateTimeEnd!),
+      ),
+      relatedAccountProfileIdValues: occurrence.relatedAccountProfileIds,
+      relatedAccountProfiles: occurrence.relatedAccountProfiles,
+      profileGroups: occurrence.profileGroups,
+      programmingItems: occurrence.programmingItems,
+      taxonomyTerms: occurrence.taxonomyTerms,
+    );
+  }
+
+  List<TenantAdminEventOccurrence> _hydrateSingleOccurrenceProfileGroups({
+    required TenantAdminEvent? existingEvent,
+    required List<TenantAdminEventOccurrence> occurrences,
+  }) {
+    if (existingEvent == null || occurrences.length != 1) {
+      return occurrences;
+    }
+
+    final firstOccurrence = occurrences.first;
+    final profileGroups = firstOccurrence.profileGroups.isNotEmpty
+        ? firstOccurrence.profileGroups
+        : existingEvent.profileGroups;
+
+    if (profileGroups.length == firstOccurrence.profileGroups.length) {
+      return occurrences;
+    }
+
+    return <TenantAdminEventOccurrence>[
+      _copyOccurrence(firstOccurrence, profileGroups: profileGroups),
+    ];
+  }
+
+  TenantAdminEventFormState _replacePrimaryOccurrenceInState(
+    TenantAdminEventFormState current, {
+    required DateTime? startAt,
+    required DateTime? endAt,
+    List<TenantAdminAccountProfileIdValue>? relatedAccountProfileIdValues,
+    List<TenantAdminAccountProfile>? relatedAccountProfiles,
+    List<TenantAdminNestedProfileGroup>? profileGroups,
+    List<TenantAdminEventProgrammingItem>? programmingItems,
+  }) {
+    if (startAt == null) {
+      return current;
+    }
+    final existing = current.occurrences.isEmpty
+        ? null
+        : current.occurrences.first;
+    var nextPrimary = _copyOccurrence(
+      existing ??
+          TenantAdminEventOccurrence(
+            dateTimeStartValue: tenantAdminDateTime(startAt),
+          ),
+      startAt: startAt,
+      endAt: endAt,
+      relatedAccountProfileIds: relatedAccountProfileIdValues,
+      relatedAccountProfiles: relatedAccountProfiles,
+      profileGroups: profileGroups,
+      programmingItems: programmingItems,
+    );
+    final shouldSeedEventLevelProfileGroups =
+        existing == null &&
+        profileGroups == null &&
+        relatedAccountProfileIdValues == null &&
+        relatedAccountProfiles == null &&
+        programmingItems == null &&
+        current.profileGroups.isNotEmpty;
+    if (shouldSeedEventLevelProfileGroups) {
+      nextPrimary = _copyOccurrence(
+        nextPrimary,
+        profileGroups: current.profileGroups,
+      );
+    }
+    final next = current.occurrences.toList(growable: true);
+    final nextKeys = _normalizedOccurrenceKeys(current).toList(growable: true);
+    final itemKeysByOccurrenceKey =
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    if (next.isEmpty) {
+      final key = _newEventFormLocalId('occurrence');
+      next.add(nextPrimary);
+      nextKeys.add(key);
+      itemKeysByOccurrenceKey[key] = _newProgrammingItemKeys(
+        nextPrimary.programmingItems,
+      );
+    } else {
+      next[0] = nextPrimary;
+      itemKeysByOccurrenceKey[nextKeys[0]] = _reconcileProgrammingItemKeys(
+        currentKeys: itemKeysByOccurrenceKey[nextKeys[0]],
+        items: nextPrimary.programmingItems,
+      );
+    }
+    return _mirrorSingleOccurrenceEventProfileGroups(
+      current.copyWith(
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(next),
+        occurrenceLocalIds: List<String>.unmodifiable(nextKeys),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          itemKeysByOccurrenceKey,
+        ),
+      ),
+    );
+  }
+
+  void _replaceOccurrenceByKey(
+    String occurrenceKey,
+    TenantAdminEventOccurrence Function(TenantAdminEventOccurrence occurrence)
+    replace, {
+    bool sort = true,
+    Map<String, List<String>>? programmingItemLocalIdsByOccurrenceKey,
+  }) {
+    final current = eventFormStateStreamValue.value;
+    final occurrenceIndex = _occurrenceIndexByKey(current, occurrenceKey);
+    if (occurrenceIndex < 0) {
+      return;
+    }
+    final occurrences = current.occurrences.toList(growable: true);
+    occurrences[occurrenceIndex] = replace(occurrences[occurrenceIndex]);
+    final occurrenceKeys = _normalizedOccurrenceKeys(current);
+    final itemKeysByOccurrenceKey =
+        programmingItemLocalIdsByOccurrenceKey ??
+        _normalizedProgrammingItemKeysByOccurrenceKey(current);
+    itemKeysByOccurrenceKey[occurrenceKey] = _reconcileProgrammingItemKeys(
+      currentKeys: itemKeysByOccurrenceKey[occurrenceKey],
+      items: occurrences[occurrenceIndex].programmingItems,
+    );
+
+    final entries = sort
+        ? _sortOccurrenceEntries(
+            occurrences: occurrences,
+            occurrenceKeys: occurrenceKeys,
+          )
+        : [
+            for (var index = 0; index < occurrences.length; index++)
+              (occurrence: occurrences[index], key: occurrenceKeys[index]),
+          ];
+    final primary = entries.firstOrNull?.occurrence;
+    final nextState = _mirrorSingleOccurrenceEventProfileGroups(
+      current.copyWith(
+        startAt: primary?.dateTimeStart,
+        endAt: primary?.dateTimeEnd,
+        occurrences: List<TenantAdminEventOccurrence>.unmodifiable(
+          entries.map((entry) => entry.occurrence),
+        ),
+        occurrenceLocalIds: List<String>.unmodifiable(
+          entries.map((entry) => entry.key),
+        ),
+        programmingItemLocalIdsByOccurrenceKey: Map.unmodifiable(
+          itemKeysByOccurrenceKey,
+        ),
+      ),
+    );
+    _replaceEventFormState(nextState);
+    _syncEventDateTimeControllers(nextState);
+  }
+
+  TenantAdminEventOccurrence _copyOccurrence(
+    TenantAdminEventOccurrence occurrence, {
+    DateTime? startAt,
+    Object? endAt = _undefinedDateTime,
+    List<TenantAdminAccountProfileIdValue>? relatedAccountProfileIds,
+    List<TenantAdminAccountProfile>? relatedAccountProfiles,
+    List<TenantAdminNestedProfileGroup>? profileGroups,
+    List<TenantAdminEventProgrammingItem>? programmingItems,
+    TenantAdminTaxonomyTerms? taxonomyTerms,
+  }) {
+    return TenantAdminEventOccurrence(
+      occurrenceIdValue: tenantAdminOptionalText(occurrence.occurrenceId),
+      occurrenceSlugValue: tenantAdminOptionalText(occurrence.occurrenceSlug),
+      dateTimeStartValue: tenantAdminDateTime(
+        startAt ?? occurrence.dateTimeStart,
+      ),
+      dateTimeEndValue: tenantAdminOptionalDateTime(
+        endAt == _undefinedDateTime
+            ? occurrence.dateTimeEnd
+            : endAt as DateTime?,
+      ),
+      relatedAccountProfileIdValues:
+          relatedAccountProfileIds ?? occurrence.relatedAccountProfileIds,
+      relatedAccountProfiles:
+          relatedAccountProfiles ?? occurrence.relatedAccountProfiles,
+      profileGroups: profileGroups ?? occurrence.profileGroups,
+      programmingItems: programmingItems ?? occurrence.programmingItems,
+      taxonomyTerms: taxonomyTerms ?? occurrence.taxonomyTerms,
+    );
+  }
+
+  int _occurrenceIndexByKey(
+    TenantAdminEventFormState state,
+    String occurrenceKey,
+  ) {
+    final keys = _normalizedOccurrenceKeys(state);
+    return keys.indexOf(occurrenceKey);
+  }
+
+  List<String> _normalizedOccurrenceKeys(TenantAdminEventFormState state) {
+    if (state.occurrenceLocalIds.length == state.occurrences.length) {
+      return List<String>.unmodifiable(state.occurrenceLocalIds);
+    }
+    return List<String>.unmodifiable(
+      state.occurrences.map(_eventFormOccurrenceKeyFor),
+    );
+  }
+
+  Map<String, List<String>> _normalizedProgrammingItemKeysByOccurrenceKey(
+    TenantAdminEventFormState state,
+  ) {
+    final occurrenceKeys = _normalizedOccurrenceKeys(state);
+    final result = <String, List<String>>{};
+    for (var index = 0; index < state.occurrences.length; index++) {
+      final occurrenceKey = occurrenceKeys[index];
+      result[occurrenceKey] = _programmingItemKeysForOccurrence(
+        state,
+        occurrenceKey,
+        state.occurrences[index].programmingItems,
+      );
+    }
+    return result;
+  }
+
+  List<String> _programmingItemKeysForOccurrence(
+    TenantAdminEventFormState state,
+    String occurrenceKey,
+    List<TenantAdminEventProgrammingItem> items,
+  ) {
+    return _reconcileProgrammingItemKeys(
+      currentKeys: state.programmingItemLocalIdsByOccurrenceKey[occurrenceKey],
+      items: items,
+    );
+  }
+
+  List<String> _reconcileProgrammingItemKeys({
+    required List<String>? currentKeys,
+    required List<TenantAdminEventProgrammingItem> items,
+  }) {
+    final keys = currentKeys?.toList(growable: true) ?? <String>[];
+    while (keys.length < items.length) {
+      keys.add(_newEventFormLocalId('programming'));
+    }
+    if (keys.length > items.length) {
+      keys.removeRange(items.length, keys.length);
+    }
+    return List<String>.unmodifiable(keys);
+  }
+
+  List<String> _newProgrammingItemKeys(
+    List<TenantAdminEventProgrammingItem> items,
+  ) {
+    return [
+      for (var index = 0; index < items.length; index++)
+        _newEventFormLocalId('programming'),
+    ];
+  }
+
+  List<({TenantAdminEventOccurrence occurrence, String key})>
+  _sortOccurrenceEntries({
+    required List<TenantAdminEventOccurrence> occurrences,
+    required List<String> occurrenceKeys,
+  }) {
+    final entries = [
+      for (var index = 0; index < occurrences.length; index++)
+        (occurrence: occurrences[index], key: occurrenceKeys[index]),
+    ];
+    entries.sort(
+      (left, right) => left.occurrence.dateTimeStart.compareTo(
+        right.occurrence.dateTimeStart,
+      ),
+    );
+    return entries;
+  }
+
+  String _eventFormOccurrenceKeyFor(TenantAdminEventOccurrence occurrence) {
+    final occurrenceId = occurrence.occurrenceId?.trim();
+    if (occurrenceId != null && occurrenceId.isNotEmpty) {
+      return 'occurrence-id:$occurrenceId';
+    }
+    final occurrenceSlug = occurrence.occurrenceSlug?.trim();
+    if (occurrenceSlug != null && occurrenceSlug.isNotEmpty) {
+      return 'occurrence-slug:$occurrenceSlug';
+    }
+    return _newEventFormLocalId('occurrence');
+  }
+
+  String _newEventFormLocalId(String prefix) {
+    _eventFormLocalIdSerial += 1;
+    return '$prefix-$_eventFormLocalIdSerial';
+  }
+
+  TenantAdminEventProgrammingItem _withoutProgrammingProfile(
+    TenantAdminEventProgrammingItem item,
+    String profileId,
+  ) {
+    return TenantAdminEventProgrammingItem(
+      timeValue: tenantAdminOptionalText(item.time),
+      endTimeValue: tenantAdminOptionalText(item.endTime),
+      titleValue: tenantAdminOptionalText(item.title),
+      accountProfileIdValues: item.accountProfileIds
+          .where((entry) => entry.value != profileId)
+          .toList(growable: false),
+      linkedAccountProfiles: item.linkedAccountProfiles
+          .where((profile) => profile.id != profileId)
+          .toList(growable: false),
+      locationProfile: item.locationProfile,
+      placeRef: item.placeRef,
+    );
+  }
+
+  String _eventFormFingerprint() {
+    return jsonEncode(<String, Object?>{
+      'title': eventTitleController.text,
+      'content': SafeRichHtml.canonicalize(
+        eventContentController.text,
+        allowExplicitHttpsLinks: true,
+      ),
+      'startText': eventStartController.text,
+      'endText': eventEndController.text,
+      'publishText': eventPublishAtController.text,
+      'onlineUrl': eventOnlineUrlController.text,
+      'onlinePlatform': eventOnlinePlatformController.text,
+      'coverFile': _xFileFingerprint(eventCoverFileStreamValue.value),
+      'coverRemove': eventCoverRemoveStreamValue.value,
+      'formState': _eventFormStateFingerprint(eventFormStateStreamValue.value),
+    });
+  }
+
+  Map<String, Object?>? _xFileFingerprint(XFile? file) {
+    if (file == null) {
+      return null;
+    }
+    return <String, Object?>{'name': file.name, 'path': file.path};
+  }
+
+  Map<String, Object?> _eventFormStateFingerprint(
+    TenantAdminEventFormState state,
+  ) {
+    return <String, Object?>{
+      'startAt': _dateFingerprint(state.startAt),
+      'endAt': _dateFingerprint(state.endAt),
+      'publishAt': _dateFingerprint(state.publishAt),
+      'locationMode': state.locationMode,
+      'publicationStatus': state.publicationStatus,
+      'selectedVenueId': state.selectedVenueId,
+      'selectedTypeSlug': state.selectedTypeSlug,
+      'selectedRelatedProfileIds': state.selectedRelatedAccountProfileIds,
+      'profileGroups': _profileGroupsFingerprint(state.profileGroups),
+      'occurrences': [
+        for (final occurrence in state.occurrences)
+          _occurrenceFingerprint(occurrence),
+      ],
+      'taxonomyTerms': _taxonomyTermsFingerprint(state.selectedTaxonomyTerms),
+    };
+  }
+
+  Map<String, Object?> _occurrenceFingerprint(
+    TenantAdminEventOccurrence occurrence,
+  ) {
+    return <String, Object?>{
+      'id': occurrence.occurrenceId,
+      'slug': occurrence.occurrenceSlug,
+      'startAt': _dateFingerprint(occurrence.dateTimeStart),
+      'endAt': _dateFingerprint(occurrence.dateTimeEnd),
+      'relatedProfileIds': [
+        for (final profileId in occurrence.relatedAccountProfileIds)
+          profileId.value,
+      ],
+      'relatedProfiles': [
+        for (final profile in occurrence.relatedAccountProfiles)
+          _accountProfileFingerprint(profile),
+      ],
+      'profileGroups': _profileGroupsFingerprint(occurrence.profileGroups),
+      'programmingItems': [
+        for (final item in occurrence.programmingItems)
+          _programmingItemFingerprint(item),
+      ],
+      'taxonomyTerms': _taxonomyTermsFingerprint(
+        _taxonomyTermsToSelectionMap(occurrence.taxonomyTerms),
+      ),
+    };
+  }
+
+  List<Map<String, Object?>> _profileGroupsFingerprint(
+    List<TenantAdminNestedProfileGroup> groups,
+  ) {
+    return [
+      for (final group in groups)
+        <String, Object?>{
+          'id': group.id,
+          'label': group.label,
+          'order': group.order,
+          'accountProfileIds': [
+            for (final profileId in group.accountProfileIdValues)
+              profileId.value,
+          ],
+        },
+    ];
+  }
+
+  Map<String, Object?> _programmingItemFingerprint(
+    TenantAdminEventProgrammingItem item,
+  ) {
+    return <String, Object?>{
+      'time': item.time,
+      'endTime': item.endTime,
+      'title': item.title,
+      'accountProfileIds': [
+        for (final profileId in item.accountProfileIds) profileId.value,
+      ],
+      'linkedProfiles': [
+        for (final profile in item.linkedAccountProfiles)
+          _accountProfileFingerprint(profile),
+      ],
+      'placeRef': item.placeRef == null
+          ? null
+          : <String, Object?>{
+              'type': item.placeRef!.type,
+              'id': item.placeRef!.id,
+            },
+    };
+  }
+
+  Map<String, Object?> _accountProfileFingerprint(
+    TenantAdminAccountProfile profile,
+  ) {
+    return <String, Object?>{
+      'id': profile.id,
+      'accountId': profile.accountId,
+      'profileType': profile.profileType,
+      'displayName': profile.displayName,
+      'slug': profile.slug,
+      'avatarUrl': profile.avatarUrl,
+      'coverUrl': profile.coverUrl,
+    };
+  }
+
+  Map<String, List<String>> _taxonomyTermsFingerprint(
+    Map<String, Set<String>> termsByTaxonomy,
+  ) {
+    final normalized = <String, List<String>>{};
+    final taxonomySlugs = termsByTaxonomy.keys.toList(growable: false)..sort();
+    for (final taxonomySlug in taxonomySlugs) {
+      final terms = termsByTaxonomy[taxonomySlug]!.toList(growable: false)
+        ..sort();
+      normalized[taxonomySlug] = List<String>.unmodifiable(terms);
+    }
+    return normalized;
+  }
+
+  String? _dateFingerprint(DateTime? value) {
+    return value?.toIso8601String();
+  }
+
+  void _syncEventTypeSlugFromName() {
+    final state = eventTypeFormStateStreamValue.value;
+    if (!state.isSlugAutoEnabled || state.isEdit) {
+      return;
+    }
+    final generated = _tenantAdminSlugify(eventTypeNameController.text);
+    if (eventTypeSlugController.text == generated) {
+      return;
+    }
+    eventTypeSlugController.value = eventTypeSlugController.value.copyWith(
+      text: generated,
+      selection: TextSelection.collapsed(offset: generated.length),
+      composing: TextRange.empty,
+    );
+  }
+
+  void _setEventTypeAllowedTaxonomies(List<String> slugs) {
+    final normalized = slugs
+        .map((entry) => entry.trim())
+        .where((entry) => entry.isNotEmpty)
+        .fold<List<String>>(<String>[], (current, entry) {
+          if (!current.contains(entry)) {
+            current.add(entry);
+          }
+          return current;
+        });
+    eventTypeAllowedTaxonomiesStreamValue.addValue(
+      List<String>.unmodifiable(normalized),
+    );
+  }
+
+  void _sanitizeEventTypeAllowedTaxonomies() {
+    final availableSlugs = taxonomiesStreamValue.value
+        .map((taxonomy) => taxonomy.slug)
+        .toSet();
+    if (availableSlugs.isEmpty) {
+      return;
+    }
+    final sanitized = eventTypeAllowedTaxonomiesStreamValue.value
+        .where(availableSlugs.contains)
+        .toList(growable: false);
+    if (sanitized.length ==
+        eventTypeAllowedTaxonomiesStreamValue.value.length) {
+      return;
+    }
+    eventTypeAllowedTaxonomiesStreamValue.addValue(
+      List<String>.unmodifiable(sanitized),
+    );
+  }
+
+  void _reconcileEventTypeAllowedTaxonomies() {
+    if (eventTypeAllowedTaxonomiesStreamValue.value.isEmpty &&
+        _initialEventTypeAllowedTaxonomies.isNotEmpty) {
+      _setEventTypeAllowedTaxonomies(_initialEventTypeAllowedTaxonomies);
+    }
+    _sanitizeEventTypeAllowedTaxonomies();
+  }
+
+  TenantAdminPoiVisualMode get currentEventTypePoiVisualMode =>
+      eventTypePoiVisualModeStreamValue.value;
+
+  TenantAdminPoiVisualImageSource get currentEventTypePoiVisualImageSource =>
+      eventTypePoiVisualImageSourceStreamValue.value;
+
+  void updateEventTypePoiVisualMode(TenantAdminPoiVisualMode mode) {
+    eventTypePoiVisualModeStreamValue.addValue(mode);
+    if (mode == TenantAdminPoiVisualMode.image &&
+        currentEventTypePoiVisualImageSource ==
+            TenantAdminPoiVisualImageSource.avatar) {
+      eventTypePoiVisualImageSourceStreamValue.addValue(
+        TenantAdminPoiVisualImageSource.cover,
+      );
+    }
+  }
+
+  void updateEventTypePoiVisualImageSource(
+    TenantAdminPoiVisualImageSource source,
+  ) {
+    if (source == TenantAdminPoiVisualImageSource.avatar) {
+      return;
+    }
+    eventTypePoiVisualImageSourceStreamValue.addValue(source);
+    if (source != TenantAdminPoiVisualImageSource.typeAsset) {
+      eventTypeRemoveTypeAssetStreamValue.addValue(false);
+    }
+  }
+
+  TenantAdminPoiVisual? buildCurrentEventTypeVisual() {
+    if (currentEventTypePoiVisualMode == TenantAdminPoiVisualMode.icon) {
+      try {
+        final iconValue = TenantAdminRequiredTextValue()
+          ..parse(eventTypePoiVisualIconController.text);
+        final colorValue = TenantAdminHexColorValue()
+          ..parse(eventTypePoiVisualColorController.text);
+        final iconColorValue = TenantAdminHexColorValue()
+          ..parse(eventTypePoiVisualIconColorController.text);
+        final candidate = TenantAdminPoiVisual.icon(
+          iconValue: iconValue,
+          colorValue: colorValue,
+          iconColorValue: iconColorValue,
+        );
+        return candidate.isValid ? candidate : null;
+      } on Object {
+        return null;
+      }
+    }
+
+    try {
+      final isTypeAsset =
+          currentEventTypePoiVisualImageSource ==
+          TenantAdminPoiVisualImageSource.typeAsset;
+      final colorValue = isTypeAsset
+          ? (TenantAdminHexColorValue()
+              ..parse(eventTypePoiVisualColorController.text))
+          : null;
+      final candidate = TenantAdminPoiVisual.image(
+        imageSource: currentEventTypePoiVisualImageSource,
+        imageUrlValue: isTypeAsset
+            ? _buildOptionalUrlValue(currentEventTypeTypeAssetUrl)
+            : null,
+        colorValue: colorValue,
+      );
+      return candidate.isValid ? candidate : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  XFile? get currentEventTypeTypeAssetFile =>
+      eventTypeTypeAssetFileStreamValue.value;
+
+  String? get currentEventTypeTypeAssetUrl {
+    if (eventTypeRemoveTypeAssetStreamValue.value) {
+      return null;
+    }
+    return _normalizeOptionalText(eventTypeTypeAssetUrlStreamValue.value);
+  }
+
+  bool get isEventTypeTypeAssetMarkedForRemoval =>
+      eventTypeRemoveTypeAssetStreamValue.value;
+
+  Future<XFile?> pickEventTypeAssetImageFromDevice() {
+    return _imageIngestionService.pickFromDevice(
+      slot: TenantAdminImageSlot.typeVisual,
+    );
+  }
+
+  Future<XFile> fetchEventTypeImageFromUrlForCrop({required String imageUrl}) {
+    return _imageIngestionService.fetchFromUrlForCrop(imageUrl: imageUrl);
+  }
+
+  Future<Uint8List> readEventTypeImageBytesForCrop(XFile sourceFile) {
+    return _imageIngestionService.readBytesForCrop(sourceFile);
+  }
+
+  Future<XFile> prepareEventTypeCroppedImage(
+    Uint8List croppedData, {
+    required TenantAdminImageSlot slot,
+  }) {
+    return _imageIngestionService.prepareBytesAsXFile(
+      croppedData,
+      slot: slot,
+      applyAspectCrop: false,
+    );
+  }
+
+  Future<TenantAdminMediaUpload?> buildEventTypeAssetUpload() {
+    return _imageIngestionService.buildUpload(
+      currentEventTypeTypeAssetFile,
+      slot: TenantAdminImageSlot.typeVisual,
+    );
+  }
+
+  void updateEventTypeTypeAssetFile(XFile? file) {
+    eventTypeTypeAssetFileStreamValue.addValue(file);
+    if (file != null) {
+      eventTypeRemoveTypeAssetStreamValue.addValue(false);
+    }
+  }
+
+  void clearEventTypeTypeAssetSelection() {
+    if (currentEventTypeTypeAssetFile != null) {
+      eventTypeTypeAssetFileStreamValue.addValue(null);
+      return;
+    }
+
+    final hasExistingTypeAsset = currentEventTypeTypeAssetUrl != null;
+    if (!hasExistingTypeAsset) {
+      eventTypeRemoveTypeAssetStreamValue.addValue(false);
+      return;
+    }
+
+    eventTypeRemoveTypeAssetStreamValue.addValue(
+      !eventTypeRemoveTypeAssetStreamValue.value,
+    );
+  }
+
+  void _syncEventTypeVisualForm(TenantAdminPoiVisual? visual) {
+    eventTypeTypeAssetFileStreamValue.addValue(null);
+    eventTypeRemoveTypeAssetStreamValue.addValue(false);
+    if (visual == null || visual.mode == TenantAdminPoiVisualMode.icon) {
+      eventTypePoiVisualModeStreamValue.addValue(TenantAdminPoiVisualMode.icon);
+      eventTypePoiVisualIconController.text = visual?.icon ?? 'place';
+      eventTypePoiVisualColorController.text = visual?.color ?? '#2563EB';
+      eventTypePoiVisualIconColorController.text =
+          visual?.iconColor ?? '#FFFFFF';
+      eventTypePoiVisualImageSourceStreamValue.addValue(
+        TenantAdminPoiVisualImageSource.cover,
+      );
+      eventTypeTypeAssetUrlStreamValue.addValue('');
+      return;
+    }
+
+    eventTypePoiVisualModeStreamValue.addValue(TenantAdminPoiVisualMode.image);
+    eventTypePoiVisualIconController.text = 'place';
+    eventTypePoiVisualColorController.text = visual.color ?? '#2563EB';
+    eventTypePoiVisualIconColorController.text = '#FFFFFF';
+    final imageSource =
+        visual.imageSource == TenantAdminPoiVisualImageSource.avatar
+        ? TenantAdminPoiVisualImageSource.cover
+        : (visual.imageSource ?? TenantAdminPoiVisualImageSource.cover);
+    eventTypePoiVisualImageSourceStreamValue.addValue(imageSource);
+    eventTypeTypeAssetUrlStreamValue.addValue(visual.imageUrl ?? '');
+  }
+
+  String _tenantAdminSlugify(String rawValue) {
+    final lower = rawValue.trim().toLowerCase();
+    if (lower.isEmpty) {
+      return '';
+    }
+    final builder = StringBuffer();
+    var previousWasHyphen = false;
+    for (final codeUnit in lower.codeUnits) {
+      final isAlphaNumeric =
+          (codeUnit >= 48 && codeUnit <= 57) ||
+          (codeUnit >= 97 && codeUnit <= 122);
+      if (isAlphaNumeric) {
+        builder.writeCharCode(codeUnit);
+        previousWasHyphen = false;
+        continue;
+      }
+      final isAllowedSeparator = codeUnit == 45 || codeUnit == 95;
+      if (!isAllowedSeparator) {
+        if (!previousWasHyphen && builder.length > 0) {
+          builder.write('-');
+          previousWasHyphen = true;
+        }
+        continue;
+      }
+      if (builder.isEmpty || previousWasHyphen) {
+        continue;
+      }
+      builder.writeCharCode(codeUnit);
+      previousWasHyphen = true;
+    }
+    final normalized = builder.toString();
+    return normalized.replaceAll(RegExp(r'[-_]+$'), '');
+  }
+
+  String _formatDateTime(DateTime? dateTime) {
+    if (dateTime == null) {
+      return '';
+    }
+    final local = TimezoneConverter.utcToLocal(dateTime);
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '${local.year}-$month-$day $hour:$minute';
+  }
+
+  String? _normalizeTenantDomain(String? raw) {
+    final trimmed = raw?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    final uri = Uri.tryParse(
+      trimmed.contains('://') ? trimmed : 'https://$trimmed',
+    );
+    if (uri != null && uri.host.trim().isNotEmpty) {
+      return uri.host.trim();
+    }
+    return trimmed;
+  }
+
+  bool _hasLandlordToken() {
+    if (_landlordAuthRepository == null) {
+      return true;
+    }
+    final token = _landlordAuthRepository.token.trim();
+    return token.isNotEmpty;
+  }
+
+  void dispose() {
+    _isDisposed = true;
+    _accountProfilePickerDebounce?.cancel();
+    unawaited(_tenantScopeSubscription?.cancel());
+    unawaited(_hasMoreEventsSubscription?.cancel());
+    unawaited(_isEventsPageLoadingSubscription?.cancel());
+    unawaited(_eventsErrorSubscription?.cancel());
+    if (_eventTypeNameSyncListener != null) {
+      eventTypeNameController.removeListener(_eventTypeNameSyncListener!);
+      _eventTypeNameSyncListener = null;
+    }
+    hasMoreEventsStreamValue.dispose();
+    isEventsPageLoadingStreamValue.dispose();
+    eventsErrorStreamValue.dispose();
+    specificDateFilterStreamValue.dispose();
+    venueFilterStreamValue.dispose();
+    relatedAccountProfileFilterStreamValue.dispose();
+    publicationStatusFilterStreamValue.dispose();
+    temporalFilterStreamValue.dispose();
+    submitLoadingStreamValue.dispose();
+    occurrenceProfileGroupMutationBusyStreamValue.dispose();
+    _clearOccurrenceGroupLabelStates();
+    submitErrorMessageStreamValue.dispose();
+    submitSuccessMessageStreamValue.dispose();
+    eventTypeCatalogStreamValue.dispose();
+    taxonomiesStreamValue.dispose();
+    taxonomyTermsBySlugStreamValue.dispose();
+    taxonomyLoadingStreamValue.dispose();
+    taxonomyErrorStreamValue.dispose();
+    venueCandidatesStreamValue.dispose();
+    relatedAccountProfileCandidatesStreamValue.dispose();
+    relatedAccountProfileTypesStreamValue.dispose();
+    relatedAccountProfileSelectedTypeStreamValue.dispose();
+    accountProfilePickerResultsStreamValue.dispose();
+    accountProfilePickerLoadingStreamValue.dispose();
+    accountProfilePickerPageLoadingStreamValue.dispose();
+    accountProfilePickerHasMoreStreamValue.dispose();
+    accountProfilePickerErrorStreamValue.dispose();
+    accountProfilePickerQueryStreamValue.dispose();
+    accountProfileCandidatesLoadingStreamValue.dispose();
+    accountProfileCandidatesErrorStreamValue.dispose();
+    eventsScrollController.dispose();
+    accountProfilePickerScrollController.dispose();
+    eventFormStateStreamValue.dispose();
+    eventValidationController.dispose();
+    accountProfilePickerSearchController.dispose();
+    eventTitleController.dispose();
+    eventContentController.dispose();
+    eventStartController.dispose();
+    eventEndController.dispose();
+    eventPublishAtController.dispose();
+    eventOnlineUrlController.dispose();
+    eventOnlinePlatformController.dispose();
+    eventCoverFileStreamValue.dispose();
+    eventCoverBusyStreamValue.dispose();
+    eventCoverRemoveStreamValue.dispose();
+    eventTypeFormStateStreamValue.dispose();
+    eventTypeAllowedTaxonomiesStreamValue.dispose();
+    eventTypeNameController.dispose();
+    eventTypeSlugController.dispose();
+    eventTypeDescriptionController.dispose();
+    eventTypePoiVisualModeStreamValue.dispose();
+    eventTypePoiVisualImageSourceStreamValue.dispose();
+    eventTypePoiVisualIconController.dispose();
+    eventTypePoiVisualColorController.dispose();
+    eventTypePoiVisualIconColorController.dispose();
+    eventTypeTypeAssetFileStreamValue.dispose();
+    eventTypeTypeAssetUrlStreamValue.dispose();
+    eventTypeRemoveTypeAssetStreamValue.dispose();
+  }
+
+  String? _specificDateQueryValue() {
+    final value = specificDateFilterStreamValue.value;
+    if (value == null) {
+      return null;
+    }
+
+    final year = value.year.toString().padLeft(4, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    final day = value.day.toString().padLeft(2, '0');
+    return '$year-$month-$day';
+  }
+
+  @override
+  void onDispose() {
+    dispose();
+  }
+}
+
+extension on TenantAdminEventsController {
+  void _resetHiddenBootstrapDependencyState() {
+    _bootstrapRelatedAccountProfileCandidatesPage = null;
+    _accountProfilePickerType = null;
+    _accountProfilePickerAccountSlug = null;
+    _accountProfilePickerCurrentPage = 0;
+    _accountProfilePickerRequestToken = 0;
+    _relatedAccountProfileSelectedType = null;
+    relatedAccountProfileSelectedTypeStreamValue.addValue(null);
+    relatedAccountProfileTypesStreamValue.addValue(const []);
+    relatedAccountProfileCandidatesStreamValue.addValue(const []);
+    accountProfilePickerResultsStreamValue.addValue(const []);
+    accountProfilePickerLoadingStreamValue.addValue(false);
+    accountProfilePickerPageLoadingStreamValue.addValue(false);
+    accountProfilePickerHasMoreStreamValue.addValue(true);
+    accountProfilePickerErrorStreamValue.addValue('');
+    accountProfilePickerQueryStreamValue.addValue('');
+    taxonomiesStreamValue.addValue(const []);
+    taxonomyTermsBySlugStreamValue.addValue(const {});
+    _taxonomyDefinitionsCacheBySlug.clear();
+    _taxonomyDefinitionsLoadSerial += 1;
+    _taxonomyTermsCacheBySlug.clear();
+    _loadedTaxonomyTermsKey = null;
+    _loadingTaxonomyTermsKey = null;
+    _taxonomyTermsLoadSerial += 1;
+    taxonomyLoadingStreamValue.addValue(false);
+    taxonomyErrorStreamValue.addValue(null);
+    _initialEventTypeAllowedTaxonomies = const <String>[];
+    eventTypeAllowedTaxonomiesStreamValue.addValue(const []);
+  }
+
+  void _bindEventValidationListeners() {
+    if (_eventValidationListenersBound) {
+      return;
+    }
+    _eventValidationListenersBound = true;
+    eventContentController.addListener(() {
+      if (_pendingInitialRichContentBaselineRefresh) {
+        _pendingInitialRichContentBaselineRefresh = false;
+        markEventFormClean();
+      }
+    });
+    eventTitleController.addListener(() {
+      clearEventFieldValidation(TenantAdminEventFormValidationTargets.title);
+    });
+    eventStartController.addListener(() {
+      clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    });
+    eventEndController.addListener(() {
+      clearEventGroupValidation(TenantAdminEventFormValidationTargets.schedule);
+    });
+    eventPublishAtController.addListener(() {
+      clearEventGroupValidation(
+        TenantAdminEventFormValidationTargets.publication,
+      );
+    });
+    eventOnlineUrlController.addListener(() {
+      clearEventGroupValidation(TenantAdminEventFormValidationTargets.location);
+    });
+  }
+
+  bool _eventTypeCatalogContainsSlug(String slug) {
+    final normalizedSlug = slug.trim();
+    if (normalizedSlug.isEmpty) {
+      return false;
+    }
+    for (final type in eventTypeCatalogStreamValue.value) {
+      if (type.slug.trim() == normalizedSlug) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  DateTime? _parseEventFormLocalDateTime(String rawValue) {
+    final trimmed = rawValue.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    final normalized = trimmed.contains('T')
+        ? trimmed
+        : trimmed.replaceFirst(' ', 'T');
+    return DateTime.tryParse(normalized);
+  }
+}
+
+extension _TenantAdminIterableFirstOrNull<E> on Iterable<E> {
+  E? get firstOrNull {
+    final iterator = this.iterator;
+    if (!iterator.moveNext()) {
+      return null;
+    }
+    return iterator.current;
+  }
+}

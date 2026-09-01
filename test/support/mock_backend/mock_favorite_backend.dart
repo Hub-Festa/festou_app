@@ -1,0 +1,56 @@
+import 'package:festou_app/infrastructure/dal/dao/favorite_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dto/favorite/favorite_preview_dto.dart';
+import 'package:flutter/material.dart';
+
+class MockFavoriteBackend extends FavoriteBackendContract {
+  static const String _appManagerId = 'app-manager';
+
+  static final List<FavoritePreviewDTO> _favorites = [
+    // Only the app manager (Guarapari) is favorited by default
+    FavoritePreviewDTO.withBadgeIcon(
+      id: _appManagerId,
+      title: 'Guarapari',
+      assetPath: 'assets/images/logo_profile.png',
+      badgeIcon: Icons.location_pin,
+      isPrimary: true,
+    ),
+    // All other favorites removed - users can discover and add partners
+    // via the Discovery screen
+  ];
+
+  @override
+  Future<List<FavoritePreviewDTO>> fetchFavorites() async {
+    return List<FavoritePreviewDTO>.unmodifiable(_favorites);
+  }
+
+  @override
+  Future<void> favoriteAccountProfile(String accountProfileId) async {
+    final normalizedId = accountProfileId.trim();
+    if (normalizedId.isEmpty) {
+      return;
+    }
+    final alreadyExists =
+        _favorites.any((favorite) => favorite.id == normalizedId);
+    if (alreadyExists) {
+      return;
+    }
+    _favorites.add(
+      FavoritePreviewDTO(
+        id: normalizedId,
+        title: normalizedId,
+        targetId: normalizedId,
+        registryKey: 'account_profile',
+        targetType: 'account_profile',
+      ),
+    );
+  }
+
+  @override
+  Future<void> unfavoriteAccountProfile(String accountProfileId) async {
+    final normalizedId = accountProfileId.trim();
+    if (normalizedId.isEmpty || normalizedId == _appManagerId) {
+      return;
+    }
+    _favorites.removeWhere((favorite) => favorite.id == normalizedId);
+  }
+}

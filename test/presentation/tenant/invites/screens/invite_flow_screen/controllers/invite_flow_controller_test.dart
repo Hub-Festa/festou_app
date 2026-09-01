@@ -1,0 +1,734 @@
+import 'package:festou_app/testing/domain_factories.dart';
+import 'package:festou_app/domain/invites/invite_accept_result.dart';
+import 'package:festou_app/domain/invites/invite_contact_match.dart';
+import 'package:festou_app/domain/invites/invite_decision.dart';
+import 'package:festou_app/domain/invites/invite_decline_result.dart';
+import 'package:festou_app/domain/invites/invite_materialize_result.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/invite_next_step.dart';
+import 'package:festou_app/domain/invites/invite_runtime_settings.dart';
+import 'package:festou_app/domain/invites/invite_share_code_result.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_id_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_events_repository_contract_values.dart';
+import 'package:festou_app/domain/schedule/sent_invite_status.dart';
+import 'package:festou_app/domain/upcoming_ocurrence/projections/upcoming_ocurrence_resume.dart';
+import 'package:festou_app/infrastructure/services/telemetry/telemetry_properties_codec.dart';
+import 'package:festou_app/presentation/tenant_public/invites/screens/invite_flow_screen/controllers/invite_flow_controller.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:stream_value/core/stream_value.dart';
+import 'package:festou_app/testing/invite_accept_result_builder.dart';
+import 'package:festou_app/testing/invite_materialize_result_builder.dart';
+import 'package:festou_app/testing/invite_model_factory.dart';
+
+class _TrackedEvent {
+  _TrackedEvent({
+    required this.event,
+    required this.eventName,
+    required this.properties,
+  });
+
+  final EventTrackerEvents event;
+  final String? eventName;
+  final Map<String, dynamic>? properties;
+}
+
+class _FakeTelemetryRepository implements TelemetryRepositoryContract {
+  final List<_TrackedEvent> loggedEvents = [];
+  final List<_TrackedEvent> startedEvents = [];
+  int _seed = 0;
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> logEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    loggedEvents.add(
+      _TrackedEvent(
+        event: event,
+        eventName: eventName?.value,
+        properties: properties == null
+            ? null
+            : TelemetryPropertiesCodec.toRawMap(properties),
+      ),
+    );
+    return telemetryRepoBool(true);
+  }
+
+  @override
+  Future<EventTrackerTimedEventHandle?> startTimedEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    startedEvents.add(
+      _TrackedEvent(
+        event: event,
+        eventName: eventName?.value,
+        properties: properties == null
+            ? null
+            : TelemetryPropertiesCodec.toRawMap(properties),
+      ),
+    );
+    return EventTrackerTimedEventHandle('handle-${_seed++}');
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> finishTimedEvent(
+    EventTrackerTimedEventHandle handle,
+  ) async {
+    return telemetryRepoBool(true);
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> flushTimedEvents() async {
+    return telemetryRepoBool(true);
+  }
+
+  @override
+  void setScreenContext(TelemetryRepositoryContractPrimMap? screenContext) {}
+
+  @override
+  EventTrackerLifecycleObserver? buildLifecycleObserver() => null;
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> mergeIdentity({
+    required TelemetryRepositoryContractPrimString previousUserId,
+  }) async => telemetryRepoBool(true);
+}
+
+class _FakeInvitesRepository extends InvitesRepositoryContract {
+  _FakeInvitesRepository({
+    required List<InviteModel> initialInvites,
+    this.previewInvite,
+    this.materializedInviteId,
+    this.materializeStatus,
+    this.throwOnRefresh = false,
+    this.throwOnMaterialize = false,
+  }) : _invites = List<InviteModel>.from(initialInvites);
+
+  final List<InviteModel> _invites;
+  final InviteModel? previewInvite;
+  final String? materializedInviteId;
+  final String? materializeStatus;
+  bool throwOnRefresh;
+  final bool throwOnMaterialize;
+  final List<String> materializedShareCodes = <String>[];
+  final List<String> previewedShareCodes = <String>[];
+  final List<String> acceptedInviteIds = <String>[];
+  final List<String> acceptedShareCodes = <String>[];
+  final List<String> declinedInviteIds = <String>[];
+
+  @override
+  Future<List<InviteModel>> fetchInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    if (throwOnRefresh) throw StateError('refresh failed');
+    return List<InviteModel>.from(_invites);
+  }
+
+  @override
+  Future<InviteRuntimeSettings> fetchSettings() async =>
+      buildInviteRuntimeSettings(
+        tenantId: null,
+        limits: {},
+        cooldowns: {},
+        overQuotaMessage: null,
+      );
+
+  @override
+  Future<InviteAcceptResult> acceptInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) async => (() {
+    acceptedInviteIds.add(inviteId.value);
+    _removeInvite(inviteId.value);
+    pendingInvitesStreamValue.addValue(List<InviteModel>.from(_invites));
+    return buildInviteAcceptResult(
+      inviteId: inviteId.value,
+      status: 'accepted',
+      creditedAcceptance: true,
+      attendancePolicy: 'free_confirmation_only',
+      nextStep: InviteNextStep.freeConfirmationCreated,
+      supersededInviteIds: const [],
+    );
+  })();
+
+  @override
+  Future<InviteAcceptResult> acceptInviteByCode(
+    InvitesRepositoryContractPrimString code,
+  ) async => (() {
+    acceptedShareCodes.add(code.value);
+    final activeShareInvite = shareCodeSessionContextStreamValue.value?.invite;
+    if (activeShareInvite != null) {
+      _removeInvite(activeShareInvite.id);
+    }
+    clearShareCodeSessionContext(code: code);
+    pendingInvitesStreamValue.addValue(List<InviteModel>.from(_invites));
+    return buildInviteAcceptResult(
+      inviteId: 'mock-${code.value}',
+      status: 'accepted',
+      creditedAcceptance: true,
+      attendancePolicy: 'free_confirmation_only',
+      nextStep: InviteNextStep.freeConfirmationCreated,
+      supersededInviteIds: const [],
+    );
+  })();
+
+  @override
+  Future<InviteDeclineResult> declineInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) async => (() {
+    declinedInviteIds.add(inviteId.value);
+    _removeInvite(inviteId.value);
+    pendingInvitesStreamValue.addValue(List<InviteModel>.from(_invites));
+    return buildInviteDeclineResult(
+      inviteId: inviteId.value,
+      status: 'declined',
+      groupHasOtherPending: false,
+    );
+  })();
+
+  @override
+  Future<InviteMaterializeResult> materializeShareCode(
+    InvitesRepositoryContractPrimString code,
+  ) async {
+    materializedShareCodes.add(code.value);
+    if (throwOnMaterialize) throw StateError('materialize failed');
+    return buildInviteMaterializeResult(
+      inviteId: materializedInviteId ?? '',
+      status:
+          materializeStatus ??
+          (materializedInviteId == null ? 'expired' : 'pending'),
+      creditedAcceptance: false,
+      attendancePolicy: 'free_confirmation_only',
+    );
+  }
+
+  @override
+  Future<InviteModel?> previewShareCode(
+    InvitesRepositoryContractPrimString code,
+  ) async {
+    previewedShareCodes.add(code.value);
+    return previewInvite;
+  }
+
+  void _removeInvite(String inviteId) {
+    final inviteIdValue = InviteIdValue()..parse(inviteId);
+    _invites.removeWhere(
+      (invite) =>
+          invite.id == inviteId || invite.containsInviteId(inviteIdValue),
+    );
+  }
+
+  @override
+  Future<List<InviteContactMatch>> importContacts(
+    InviteContacts contacts,
+  ) async => const [];
+
+  @override
+  Future<InviteShareCodeResult> createShareCode({
+    required InvitesRepositoryContractPrimString eventId,
+    InvitesRepositoryContractPrimString? occurrenceId,
+    InvitesRepositoryContractPrimString? accountProfileId,
+  }) async => buildInviteShareCodeResult(
+    code: 'CODE123',
+    eventId: eventId.value,
+    occurrenceId: occurrenceId?.value ?? 'occurrence-1',
+  );
+
+  @override
+  Future<void> sendInvites(
+    InvitesRepositoryContractPrimString eventSlug,
+    InviteRecipients recipients, {
+    InvitesRepositoryContractPrimString? occurrenceId,
+    InvitesRepositoryContractPrimString? message,
+  }) async {}
+
+  @override
+  Future<List<SentInviteStatus>> getSentInvitesForOccurrence(
+    InvitesRepositoryContractPrimString eventSlug,
+  ) async => const [];
+}
+
+class _FakeUserEventsRepository implements UserEventsRepositoryContract {
+  @override
+  void clearCurrentIdentityState() {}
+
+  @override
+  final StreamValue<Set<UserEventsRepositoryContractPrimString>>
+  confirmedOccurrenceIdsStream =
+      StreamValue<Set<UserEventsRepositoryContractPrimString>>(
+        defaultValue: const {},
+      );
+
+  @override
+  Future<List<UpcomingOcurrenceResume>> fetchMyEvents() async => const [];
+
+  @override
+  Future<List<UpcomingOcurrenceResume>> fetchFeaturedEvents() async => const [];
+
+  @override
+  Future<void> confirmEventAttendance(
+    UserEventsRepositoryContractPrimString eventId, {
+    required UserEventsRepositoryContractPrimString occurrenceId,
+  }) async {}
+
+  @override
+  Future<void> unconfirmEventAttendance(
+    UserEventsRepositoryContractPrimString eventId, {
+    required UserEventsRepositoryContractPrimString occurrenceId,
+  }) async {}
+
+  @override
+  Future<void> refreshConfirmedOccurrenceIds() async {}
+
+  @override
+  UserEventsRepositoryContractPrimBool isOccurrenceConfirmed(
+    UserEventsRepositoryContractPrimString eventId,
+  ) => userEventsRepoBool(false, defaultValue: false, isRequired: true);
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract {
+  _FakeAuthRepository({required this.authorized});
+
+  final bool authorized;
+
+  @override
+  Object get backend => Object();
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {}
+
+  @override
+  String get userToken => authorized ? 'token' : '';
+
+  @override
+  bool get isUserLoggedIn => authorized;
+
+  @override
+  bool get isAuthorized => authorized;
+
+  @override
+  Future<String> getDeviceId() async => 'device-id';
+
+  @override
+  Future<String?> getUserId() async => authorized ? 'user-id' : null;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+InviteModel _buildInvite(String id) {
+  return buildInviteModelFromPrimitives(
+    id: id,
+    eventId: 'event-$id',
+    eventSlug: 'event-$id',
+    eventName: 'Event $id',
+    eventDateTime: DateTime(2025, 1, 1, 18),
+    eventImageUrl: 'https://example.com/$id.jpg',
+    location: 'Guarapari',
+    hostName: 'Host $id',
+    message: 'Invite $id',
+    tags: const ['music'],
+    occurrenceId: 'occurrence-$id',
+    inviterName: 'Inviter $id',
+  );
+}
+
+InviteModel _buildInviteWithoutTargetId(String id) {
+  return buildInviteModelFromPrimitives(
+    id: id,
+    eventId: 'event-$id',
+    eventSlug: 'event-$id',
+    eventName: 'Event $id',
+    eventDateTime: DateTime(2025, 1, 1, 18),
+    eventImageUrl: 'https://example.com/$id.jpg',
+    location: 'Guarapari',
+    hostName: 'Host $id',
+    message: 'Invite $id',
+    tags: const ['music'],
+    occurrenceId: 'occurrence-$id',
+  );
+}
+
+void main() {
+  test(
+    'resolveFallbackNavigationPath is null when session context is absent',
+    () {
+      final controller = InviteFlowScreenController(
+        repository: _FakeInvitesRepository(initialInvites: const []),
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+      );
+
+      final path = controller.resolveFallbackNavigationPath();
+
+      expect(path, isNull);
+    },
+  );
+
+  test(
+    'refresh failure remains uninitialized and preserves no empty projection',
+    () async {
+      final controller = InviteFlowScreenController(
+        repository: _FakeInvitesRepository(
+          initialInvites: [_buildInvite('pending')],
+          throwOnRefresh: true,
+        ),
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+      );
+
+      await controller.init();
+
+      expect(controller.initializedStreamValue.value, isFalse);
+      expect(controller.displayInvitesStreamValue.value, isEmpty);
+    },
+  );
+
+  test(
+    'materialization failure remains uninitialized without terminal projection',
+    () async {
+      final controller = InviteFlowScreenController(
+        repository: _FakeInvitesRepository(
+          initialInvites: [_buildInvite('pending')],
+          throwOnMaterialize: true,
+        ),
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+
+      expect(controller.initializedStreamValue.value, isFalse);
+      expect(controller.displayInvitesStreamValue.value, isEmpty);
+      expect(controller.resolveFallbackNavigationPath(), isNull);
+    },
+  );
+
+  for (final decision in <InviteDecision>[
+    InviteDecision.accepted,
+    InviteDecision.declined,
+  ]) {
+    test(
+      '${decision.name} decision aborts without mutation when target refresh fails',
+      () async {
+        final repository = _FakeInvitesRepository(
+          initialInvites: [_buildInviteWithoutTargetId('missing-target')],
+        );
+        final controller = InviteFlowScreenController(
+          repository: repository,
+          userEventsRepository: _FakeUserEventsRepository(),
+          telemetryRepository: _FakeTelemetryRepository(),
+        );
+
+        await controller.init();
+        repository.throwOnRefresh = true;
+
+        await controller.requestDecision(decision);
+
+        expect(controller.decisionResultStreamValue.value, isNull);
+        expect(repository.acceptedInviteIds, isEmpty);
+        expect(repository.acceptedShareCodes, isEmpty);
+        expect(repository.declinedInviteIds, isEmpty);
+        expect(controller.displayInvitesStreamValue.value, hasLength(1));
+        await controller.onDispose();
+      },
+    );
+  }
+
+  test('invite_opened fires when the top invite changes', () async {
+    final telemetry = _FakeTelemetryRepository();
+    final invites = [_buildInvite('1'), _buildInvite('2')];
+    final repository = _FakeInvitesRepository(initialInvites: invites);
+    final userEventsRepository = _FakeUserEventsRepository();
+    final controller = InviteFlowScreenController(
+      repository: repository,
+      userEventsRepository: userEventsRepository,
+      telemetryRepository: telemetry,
+    );
+
+    await controller.init();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(telemetry.startedEvents.length, 1);
+    expect(telemetry.startedEvents.first.eventName, 'invite_opened');
+    expect(telemetry.startedEvents.first.properties?['event_id'], 'event-1');
+
+    controller.removeInvite();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(telemetry.startedEvents.length, 2);
+    expect(telemetry.startedEvents[1].properties?['event_id'], 'event-2');
+
+    await controller.onDispose();
+  });
+
+  test(
+    'authenticated init resolves share-code preview without acceptance',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('preview')],
+        previewInvite: _buildInvite('preview'),
+        materializedInviteId: 'preview',
+      );
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+
+      expect(repository.materializedShareCodes, ['SHARE-ABC']);
+      expect(repository.previewedShareCodes, isEmpty);
+      expect(controller.pendingInvitesStreamValue.value, hasLength(1));
+      expect(controller.pendingInvitesStreamValue.value.first.id, 'preview');
+      expect(controller.displayInvitesStreamValue.value.first.id, 'preview');
+      expect(
+        repository.shareCodeSessionContextStreamValue.value?.shareCode,
+        'SHARE-ABC',
+      );
+      expect(controller.authRequiredForDecisionStreamValue.value, isFalse);
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'unauthenticated init resolves share-code preview without acceptance',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('1')],
+        previewInvite: _buildInvite('preview'),
+      );
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+        authRepository: _FakeAuthRepository(authorized: false),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+
+      expect(repository.previewedShareCodes, ['SHARE-ABC']);
+      expect(repository.materializedShareCodes, isEmpty);
+      expect(controller.displayInvitesStreamValue.value, hasLength(1));
+      expect(controller.displayInvitesStreamValue.value.first.id, 'preview');
+      expect(
+        repository.shareCodeSessionContextStreamValue.value?.shareCode,
+        'SHARE-ABC',
+      );
+      expect(
+        repository.shareCodeSessionContextStreamValue.value?.invite.id,
+        'preview',
+      );
+      expect(controller.authRequiredForDecisionStreamValue.value, isTrue);
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'unauthenticated decision does not call invite accept endpoints',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('preview')],
+        previewInvite: _buildInvite('preview'),
+        materializedInviteId: 'preview',
+      );
+      final telemetry = _FakeTelemetryRepository();
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: telemetry,
+        authRepository: _FakeAuthRepository(authorized: false),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+      await controller.requestDecision(InviteDecision.accepted);
+
+      expect(repository.previewedShareCodes, ['SHARE-ABC']);
+      expect(repository.acceptedShareCodes, isEmpty);
+      expect(repository.acceptedInviteIds, isEmpty);
+      expect(telemetry.loggedEvents, hasLength(1));
+      expect(
+        telemetry.loggedEvents.single.eventName,
+        'app_invite_acceptance_requested',
+      );
+      expect(
+        telemetry.loggedEvents.single.properties,
+        containsPair('auth_state', 'auth_required'),
+      );
+      expect(
+        telemetry.loggedEvents.single.properties,
+        containsPair('code', 'SHARE-ABC'),
+      );
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'failed share materialization does not fall back to unrelated pending invites',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('unrelated')],
+        materializedInviteId: null,
+      );
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+        authRepository: _FakeAuthRepository(authorized: true),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+
+      expect(repository.materializedShareCodes, ['SHARE-ABC']);
+      expect(controller.pendingInvitesStreamValue.value, isEmpty);
+      expect(controller.displayInvitesStreamValue.value, isEmpty);
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'accepted decision uses canonical share-code accept after share entry',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('preview')],
+        materializedInviteId: 'preview',
+      );
+      final telemetry = _FakeTelemetryRepository();
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: telemetry,
+        authRepository: _FakeAuthRepository(authorized: true),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+      await controller.requestDecision(InviteDecision.accepted);
+
+      expect(repository.materializedShareCodes, ['SHARE-ABC']);
+      expect(repository.acceptedShareCodes, ['SHARE-ABC']);
+      expect(repository.acceptedInviteIds, isEmpty);
+      expect(telemetry.loggedEvents, hasLength(1));
+      expect(
+        telemetry.loggedEvents.single.eventName,
+        'app_invite_acceptance_requested',
+      );
+      expect(
+        telemetry.loggedEvents.single.properties,
+        containsPair('auth_state', 'authenticated'),
+      );
+      expect(
+        telemetry.loggedEvents.single.properties,
+        containsPair('code', 'SHARE-ABC'),
+      );
+      expect(
+        telemetry.loggedEvents.single.properties,
+        containsPair('occurrence_id', 'occurrence-preview'),
+      );
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'declined decision uses canonical invite decline after materialization',
+    () async {
+      final repository = _FakeInvitesRepository(
+        initialInvites: [_buildInvite('preview')],
+        materializedInviteId: 'preview',
+      );
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+        authRepository: _FakeAuthRepository(authorized: true),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+      await controller.requestDecision(InviteDecision.declined);
+
+      expect(repository.materializedShareCodes, ['SHARE-ABC']);
+      expect(repository.declinedInviteIds, ['preview']);
+      expect(controller.displayInvitesStreamValue.value, isEmpty);
+      await controller.onDispose();
+    },
+  );
+
+  test(
+    'self issuer preview materialization keeps preview visible and blocks invite decisions',
+    () async {
+      final previewInvite = _buildInvite('preview');
+      final repository = _FakeInvitesRepository(
+        initialInvites: const [],
+        previewInvite: previewInvite,
+        materializeStatus: 'self_issuer_preview',
+      );
+      final controller = InviteFlowScreenController(
+        repository: repository,
+        userEventsRepository: _FakeUserEventsRepository(),
+        telemetryRepository: _FakeTelemetryRepository(),
+        authRepository: _FakeAuthRepository(authorized: true),
+      );
+
+      await controller.init(shareCode: 'SHARE-ABC');
+      await controller.requestDecision(InviteDecision.accepted);
+      await controller.requestDecision(InviteDecision.declined);
+
+      expect(repository.materializedShareCodes, ['SHARE-ABC']);
+      expect(repository.previewedShareCodes, ['SHARE-ABC']);
+      expect(controller.currentInvite?.id, 'preview');
+      expect(controller.displayInvitesStreamValue.value, [previewInvite]);
+      expect(repository.acceptedShareCodes, isEmpty);
+      expect(repository.acceptedInviteIds, isEmpty);
+      expect(repository.declinedInviteIds, isEmpty);
+      await controller.onDispose();
+    },
+  );
+}

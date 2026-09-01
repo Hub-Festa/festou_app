@@ -1,0 +1,66 @@
+import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/guards/location_permission_gate_result.dart';
+import 'package:festou_app/application/router/support/boundary_route_dismissal.dart';
+import 'package:festou_app/application/router/support/location_permission_blocker.dart';
+import 'package:festou_app/application/router/support/location_permission_granted_document_reentry.dart';
+import 'package:festou_app/application/router/support/route_redirect_path.dart';
+
+class LiveLocationRouteGuard extends AutoRouteGuard {
+  LiveLocationRouteGuard({
+    LocationPermissionBlockerLoader? blockerLoader,
+    this._documentReentry,
+  }) : _blockerLoader = blockerLoader ?? loadCurrentLocationPermissionBlocker;
+
+  final LocationPermissionBlockerLoader _blockerLoader;
+  final LocationPermissionGrantedDocumentReentry? _documentReentry;
+
+  @override
+  Future<void> onNavigation(
+    NavigationResolver resolver,
+    StackRouter router,
+  ) async {
+    final pendingRedirectPath = buildRedirectPathFromRouteMatch(resolver.route);
+    var didResolveGate = false;
+    final blocker = await _blockerLoader();
+    if (blocker == null) {
+      resolver.next(true);
+      return;
+    }
+
+    resolver.redirectUntil(
+      LocationPermissionRoute(
+        initialState: blocker,
+        allowContinueWithoutLocation: false,
+        popRouteAfterResult: true,
+        onResult: (result) {
+          if (didResolveGate) {
+            return;
+          }
+          didResolveGate = true;
+
+          if (result == LocationPermissionGateResult.granted) {
+            final handledByDocumentReentry =
+                (_documentReentry ??
+                performLocationPermissionGrantedDocumentReentry)(
+                  pendingRedirectPath,
+                );
+            if (handledByDocumentReentry) {
+              resolver.next(false);
+              return;
+            }
+            resolver.next(true);
+            return;
+          }
+
+          resolveGuardedBoundaryCancellation(
+            resolver: resolver,
+            router: router,
+            kind: BoundaryDismissKind.locationPermission,
+            redirectPath: pendingRedirectPath,
+          );
+        },
+      ),
+    );
+  }
+}

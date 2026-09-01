@@ -1,0 +1,279 @@
+import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/router/guards/tenant_route_guard.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/domain/app_data/app_type.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/repositories/admin_mode_repository_contract.dart';
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:mockito/mockito.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    await GetIt.I.reset();
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test('allows navigation in tenant environment', () {
+    _registerAppData(_buildAppData(
+      hostname: 'tenant.test',
+      envType: 'tenant',
+    ));
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(true)).called(1);
+    verifyNever(resolver.next(false));
+    expect(router.replaceAllCalled, isFalse);
+  });
+
+  test('redirects landlord env to landlord home when session is not active',
+      () {
+    _registerAppData(_buildAppData(
+      hostname: 'landlord.test',
+      envType: 'landlord',
+    ));
+    GetIt.I.registerSingleton<AdminModeRepositoryContract>(
+      _FakeAdminModeRepository(AdminMode.user),
+    );
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(
+      _FakeLandlordAuthRepository(hasValidSession: false),
+    );
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(false)).called(1);
+    expect(router.replaceAllCalled, isTrue);
+    expect(router.lastRoutes, hasLength(1));
+    expect(router.lastRoutes!.single.routeName, 'LandlordHomeRoute');
+  });
+
+  test(
+      'redirects landlord env to admin when session and landlord mode are active',
+      () {
+    _registerAppData(_buildAppData(
+      hostname: 'landlord.test',
+      envType: 'landlord',
+    ));
+    GetIt.I.registerSingleton<AdminModeRepositoryContract>(
+      _FakeAdminModeRepository(AdminMode.landlord),
+    );
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(
+      _FakeLandlordAuthRepository(hasValidSession: true),
+    );
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(false)).called(1);
+    expect(router.replaceAllCalled, isTrue);
+    expect(router.lastRoutes, hasLength(1));
+    expect(router.lastRoutes!.single.routeName, 'TenantAdminShellRoute');
+  });
+
+  test(
+      'falls back to landlord home when landlord repositories are not registered',
+      () {
+    _registerAppData(_buildAppData(
+      hostname: 'landlord.test',
+      envType: 'landlord',
+    ));
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(false)).called(1);
+    expect(router.replaceAllCalled, isTrue);
+    expect(router.lastRoutes, hasLength(1));
+    expect(router.lastRoutes!.single.routeName, 'LandlordHomeRoute');
+  });
+
+  test('redirects landlord host /home to landlord admin route', () {
+    _registerAppData(_buildAppData(
+      hostname: 'landlord.test',
+      envType: 'landlord',
+    ));
+    GetIt.I.registerSingleton<AdminModeRepositoryContract>(
+      _FakeAdminModeRepository(AdminMode.user),
+    );
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(
+      _FakeLandlordAuthRepository(hasValidSession: false),
+    );
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+    resolver.routeValue = _FakeRouteMatch(fullPath: '/home');
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(false)).called(1);
+    expect(router.replaceAllCalled, isTrue);
+    expect(router.lastRoutes, hasLength(1));
+    expect(router.lastRoutes!.single.routeName, 'TenantAdminShellRoute');
+  });
+
+  test('redirects landlord host /landlord to landlord admin route', () {
+    _registerAppData(_buildAppData(
+      hostname: 'landlord.test',
+      envType: 'landlord',
+    ));
+    GetIt.I.registerSingleton<AdminModeRepositoryContract>(
+      _FakeAdminModeRepository(AdminMode.user),
+    );
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(
+      _FakeLandlordAuthRepository(hasValidSession: false),
+    );
+
+    final guard = TenantRouteGuard();
+    final resolver = MockNavigationResolver();
+    final router = RecordingStackRouter();
+    resolver.routeValue = _FakeRouteMatch(fullPath: '/landlord');
+
+    guard.onNavigation(resolver, router);
+
+    verify(resolver.next(false)).called(1);
+    expect(router.replaceAllCalled, isTrue);
+    expect(router.lastRoutes, hasLength(1));
+    expect(router.lastRoutes!.single.routeName, 'TenantAdminShellRoute');
+  });
+}
+
+void _registerAppData(AppData appData) {
+  if (GetIt.I.isRegistered<AppData>()) {
+    GetIt.I.unregister<AppData>();
+  }
+  GetIt.I.registerSingleton<AppData>(appData);
+}
+
+AppData _buildAppData({
+  required String hostname,
+  required String envType,
+}) {
+  final platformType = PlatformTypeValue()..parse(AppType.mobile.name);
+  return buildAppDataFromInitialization(
+    remoteData: {
+      'name': 'Test',
+      'type': envType,
+      'main_domain': 'https://$hostname',
+      'domains': ['https://$hostname'],
+      'app_domains': [],
+      'theme_data_settings': {
+        'primary_seed_color': '#4FA0E3',
+        'secondary_seed_color': '#E80D5D',
+        'brightness_default': 'light',
+      },
+      'main_color': '#4FA0E3',
+      'tenant_id': 'tenant-1',
+      'telemetry': {'trackers': []},
+    },
+    localInfo: {
+      'platformType': platformType,
+      'hostname': hostname,
+      'href': 'https://$hostname',
+      'port': null,
+      'device': 'test-device',
+    },
+  );
+}
+
+class MockNavigationResolver extends Mock implements NavigationResolver {
+  RouteMatch _route = _FakeRouteMatch(fullPath: '');
+
+  set routeValue(RouteMatch value) {
+    _route = value;
+  }
+
+  @override
+  RouteMatch get route => _route;
+}
+
+class RecordingStackRouter extends Mock implements StackRouter {
+  bool replaceAllCalled = false;
+  List<PageRouteInfo>? lastRoutes;
+
+  @override
+  Future<void> replaceAll(
+    List<PageRouteInfo> routes, {
+    OnNavigationFailure? onFailure,
+    bool updateExistingRoutes = true,
+  }) async {
+    replaceAllCalled = true;
+    lastRoutes = routes;
+  }
+}
+
+class _FakeRouteMatch extends Fake implements RouteMatch {
+  _FakeRouteMatch({required this.fullPath});
+
+  @override
+  final String fullPath;
+}
+
+class _FakeAdminModeRepository implements AdminModeRepositoryContract {
+  _FakeAdminModeRepository(this._mode);
+
+  final AdminMode _mode;
+
+  @override
+  StreamValue<AdminMode> get modeStreamValue =>
+      StreamValue<AdminMode>(defaultValue: _mode);
+
+  @override
+  AdminMode get mode => _mode;
+
+  @override
+  bool get isLandlordMode => _mode == AdminMode.landlord;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> setLandlordMode() async {}
+
+  @override
+  Future<void> setUserMode() async {}
+}
+
+class _FakeLandlordAuthRepository implements LandlordAuthRepositoryContract {
+  _FakeLandlordAuthRepository({required this.hasValidSession});
+
+  @override
+  final bool hasValidSession;
+
+  @override
+  String get token => hasValidSession ? 'token' : '';
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+      LandlordAuthRepositoryContractPrimString email,
+      LandlordAuthRepositoryContractPrimString password) async {}
+
+  @override
+  Future<void> logout() async {}
+}

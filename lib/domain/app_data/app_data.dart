@@ -1,123 +1,124 @@
-import 'package:belluga_boilerplate/domain/app_data/environment_type.dart';
-import 'package:belluga_boilerplate/domain/app_data/value_object/app_domain_value.dart';
-import 'package:belluga_boilerplate/domain/app_data/value_object/domain_value.dart';
-import 'package:belluga_boilerplate/domain/app_data/value_object/environment_name_value.dart';
-import 'package:belluga_boilerplate/domain/app_data/value_object/environment_type_value.dart';
-import 'package:belluga_boilerplate/domain/app_data/value_object/platform_type_value.dart';
-import 'package:belluga_boilerplate/domain/theme_data_settings/theme_data_settings.dart';
-import 'package:event_tracker_handler/event_tracker_handler.dart';
-import 'package:value_object_pattern/domain/value_objects/generic_string_value.dart';
+import 'package:festou_app/domain/app_data/app_type.dart';
+import 'package:festou_app/domain/app_data/app_publication_settings.dart';
+import 'package:festou_app/domain/app_data/firebase_settings.dart';
+import 'package:festou_app/domain/app_data/push_settings.dart';
+import 'package:festou_app/domain/app_data/telemetry_context_settings.dart';
+import 'package:festou_app/domain/app_data/telemetry_settings.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_hostname_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_href_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_map_filter_catalog_keys_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_port_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_required_text_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_domain_value.dart';
+import 'package:festou_app/domain/app_data/value_object/domain_value.dart';
+import 'package:festou_app/domain/app_data/value_object/environment_name_value.dart';
+import 'package:festou_app/domain/app_data/value_object/environment_type_value.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/distance_in_meters_value.dart';
+import 'package:festou_app/domain/partners/profile_type_registry.dart';
+import 'package:festou_app/domain/tenant/value_objects/icon_url_value.dart';
+import 'package:festou_app/domain/tenant/value_objects/main_color_value.dart';
+import 'package:festou_app/domain/tenant/value_objects/main_logo_url_value.dart';
+import 'package:festou_app/domain/tenant/value_objects/tenant_id_value.dart';
+import 'package:festou_app/domain/theme_data_settings/theme_data_settings.dart';
+import 'package:festou_app/domain/value_objects/domain_boolean_value.dart';
 
-/// A pure data model that holds all application configuration.
-/// It has no knowledge of how its data is fetched or stored.
+/// Unified application configuration model (all platforms).
 class AppData {
-  // --- Final, Initialized Fields ---
   final PlatformTypeValue platformType;
-  final GenericStringValue? port;
-  final GenericStringValue hostname;
-  final GenericStringValue href;
-  final GenericStringValue device;
+  final AppDataPortValue portValue;
+  final AppDataHostnameValue hostnameValue;
+  final AppDataHrefValue hrefValue;
+  final AppDataRequiredTextValue deviceValue;
+
   final EnvironmentNameValue nameValue;
   final EnvironmentTypeValue typeValue;
   final ThemeDataSettings themeDataSettings;
+  final TenantIdValue tenantIdValue;
+  final ProfileTypeRegistry profileTypeRegistry;
   final DomainValue mainDomainValue;
-  final List<DomainValue>? domains;
+  final List<DomainValue> domains;
   final List<AppDomainValue>? appDomains;
-  final String? tenantId;
-  final Map<String, dynamic>? firebaseSettings;
-  final List<EventTrackerSettingsModel> telemetryTrackers;
+  final TelemetrySettings telemetrySettings;
+  final TelemetryContextSettings telemetryContextSettings;
+  final FirebaseSettings? firebaseSettings;
+  final PushSettings? pushSettings;
+  final DomainBooleanValue phoneOtpSmsFallbackEnabledValue;
+  final AppPublicationSettings publicationSettings;
+  final CityCoordinate? tenantDefaultOrigin;
+  final DistanceInMetersValue mapRadiusMinMetersValue;
+  final DistanceInMetersValue mapRadiusDefaultMetersValue;
+  final DistanceInMetersValue mapRadiusMaxMetersValue;
+  final AppDataMapFilterCatalogKeysValue mapFilterCatalogKeysValue;
 
-  AppData._({
+  final IconUrlValue mainIconLightUrl;
+  final IconUrlValue mainIconDarkUrl;
+  final MainColorValue mainColor;
+  final MainLogoUrlValue mainLogoLightUrl;
+  final MainLogoUrlValue mainLogoDarkUrl;
+
+  AppData({
     required this.platformType,
-    this.port,
-    required this.hostname,
-    required this.href,
-    required this.device,
+    required this.portValue,
+    required this.hostnameValue,
+    required this.hrefValue,
+    required this.deviceValue,
     required this.nameValue,
     required this.typeValue,
     required this.themeDataSettings,
+    required this.tenantIdValue,
+    required this.profileTypeRegistry,
     required this.mainDomainValue,
-    this.domains,
-    this.appDomains,
-    this.tenantId,
-    this.firebaseSettings,
-    this.telemetryTrackers = const [],
-  });
+    required this.domains,
+    required this.appDomains,
+    required this.telemetrySettings,
+    required this.telemetryContextSettings,
+    required this.firebaseSettings,
+    required this.pushSettings,
+    DomainBooleanValue? phoneOtpSmsFallbackEnabledValue,
+    AppPublicationSettings? publicationSettings,
+    required this.tenantDefaultOrigin,
+    required this.mapRadiusMinMetersValue,
+    required this.mapRadiusDefaultMetersValue,
+    required this.mapRadiusMaxMetersValue,
+    required this.mapFilterCatalogKeysValue,
+    required this.mainIconLightUrl,
+    required this.mainIconDarkUrl,
+    required this.mainColor,
+    required this.mainLogoLightUrl,
+    required this.mainLogoDarkUrl,
+  })  : phoneOtpSmsFallbackEnabledValue =
+            phoneOtpSmsFallbackEnabledValue ?? _defaultFalseBooleanValue(),
+        publicationSettings =
+            publicationSettings ?? AppPublicationSettings.empty();
 
-  factory AppData.fromInitialization({
-    required Map<String, dynamic> remoteData,
-    required Map<String, dynamic> localInfo,
-  }) {
-    return AppData._(
-      platformType: localInfo['platformType'],
-      port: localInfo['port'],
-      hostname: localInfo['hostname'],
-      href: localInfo['href'],
-      device: localInfo['device'],
-      nameValue: EnvironmentNameValue()..parse(remoteData['name']),
-      themeDataSettings:
-          ThemeDataSettings.fromJson(remoteData['theme_data_settings']),
-      mainDomainValue:
-          DomainValue(defaultValue: Uri.parse(remoteData['main_domain'])),
-      typeValue: EnvironmentTypeValue()..parse(remoteData['type']),
-      domains: (remoteData['domains'] as List<dynamic>?)
-              ?.map((domain) => DomainValue(defaultValue: Uri.parse(domain)))
-              .toList() ??
-          [],
-      appDomains: (remoteData['app_domains'] as List<dynamic>?)
-          ?.map((appDomain) => AppDomainValue()..parse(appDomain))
-          .toList(),
-      tenantId: _readOptionalString(
-          remoteData['tenant_id'] ?? remoteData['tenantId']),
-      firebaseSettings: _readOptionalMap(
-        remoteData['firebase_settings'] ?? remoteData['firebase'],
-      ),
-      telemetryTrackers: _parseTelemetryTrackers(
-        remoteData['telemetry_settings'] ?? remoteData['telemetry'],
-      ),
-    );
+  AppType get appType =>
+      platformType.value ?? platformType.defaultValue ?? AppType.mobile;
+
+  String? get port => portValue.nullableValue;
+  String get hostname => hostnameValue.value;
+  String get href => hrefValue.value;
+  String get device => deviceValue.value;
+  double get mapRadiusMinMeters => mapRadiusMinMetersValue.value;
+  double get mapRadiusDefaultMeters => mapRadiusDefaultMetersValue.value;
+  double get mapRadiusMaxMeters => mapRadiusMaxMetersValue.value;
+  bool get phoneOtpSmsFallbackEnabled => phoneOtpSmsFallbackEnabledValue.value;
+  AppDataMapFilterCatalogKeysValue get mapFilterCatalogKeys =>
+      mapFilterCatalogKeysValue;
+
+  IconUrlValue get iconMUrl => mainIconDarkUrl;
+
+  MainLogoUrlValue get mainLogoUrl => mainLogoDarkUrl;
+
+  String get schema => href.split(hostname).first;
+
+  static DomainBooleanValue _defaultFalseBooleanValue() {
+    return DomainBooleanValue()..parse('false');
   }
 
-  static String? _readOptionalString(Object? value) {
-    final resolved = value?.toString().trim();
-    return resolved == null || resolved.isEmpty ? null : resolved;
+  @override
+  String toString() {
+    return 'AppData(port: $port, hostname: $hostname, href: $href, device: $device)';
   }
-
-  static Map<String, dynamic>? _readOptionalMap(Object? value) {
-    if (value is Map<String, dynamic>) {
-      return Map<String, dynamic>.from(value);
-    }
-    if (value is Map) {
-      return Map<String, dynamic>.from(value);
-    }
-    return null;
-  }
-
-  static List<EventTrackerSettingsModel> _parseTelemetryTrackers(
-      Object? value) {
-    final rawTrackers =
-        value is Map ? value['trackers'] ?? value['providers'] : value;
-    if (rawTrackers is! List) {
-      return const [];
-    }
-
-    final trackers = <EventTrackerSettingsModel>[];
-    for (final rawTracker in rawTrackers) {
-      final tracker = _readOptionalMap(rawTracker);
-      if (tracker == null || tracker['type'] == null) {
-        continue;
-      }
-      try {
-        trackers.add(EventTrackerSettingsModel.fromMap(tracker));
-      } catch (_) {
-        // Invalid optional telemetry configuration must not block app startup.
-      }
-    }
-    return trackers;
-  }
-
-  bool get isTenant => typeValue.value == EnvironmentType.tenant;
-
-  //TODO: check if system is initialized
-  bool get isSystemActive => typeValue.value.runtimeType == EnvironmentType;
 }

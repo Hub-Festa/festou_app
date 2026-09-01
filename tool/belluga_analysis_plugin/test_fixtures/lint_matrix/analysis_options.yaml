@@ -1,0 +1,14 @@
+plugins:
+  belluga_analysis_plugin:
+    path: ../..
+
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**

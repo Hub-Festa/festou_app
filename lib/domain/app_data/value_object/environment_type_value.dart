@@ -1,5 +1,4 @@
-import 'package:belluga_boilerplate/application/extensions/enum_functions.dart';
-import 'package:belluga_boilerplate/domain/app_data/environment_type.dart';
+import 'package:festou_app/domain/app_data/environment_type.dart';
 import 'package:value_object_pattern/value_object.dart';
 
 class EnvironmentTypeValue extends ValueObject<EnvironmentType> {
@@ -9,6 +8,14 @@ class EnvironmentTypeValue extends ValueObject<EnvironmentType> {
   });
 
   @override
-  EnvironmentType doParse(String? parseValue) =>
-      EnvironmentType.values.byNameOr(name: parseValue, or: EnvironmentType.landlord);
+  EnvironmentType doParse(String? parseValue) {
+    final fallback = defaultValue;
+    if (parseValue == null) {
+      return fallback;
+    }
+    return EnvironmentType.values.firstWhere(
+      (value) => value.name == parseValue,
+      orElse: () => fallback,
+    );
+  }
 }

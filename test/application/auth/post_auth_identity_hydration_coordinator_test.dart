@@ -1,0 +1,484 @@
+import 'dart:async';
+
+import 'package:festou_app/application/auth/post_auth_identity_hydration_coordinator.dart';
+import 'package:festou_app/domain/auth/auth_phone_otp_challenge.dart';
+import 'package:festou_app/domain/favorite/favorite.dart';
+import 'package:festou_app/domain/favorite/projections/favorite_resume.dart';
+import 'package:festou_app/domain/invites/invite_accept_result.dart';
+import 'package:festou_app/domain/invites/invite_contact_match.dart';
+import 'package:festou_app/domain/invites/invite_decline_result.dart';
+import 'package:festou_app/domain/invites/invite_materialize_result.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/invite_runtime_settings.dart';
+import 'package:festou_app/domain/invites/invite_share_code_result.dart';
+import 'package:festou_app/domain/partners/account_profile_model.dart';
+import 'package:festou_app/domain/partners/account_profile_nested_group_member.dart';
+import 'package:festou_app/domain/partners/paged_account_profiles_result.dart';
+import 'package:festou_app/domain/repositories/account_profiles_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/favorite_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/account_profiles_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/value_objects/auth_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_events_repository_contract_values.dart';
+import 'package:festou_app/infrastructure/repositories/favorite_repository_paging_mixin.dart';
+import 'package:festou_app/domain/user/user_belluga.dart';
+import 'package:festou_app/domain/user/user_profile_contract.dart';
+import 'package:festou_app/domain/user/value_objects/user_identity_state_value.dart';
+import 'package:festou_app/domain/schedule/sent_invite_status.dart';
+import 'package:festou_app/domain/upcoming_ocurrence/projections/upcoming_ocurrence_resume.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+import 'package:value_object_pattern/domain/value_objects/mongo_id_value.dart';
+
+void main() {
+  setUp(() async {
+    await GetIt.I.reset();
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test('hydrates identity-owned streams only after registered auth', () async {
+    final authRepository = _FakeAuthRepository();
+    final favoriteRepository = _FakeFavoriteRepository();
+    final accountProfilesRepository = _FakeAccountProfilesRepository();
+    final userEventsRepository = _FakeUserEventsRepository();
+    final invitesRepository = _FakeInvitesRepository();
+    final coordinator = PostAuthIdentityHydrationCoordinator(
+      authRepository: authRepository,
+      favoriteRepository: favoriteRepository,
+      accountProfilesRepository: accountProfilesRepository,
+      userEventsRepository: userEventsRepository,
+      invitesRepository: invitesRepository,
+    );
+
+    coordinator.bind();
+    authRepository.emit(_user(_anonymousUserId, 'anonymous'));
+    await pumpEventQueue();
+
+    expect(favoriteRepository.refreshFavoriteResumesCalls, 0);
+    expect(accountProfilesRepository.refreshFavoriteAccountProfileIdsCalls, 0);
+    expect(userEventsRepository.refreshConfirmedOccurrenceIdsCalls, 0);
+    expect(invitesRepository.refreshPendingInvitesCalls, 0);
+    expect(invitesRepository.refreshSentInviteStatusesCalls, 0);
+
+    authRepository.emit(_user(_registeredUserId, 'registered'));
+    await pumpEventQueue();
+
+    expect(favoriteRepository.refreshFavoriteResumesCalls, 1);
+    expect(accountProfilesRepository.refreshFavoriteAccountProfileIdsCalls, 1);
+    expect(userEventsRepository.refreshConfirmedOccurrenceIdsCalls, 1);
+    expect(invitesRepository.refreshPendingInvitesCalls, 1);
+    expect(
+      invitesRepository.refreshSentInviteStatusesCalls,
+      0,
+      reason: 'Sent invite state is occurrence-scoped, not post-auth global.',
+    );
+
+    authRepository.emit(_user(_registeredUserId, 'registered'));
+    await pumpEventQueue();
+
+    expect(
+      favoriteRepository.refreshFavoriteResumesCalls,
+      1,
+      reason: 'The same registered identity must not refetch in a loop.',
+    );
+    expect(accountProfilesRepository.refreshFavoriteAccountProfileIdsCalls, 1);
+    expect(userEventsRepository.refreshConfirmedOccurrenceIdsCalls, 1);
+    expect(invitesRepository.refreshPendingInvitesCalls, 1);
+    expect(invitesRepository.refreshSentInviteStatusesCalls, 0);
+
+    coordinator.dispose();
+  });
+
+  test(
+    'rehydrates same user after anonymous reset during in-flight hydration',
+    () async {
+      final authRepository = _FakeAuthRepository();
+      final refreshGate = Completer<void>();
+      final accountProfilesRepository = _FakeAccountProfilesRepository(
+        firstRefreshGate: refreshGate,
+      );
+      final coordinator = PostAuthIdentityHydrationCoordinator(
+        authRepository: authRepository,
+        accountProfilesRepository: accountProfilesRepository,
+      );
+
+      coordinator.bind();
+      authRepository.emit(_user(_registeredUserId, 'registered'));
+      await pumpEventQueue();
+
+      expect(
+        accountProfilesRepository.refreshFavoriteAccountProfileIdsCalls,
+        1,
+      );
+
+      authRepository.emit(null);
+      await pumpEventQueue();
+      refreshGate.complete();
+      await pumpEventQueue();
+
+      authRepository.emit(_user(_registeredUserId, 'registered'));
+      await pumpEventQueue();
+
+      expect(
+        accountProfilesRepository.refreshFavoriteAccountProfileIdsCalls,
+        2,
+        reason:
+            'Logout/anonymous reset must clear the per-user hydration guard.',
+      );
+
+      coordinator.dispose();
+    },
+  );
+
+  test(
+    'hydrates favorites when repository becomes available before auth transition',
+    () async {
+      final authRepository = _FakeAuthRepository();
+      final coordinator = PostAuthIdentityHydrationCoordinator(
+        authRepository: authRepository,
+      );
+
+      coordinator.bind();
+
+      final favoriteRepository = _FakeFavoriteRepository();
+      GetIt.I.registerSingleton<FavoriteRepositoryContract>(favoriteRepository);
+
+      authRepository.emit(_user(_registeredUserId, 'registered'));
+      await pumpEventQueue();
+
+      expect(
+        favoriteRepository.refreshFavoriteResumesCalls,
+        1,
+        reason:
+            'Post-auth hydration must resolve and refresh favorites even when '
+            'the repository was not available at coordinator construction.',
+      );
+
+      coordinator.dispose();
+    },
+  );
+}
+
+const _anonymousUserId = '507f1f77bcf86cd799439011';
+const _registeredUserId = '507f1f77bcf86cd799439012';
+
+UserBelluga _user(String id, String identityState) {
+  return UserBelluga(
+    uuidValue: MongoIDValue(defaultValue: id)..parse(id),
+    profile: UserProfileContract(),
+    customData: UserCustomData(
+      identityStateValue: UserIdentityStateValue.fromRaw(identityState),
+    ),
+  );
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract<UserBelluga> {
+  @override
+  Object get backend => Object();
+
+  @override
+  String get userToken => 'token';
+
+  @override
+  bool get isUserLoggedIn => userStreamValue.value != null;
+
+  @override
+  bool get isAuthorized =>
+      userStreamValue.value != null &&
+      !(userStreamValue.value?.customData?.isAnonymous ?? false);
+
+  void emit(UserBelluga? user) {
+    userStreamValue.addValue(user);
+  }
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<String> getDeviceId() async => 'device-id';
+
+  @override
+  Future<String?> getUserId() async => userStreamValue.value?.uuidValue.value;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<AuthPhoneOtpChallenge> requestPhoneOtpChallenge(
+    AuthRepositoryContractParamString phone, {
+    AuthRepositoryContractParamString? deliveryChannel,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  void setUserToken(AuthRepositoryContractTextValue? token) {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+
+  @override
+  Future<void> verifyPhoneOtpChallenge({
+    required AuthRepositoryContractParamString challengeId,
+    required AuthRepositoryContractParamString phone,
+    required AuthRepositoryContractParamString code,
+  }) async {}
+}
+
+class _FakeFavoriteRepository extends FavoriteRepositoryContract
+    with FavoriteRepositoryPagingMixin {
+  int refreshFavoriteResumesCalls = 0;
+
+  @override
+  Future<List<Favorite>> fetchFavorites() async => const <Favorite>[];
+
+  @override
+  Future<List<FavoriteResume>> fetchFavoriteResumes() async =>
+      const <FavoriteResume>[];
+
+  @override
+  Future<void> refreshFavoriteResumes() async {
+    refreshFavoriteResumesCalls += 1;
+    await super.refreshFavoriteResumes();
+  }
+}
+
+class _FakeAccountProfilesRepository extends AccountProfilesRepositoryContract {
+  _FakeAccountProfilesRepository({this.firstRefreshGate});
+
+  Completer<void>? firstRefreshGate;
+  int refreshFavoriteAccountProfileIdsCalls = 0;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> refreshFavoriteAccountProfileIds() async {
+    refreshFavoriteAccountProfileIdsCalls += 1;
+    final refreshGate = firstRefreshGate;
+    if (refreshGate != null) {
+      firstRefreshGate = null;
+      await refreshGate.future;
+    }
+  }
+
+  @override
+  Future<PagedAccountProfilesResult> fetchAccountProfilesPage({
+    required AccountProfilesRepositoryContractPrimInt page,
+    required AccountProfilesRepositoryContractPrimInt pageSize,
+    AccountProfilesRepositoryContractPrimString? query,
+    AccountProfilesRepositoryContractPrimString? typeFilter,
+    List<AccountProfilesRepositoryContractPrimString>? typeFilters,
+    List<AccountProfilesRepositoryTaxonomyFilter>? taxonomyFilters,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<AccountProfileModel>> fetchNearbyAccountProfiles({
+    AccountProfilesRepositoryContractPrimInt? pageSize,
+    List<AccountProfilesRepositoryContractPrimString>? typeFilters,
+    List<AccountProfilesRepositoryTaxonomyFilter>? taxonomyFilters,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  List<AccountProfileModel> getFavoriteAccountProfiles() =>
+      const <AccountProfileModel>[];
+
+  @override
+  Future<AccountProfileModel?> getAccountProfileBySlug(
+    AccountProfilesRepositoryContractPrimString slug,
+  ) async => null;
+
+  @override
+  Future<List<AccountProfileNestedGroupMember>> getNestedGroupMembersByPath(
+    AccountProfilesRepositoryContractPrimString membersPath,
+  ) async => const <AccountProfileNestedGroupMember>[];
+
+  @override
+  AccountProfilesRepositoryContractPrimBool isFavorite(
+    AccountProfilesRepositoryContractPrimString accountProfileId,
+  ) => AccountProfilesRepositoryContractPrimBool.fromRaw(
+    false,
+    defaultValue: false,
+  );
+
+  @override
+  Future<void> toggleFavorite(
+    AccountProfilesRepositoryContractPrimString accountProfileId,
+  ) async {}
+}
+
+class _FakeUserEventsRepository implements UserEventsRepositoryContract {
+  @override
+  void clearCurrentIdentityState() {}
+
+  @override
+  final confirmedOccurrenceIdsStream =
+      StreamValue<Set<UserEventsRepositoryContractPrimString>>(
+        defaultValue: const <UserEventsRepositoryContractPrimString>{},
+      );
+
+  int refreshConfirmedOccurrenceIdsCalls = 0;
+
+  @override
+  Future<void> refreshConfirmedOccurrenceIds() async {
+    refreshConfirmedOccurrenceIdsCalls += 1;
+  }
+
+  @override
+  Future<void> confirmEventAttendance(
+    UserEventsRepositoryContractPrimString eventId, {
+    required UserEventsRepositoryContractPrimString occurrenceId,
+  }) async {}
+
+  @override
+  Future<List<UpcomingOcurrenceResume>> fetchFeaturedEvents() async =>
+      const <UpcomingOcurrenceResume>[];
+
+  @override
+  Future<List<UpcomingOcurrenceResume>> fetchMyEvents() async =>
+      const <UpcomingOcurrenceResume>[];
+
+  @override
+  UserEventsRepositoryContractPrimBool isOccurrenceConfirmed(
+    UserEventsRepositoryContractPrimString occurrenceId,
+  ) => userEventsRepoBool(false);
+
+  @override
+  Future<void> unconfirmEventAttendance(
+    UserEventsRepositoryContractPrimString eventId, {
+    required UserEventsRepositoryContractPrimString occurrenceId,
+  }) async {}
+}
+
+class _FakeInvitesRepository extends InvitesRepositoryContract {
+  int refreshPendingInvitesCalls = 0;
+  int refreshSentInviteStatusesCalls = 0;
+
+  @override
+  Future<void> refreshPendingInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    refreshPendingInvitesCalls += 1;
+  }
+
+  @override
+  Future<InviteAcceptResult> acceptInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<InviteAcceptResult> acceptInviteByCode(
+    InvitesRepositoryContractPrimString code,
+  ) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<InviteShareCodeResult> createShareCode({
+    required InvitesRepositoryContractPrimString eventId,
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? accountProfileId,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<InviteDeclineResult> declineInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<InviteModel>> fetchInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async => const <InviteModel>[];
+
+  @override
+  Future<List<InviteContactMatch>> importContacts(
+    InviteContacts contacts,
+  ) async => const <InviteContactMatch>[];
+
+  @override
+  Future<InviteRuntimeSettings> fetchSettings() {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<SentInviteStatus>> getSentInvitesForOccurrence(
+    InvitesRepositoryContractPrimString occurrenceId,
+  ) async => const <SentInviteStatus>[];
+
+  @override
+  Future<List<SentInviteStatus>> refreshSentInvitesForOccurrence({
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? eventId,
+    Iterable<InvitesRepositoryContractPrimString> recipientAccountProfileIds =
+        const <InvitesRepositoryContractPrimString>[],
+  }) async {
+    refreshSentInviteStatusesCalls += 1;
+    return const <SentInviteStatus>[];
+  }
+
+  @override
+  Future<InviteMaterializeResult> materializeShareCode(
+    InvitesRepositoryContractPrimString code,
+  ) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> sendInvites(
+    InvitesRepositoryContractPrimString eventId,
+    InviteRecipients recipients, {
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? message,
+  }) async {}
+}

@@ -1,0 +1,57 @@
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile_candidate_selection_summary.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_group_member_page.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_account_profile_id_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_flag_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_text_value.dart';
+
+class TenantAdminNestedGroupMemberPageDTO {
+  const TenantAdminNestedGroupMemberPageDTO({
+    required this.items,
+    required this.nextCursor,
+  });
+
+  final List<TenantAdminAccountProfileSelectionSummary> items;
+  final String? nextCursor;
+
+  factory TenantAdminNestedGroupMemberPageDTO.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    final items = <TenantAdminAccountProfileSelectionSummary>[];
+    final rawItems = json['data'];
+    if (rawItems is List) {
+      for (final rawItem in rawItems) {
+        if (rawItem is! Map) continue;
+        final itemJson = Map<String, dynamic>.from(rawItem);
+        final id = itemJson['id']?.toString().trim() ?? '';
+        if (id.isEmpty) {
+          continue;
+        }
+        items.add(
+          TenantAdminAccountProfileSelectionSummary(
+            idValue: TenantAdminAccountProfileIdValue(id),
+            displayNameValue: TenantAdminOptionalTextValue()
+              ..parse(itemJson['display_name']?.toString().trim()),
+            isQueryableCandidateValue: TenantAdminFlagValue(
+              itemJson['is_queryable_candidate'] == true,
+            ),
+            isContactCapableCandidateValue: TenantAdminFlagValue(false),
+          ),
+        );
+      }
+    }
+
+    final rawCursor = json['next_cursor']?.toString().trim();
+
+    return TenantAdminNestedGroupMemberPageDTO(
+      items: items,
+      nextCursor: rawCursor == null || rawCursor.isEmpty ? null : rawCursor,
+    );
+  }
+
+  TenantAdminNestedGroupMemberPage toDomain() {
+    return TenantAdminNestedGroupMemberPage(
+      items: items,
+      nextCursorValue: TenantAdminOptionalTextValue()..parse(nextCursor),
+    );
+  }
+}

@@ -1,0 +1,231 @@
+import 'dart:convert';
+
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:dio/dio.dart';
+import 'package:http_parser/http_parser.dart';
+
+class TenantAdminMediaFormDataBuilder {
+  const TenantAdminMediaFormDataBuilder();
+
+  FormData buildMultipartPayload({
+    required Object payload,
+    Iterable<String> preserveExplicitEmptyArrayKeys = const <String>[],
+  }) {
+    final explicitEmptyArrayKeys = preserveExplicitEmptyArrayKeys.toSet();
+    if (payload case final Map<String, dynamic> mapPayload) {
+      return FormData.fromMap(
+        _normalizeMultipartMap(
+          mapPayload,
+          preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+        ),
+        ListFormat.multiCompatible,
+      );
+    }
+    if (payload case final Map mapPayload) {
+      final normalizedPayload = <String, dynamic>{};
+      for (final entry in mapPayload.entries) {
+        final key = entry.key;
+        if (key is! String) {
+          throw const FormatException(
+            'Failed to build multipart payload: payload keys must be strings.',
+          );
+        }
+        normalizedPayload[key] = _normalizeMultipartValue(
+          entry.value,
+          preserveExplicitEmptyArray: explicitEmptyArrayKeys.contains(key),
+          preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+        );
+      }
+      return FormData.fromMap(normalizedPayload, ListFormat.multiCompatible);
+    }
+    throw const FormatException(
+      'Failed to build multipart payload: expected map-compatible payload.',
+    );
+  }
+
+  FormData? buildAvatarCoverPayload({
+    required Map<String, dynamic> payload,
+    TenantAdminMediaUpload? avatarUpload,
+    TenantAdminMediaUpload? coverUpload,
+    Iterable<String> preserveExplicitEmptyArrayKeys = const <String>[],
+  }) {
+    if (avatarUpload == null && coverUpload == null) {
+      return null;
+    }
+
+    final explicitEmptyArrayKeys = preserveExplicitEmptyArrayKeys.toSet();
+    final formData = FormData.fromMap(
+      _normalizeMultipartMap(
+        payload,
+        preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+      ),
+      ListFormat.multiCompatible,
+    );
+    if (avatarUpload != null) {
+      formData.files.add(
+        MapEntry(
+          'avatar',
+          MultipartFile.fromBytes(
+            avatarUpload.bytes,
+            filename: avatarUpload.fileName,
+            contentType: _resolveMediaType(avatarUpload),
+          ),
+        ),
+      );
+    }
+    if (coverUpload != null) {
+      formData.files.add(
+        MapEntry(
+          'cover',
+          MultipartFile.fromBytes(
+            coverUpload.bytes,
+            filename: coverUpload.fileName,
+            contentType: _resolveMediaType(coverUpload),
+          ),
+        ),
+      );
+    }
+    return formData;
+  }
+
+  FormData? buildTypeAssetPayload({
+    required Map<String, dynamic> payload,
+    TenantAdminMediaUpload? typeAssetUpload,
+    Iterable<String> preserveExplicitEmptyArrayKeys = const <String>[],
+  }) {
+    if (typeAssetUpload == null) {
+      return null;
+    }
+
+    final explicitEmptyArrayKeys = preserveExplicitEmptyArrayKeys.toSet();
+    final formData = FormData.fromMap(
+      _normalizeMultipartMap(
+        payload,
+        preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+      ),
+      ListFormat.multiCompatible,
+    );
+    formData.files.add(
+      MapEntry(
+        'type_asset',
+        MultipartFile.fromBytes(
+          typeAssetUpload.bytes,
+          filename: typeAssetUpload.fileName,
+          contentType: _resolveMediaType(typeAssetUpload),
+        ),
+      ),
+    );
+    return formData;
+  }
+
+  FormData buildGalleryPayload({
+    required List<Map<String, dynamic>> galleryGroups,
+    required Map<String, TenantAdminMediaUpload> uploads,
+  }) {
+    final formData = FormData.fromMap(<String, dynamic>{
+      '_method': 'PATCH',
+      'gallery_groups': jsonEncode(galleryGroups),
+    }, ListFormat.multiCompatible);
+    for (final entry in uploads.entries) {
+      formData.files.add(
+        MapEntry(
+          entry.key,
+          MultipartFile.fromBytes(
+            entry.value.bytes,
+            filename: entry.value.fileName,
+            contentType: _resolveMediaType(entry.value),
+          ),
+        ),
+      );
+    }
+    return formData;
+  }
+
+  MediaType _resolveMediaType(TenantAdminMediaUpload upload) {
+    final mimeType = upload.mimeType ?? _inferMimeType(upload.fileName);
+    if (mimeType == null) {
+      return MediaType('application', 'octet-stream');
+    }
+    final parts = mimeType.split('/');
+    if (parts.length != 2) {
+      return MediaType('application', 'octet-stream');
+    }
+    return MediaType(parts[0], parts[1]);
+  }
+
+  MediaType resolveMediaType(TenantAdminMediaUpload upload) =>
+      _resolveMediaType(upload);
+
+  String? _inferMimeType(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return null;
+  }
+
+  Map<String, dynamic> _normalizeMultipartMap(
+    Map<String, dynamic> payload, {
+    Iterable<String> preserveExplicitEmptyArrayKeys = const <String>[],
+  }) {
+    final explicitEmptyArrayKeys = preserveExplicitEmptyArrayKeys.toSet();
+    return payload.map(
+      (key, value) => MapEntry(
+        key,
+        _normalizeMultipartValue(
+          value,
+          preserveExplicitEmptyArray: explicitEmptyArrayKeys.contains(key),
+          preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+        ),
+      ),
+    );
+  }
+
+  dynamic _normalizeMultipartValue(
+    Object? value, {
+    bool preserveExplicitEmptyArray = false,
+    Iterable<String> preserveExplicitEmptyArrayKeys = const <String>[],
+  }) {
+    if (value is bool) {
+      return value ? 1 : 0;
+    }
+    if (value is Map<String, dynamic>) {
+      return _normalizeMultipartMap(
+        value,
+        preserveExplicitEmptyArrayKeys: preserveExplicitEmptyArrayKeys,
+      );
+    }
+    if (value is Map) {
+      final normalized = <String, dynamic>{};
+      final explicitEmptyArrayKeys = preserveExplicitEmptyArrayKeys.toSet();
+      for (final entry in value.entries) {
+        final key = entry.key;
+        if (key is! String) {
+          throw const FormatException(
+            'Failed to build multipart payload: payload keys must be strings.',
+          );
+        }
+        normalized[key] = _normalizeMultipartValue(
+          entry.value,
+          preserveExplicitEmptyArray: explicitEmptyArrayKeys.contains(key),
+          preserveExplicitEmptyArrayKeys: explicitEmptyArrayKeys,
+        );
+      }
+      return normalized;
+    }
+    if (value is List) {
+      if (preserveExplicitEmptyArray && value.isEmpty) {
+        return jsonEncode(const <Object>[]);
+      }
+      return value
+          .map(
+            (item) => _normalizeMultipartValue(
+              item,
+              preserveExplicitEmptyArrayKeys: preserveExplicitEmptyArrayKeys,
+            ),
+          )
+          .toList(growable: false);
+    }
+    return value;
+  }
+}

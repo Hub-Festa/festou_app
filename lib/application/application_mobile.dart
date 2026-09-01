@@ -1,5 +1,6 @@
+// ignore_for_file: must_be_immutable
 
-import 'package:belluga_boilerplate/application/application_mobile_contract.dart';
+import 'package:festou_app/application/application_mobile_contract.dart';
 
 class Application extends ApplicationMobileContract {
   Application({super.key});

@@ -1,0 +1,75 @@
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/app_data/discovery_filter_selection_snapshot.dart';
+import 'package:festou_app/domain/app_data/location_origin_settings.dart';
+import 'package:festou_app/domain/app_data/value_object/app_theme_mode_value.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_discovery_filter_token_value.dart';
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/distance_in_meters_value.dart';
+import 'package:flutter/material.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+export 'package:festou_app/domain/app_data/value_object/app_theme_mode_value.dart';
+
+typedef AppDataRepositoryContractPrimString = String;
+typedef AppDataRepositoryContractPrimInt = int;
+typedef AppDataRepositoryContractPrimBool = bool;
+typedef AppDataRepositoryContractPrimDouble = double;
+typedef AppDataRepositoryContractPrimDateTime = DateTime;
+typedef AppDataRepositoryContractPrimDynamic = dynamic;
+
+abstract class AppDataRepositoryContract {
+  final StreamValue<LocationOriginSettings?>
+      _locationOriginSettingsStreamValue =
+      StreamValue<LocationOriginSettings?>(defaultValue: null);
+
+  AppData get appData;
+
+  Future<void> init();
+
+  StreamValue<ThemeMode?> get themeModeStreamValue;
+  ThemeMode get themeMode;
+  Future<void> setThemeMode(AppThemeModeValue mode);
+
+  StreamValue<DistanceInMetersValue> get maxRadiusMetersStreamValue;
+  DistanceInMetersValue get maxRadiusMeters;
+  bool get hasPersistedMaxRadiusPreference => false;
+  Future<void> setMaxRadiusMeters(DistanceInMetersValue meters);
+
+  StreamValue<LocationOriginSettings?> get locationOriginSettingsStreamValue =>
+      _locationOriginSettingsStreamValue;
+  LocationOriginSettings? get locationOriginSettings =>
+      _locationOriginSettingsStreamValue.value;
+  bool get hasPersistedLocationOriginPreference => false;
+  Future<void> setLocationOriginSettings(
+    LocationOriginSettings settings,
+  ) async {
+    _locationOriginSettingsStreamValue.addValue(settings);
+  }
+
+  Future<AppDataDiscoveryFilterSelectionSnapshot?> getDiscoveryFilterSelection(
+    AppDataDiscoveryFilterTokenValue surface,
+  ) async {
+    return null;
+  }
+
+  Future<void> setDiscoveryFilterSelection(
+    AppDataDiscoveryFilterTokenValue surface,
+    AppDataDiscoveryFilterSelectionSnapshot selection,
+  ) async {}
+
+  Future<void> useUserLiveLocationOrigin() async {
+    await setLocationOriginSettings(
+      LocationOriginSettings.userLiveLocation(),
+    );
+  }
+
+  Future<void> useUserFixedLocationOrigin({
+    required CityCoordinate fixedLocationReference,
+  }) async {
+    await setLocationOriginSettings(
+      LocationOriginSettings.userFixedLocation(
+        fixedLocationReference: fixedLocationReference,
+      ),
+    );
+  }
+}

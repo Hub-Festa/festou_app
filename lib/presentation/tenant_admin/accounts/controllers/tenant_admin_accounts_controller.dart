@@ -1,0 +1,279 @@
+import 'dart:async';
+
+import 'package:festou_app/domain/repositories/tenant_admin_accounts_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/tenant_admin_accounts_repository_contract_values.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/ownership_state.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account.dart';
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart' show Disposable, GetIt;
+import 'package:stream_value/core/stream_value.dart';
+
+class TenantAdminAccountsController implements Disposable {
+  TenantAdminAccountsController({
+    TenantAdminAccountsRepositoryContract? accountsRepository,
+    TenantAdminTenantScopeContract? tenantScope,
+  })  : _accountsRepository = accountsRepository ??
+            GetIt.I.get<TenantAdminAccountsRepositoryContract>(),
+        _tenantScope = tenantScope ??
+            (GetIt.I.isRegistered<TenantAdminTenantScopeContract>()
+                ? GetIt.I.get<TenantAdminTenantScopeContract>()
+                : null) {
+    _bindRepositoryStateStreams();
+  }
+
+  final TenantAdminAccountsRepositoryContract _accountsRepository;
+  final TenantAdminTenantScopeContract? _tenantScope;
+
+  static const Duration _searchDebounceDuration = Duration(milliseconds: 350);
+
+  StreamValue<List<TenantAdminAccount>?> get accountsStreamValue =>
+      _accountsRepository.accountsStreamValue;
+  final StreamValue<bool> hasMoreAccountsStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<bool> isAccountsPageLoadingStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final StreamValue<String?> errorStreamValue =
+      StreamValue<String?>(defaultValue: null);
+
+  final StreamValue<TenantAdminOwnershipState> selectedOwnershipStreamValue =
+      StreamValue<TenantAdminOwnershipState>(
+    defaultValue: TenantAdminOwnershipState.tenantOwned,
+  );
+  final StreamValue<String> searchQueryStreamValue =
+      StreamValue<String>(defaultValue: '');
+  final StreamValue<bool> showSearchFieldStreamValue =
+      StreamValue<bool>(defaultValue: false);
+  final ScrollController accountsListScrollController = ScrollController();
+
+  bool _isDisposed = false;
+  bool _initialized = false;
+  bool _accountsListScrollBound = false;
+  String? _initializedTenantDomain;
+  StreamSubscription<String?>? _tenantScopeSubscription;
+  StreamSubscription<TenantAdminAccountsRepositoryContractPrimBool>?
+      _hasMoreAccountsSubscription;
+  StreamSubscription<TenantAdminAccountsRepositoryContractPrimBool>?
+      _accountsLoadingSubscription;
+  StreamSubscription<TenantAdminAccountsRepositoryContractPrimString?>?
+      _accountsErrorSubscription;
+  Timer? _searchDebounceTimer;
+
+  Future<void> init() async {
+    _bindTenantScope();
+    final normalizedTenantDomain =
+        _normalizeTenantDomain(_tenantScope?.selectedTenantDomain);
+    if (_initialized && _initializedTenantDomain == normalizedTenantDomain) {
+      return;
+    }
+    if (_initialized && _initializedTenantDomain != normalizedTenantDomain) {
+      _resetTenantScopedState();
+    }
+    _initialized = true;
+    _initializedTenantDomain = normalizedTenantDomain;
+    _bindRepositoryStateStreams();
+    await loadAccounts(ownershipState: selectedOwnershipStreamValue.value);
+  }
+
+  void _bindRepositoryStateStreams() {
+    _hasMoreAccountsSubscription ??=
+        _accountsRepository.hasMoreAccountsStreamValue.stream.listen((value) {
+      hasMoreAccountsStreamValue.addValue(value.value);
+    });
+    _accountsLoadingSubscription ??= _accountsRepository
+        .isAccountsPageLoadingStreamValue.stream
+        .listen((value) {
+      isAccountsPageLoadingStreamValue.addValue(value.value);
+    });
+    _accountsErrorSubscription ??=
+        _accountsRepository.accountsErrorStreamValue.stream.listen((value) {
+      errorStreamValue.addValue(value?.value);
+    });
+    _syncRepositoryStateSnapshot();
+  }
+
+  void _syncRepositoryStateSnapshot() {
+    hasMoreAccountsStreamValue.addValue(
+      _accountsRepository.hasMoreAccountsStreamValue.value.value,
+    );
+    isAccountsPageLoadingStreamValue.addValue(
+      _accountsRepository.isAccountsPageLoadingStreamValue.value.value,
+    );
+    errorStreamValue.addValue(
+      _accountsRepository.accountsErrorStreamValue.value?.value,
+    );
+  }
+
+  void _bindTenantScope() {
+    if (_tenantScopeSubscription != null || _tenantScope == null) {
+      return;
+    }
+    final tenantScope = _tenantScope;
+    _tenantScopeSubscription =
+        tenantScope.selectedTenantDomainStreamValue.stream.listen(
+      (tenantDomain) {
+        if (_isDisposed) return;
+        final normalized = _normalizeTenantDomain(tenantDomain);
+        if (normalized == _initializedTenantDomain) {
+          return;
+        }
+        _initializedTenantDomain = normalized;
+        _initialized = normalized != null;
+        _resetTenantScopedState();
+        if (normalized != null) {
+          unawaited(_loadTenantScopedData());
+        }
+      },
+    );
+  }
+
+  Future<void> _loadTenantScopedData() async {
+    await loadAccounts(ownershipState: selectedOwnershipStreamValue.value);
+  }
+
+  Future<void> loadAccounts({
+    TenantAdminOwnershipState? ownershipState,
+    String? searchQuery,
+  }) async {
+    if (_isDisposed) {
+      return;
+    }
+    await _accountsRepository.loadAccounts(
+      ownershipState: ownershipState ?? selectedOwnershipStreamValue.value,
+      searchQuery: _normalizeSearchQuery(
+        searchQuery ?? searchQueryStreamValue.value,
+      ),
+    );
+    _syncRepositoryStateSnapshot();
+  }
+
+  Future<void> loadNextAccountsPage({
+    TenantAdminOwnershipState? ownershipState,
+    String? searchQuery,
+  }) async {
+    if (_isDisposed) {
+      return;
+    }
+    await _accountsRepository.loadNextAccountsPage(
+      ownershipState: ownershipState ?? selectedOwnershipStreamValue.value,
+      searchQuery: _normalizeSearchQuery(
+        searchQuery ?? searchQueryStreamValue.value,
+      ),
+    );
+    _syncRepositoryStateSnapshot();
+  }
+
+  void bindAccountsListScrollPagination() {
+    if (_accountsListScrollBound) {
+      return;
+    }
+    _accountsListScrollBound = true;
+    accountsListScrollController.addListener(_handleAccountsListScroll);
+  }
+
+  void unbindAccountsListScrollPagination() {
+    if (!_accountsListScrollBound) {
+      return;
+    }
+    _accountsListScrollBound = false;
+    accountsListScrollController.removeListener(_handleAccountsListScroll);
+  }
+
+  void _handleAccountsListScroll() {
+    if (!accountsListScrollController.hasClients) {
+      return;
+    }
+    final position = accountsListScrollController.position;
+    const threshold = 320.0;
+    if (position.pixels + threshold >= position.maxScrollExtent) {
+      unawaited(loadNextAccountsPage());
+    }
+  }
+
+  void updateSelectedOwnership(TenantAdminOwnershipState ownershipState) {
+    if (selectedOwnershipStreamValue.value == ownershipState) {
+      return;
+    }
+    _searchDebounceTimer?.cancel();
+    selectedOwnershipStreamValue.addValue(ownershipState);
+    unawaited(loadAccounts(ownershipState: ownershipState));
+  }
+
+  void updateSearchQuery(String query) {
+    if (searchQueryStreamValue.value == query) {
+      return;
+    }
+    searchQueryStreamValue.addValue(query);
+    _searchDebounceTimer?.cancel();
+    _searchDebounceTimer = Timer(_searchDebounceDuration, () {
+      if (_isDisposed) {
+        return;
+      }
+      unawaited(loadAccounts());
+    });
+  }
+
+  void toggleSearchFieldVisibility() {
+    final next = !showSearchFieldStreamValue.value;
+    showSearchFieldStreamValue.addValue(next);
+    if (!next) {
+      updateSearchQuery('');
+    }
+  }
+
+  void _resetTenantScopedState() {
+    _searchDebounceTimer?.cancel();
+    _accountsRepository.resetAccountsState();
+    searchQueryStreamValue.addValue('');
+    showSearchFieldStreamValue.addValue(false);
+  }
+
+  TenantAdminAccountsRepositoryContractPrimString? _normalizeSearchQuery(
+    String? value,
+  ) {
+    final trimmed = value?.trim() ?? '';
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    return tenantAdminAccountsRepoString(
+      trimmed,
+      defaultValue: '',
+      isRequired: false,
+    );
+  }
+
+  String? _normalizeTenantDomain(String? raw) {
+    final trimmed = raw?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    final uri =
+        Uri.tryParse(trimmed.contains('://') ? trimmed : 'https://$trimmed');
+    if (uri != null && uri.host.trim().isNotEmpty) {
+      return uri.host.trim();
+    }
+    return trimmed;
+  }
+
+  void dispose() {
+    _isDisposed = true;
+    unbindAccountsListScrollPagination();
+    _tenantScopeSubscription?.cancel();
+    _hasMoreAccountsSubscription?.cancel();
+    _accountsLoadingSubscription?.cancel();
+    _accountsErrorSubscription?.cancel();
+    _searchDebounceTimer?.cancel();
+    selectedOwnershipStreamValue.dispose();
+    searchQueryStreamValue.dispose();
+    showSearchFieldStreamValue.dispose();
+    hasMoreAccountsStreamValue.dispose();
+    isAccountsPageLoadingStreamValue.dispose();
+    errorStreamValue.dispose();
+    accountsListScrollController.dispose();
+  }
+
+  @override
+  void onDispose() {
+    dispose();
+  }
+}

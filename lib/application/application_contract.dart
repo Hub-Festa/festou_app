@@ -1,139 +1,1262 @@
+// ignore_for_file: must_be_immutable
+
 import 'dart:async';
 
-import 'package:belluga_boilerplate/application/router/app_router.dart';
-import 'package:belluga_boilerplate/application/configurations/browser_location.dart';
-import 'package:belluga_boilerplate/application/router/modular_app/module_settings.dart';
-import 'package:belluga_boilerplate/infrastructure/repositories/theme_repository.dart';
-import 'package:belluga_boilerplate/infrastructure/repositories/app_data_repository.dart';
-import 'package:belluga_boilerplate/domain/repositories/auth_repository_contract.dart';
-import 'package:belluga_boilerplate/domain/repositories/telemetry_repository_contract.dart';
-import 'package:belluga_boilerplate/infrastructure/services/push/firebase_runtime_bootstrap.dart';
-import 'package:belluga_boilerplate/infrastructure/services/push/push_navigation_resolver.dart';
-import 'package:belluga_boilerplate/infrastructure/services/push/push_telemetry_forwarder.dart';
-import 'package:belluga_boilerplate/infrastructure/services/push/push_transport_configurator.dart';
+import 'package:festou_app/application/auth/post_auth_identity_hydration_coordinator.dart';
+import 'package:festou_app/application/push/invite_push_runtime_coordinator.dart';
 import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/configurations/custom_scroll_behavior.dart';
+import 'package:festou_app/application/configurations/belluga_constants.dart';
+import 'package:festou_app/application/observability/sentry_error_reporter.dart';
+import 'package:festou_app/application/router/app_router.dart';
+import 'package:festou_app/application/router/modular_app/module_settings.dart';
+import 'package:festou_app/application/startup/app_startup_navigation_coordinator.dart';
+import 'package:festou_app/application/startup/app_startup_navigation_plan.dart';
+import 'package:festou_app/application/startup/app_startup_plan_resolver.dart';
+import 'package:festou_app/domain/app_data/firebase_settings.dart';
+import 'package:festou_app/domain/push/push_presentation_gate_contract.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
 import 'package:flutter/material.dart';
-import 'package:belluga_boilerplate/application/configurations/custom_scroll_behavior.dart';
-import 'package:get_it/get_it.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:get_it_modular_with_auto_route/get_it_modular_with_auto_route.dart';
-import 'package:intl/intl_standalone.dart';
+import 'package:get_it/get_it.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:stream_value/core/stream_value_builder.dart';
 import 'package:push_handler/push_handler.dart';
+import 'package:festou_app/infrastructure/services/push/push_transport_configurator.dart';
+import 'package:festou_app/infrastructure/services/push/push_gatekeeper.dart';
+import 'package:festou_app/infrastructure/services/push/push_answer_handler.dart';
+import 'package:festou_app/infrastructure/services/push/push_answer_resolver.dart';
+import 'package:festou_app/infrastructure/services/push/push_action_dispatcher.dart';
+import 'package:festou_app/infrastructure/services/push/invite_push_tap_source.dart';
+import 'package:festou_app/infrastructure/services/push/invite_aware_push_message_presenter.dart';
+import 'package:festou_app/infrastructure/observability/invite_flow_debug_logger.dart';
+import 'package:festou_app/infrastructure/services/push/push_telemetry_forwarder.dart';
+import 'package:festou_app/infrastructure/services/telemetry/telemetry_route_observer.dart';
+import 'package:festou_app/presentation/shared/push/controllers/push_options_resolver.dart';
+import 'package:festou_app/presentation/shared/push/push_option_selector_sheet.dart';
+import 'package:festou_app/presentation/shared/push/push_step_validator.dart';
+import 'package:festou_app/presentation/shared/widgets/tenant_public_web_desktop_frame.dart';
+import 'package:flutter/foundation.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_quill/flutter_quill.dart';
+import 'package:phone_form_field/phone_form_field.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:intl/intl.dart';
+
+typedef PushHandlerRepositoryFactory =
+    PushHandlerRepositoryContract Function({
+      required PushTransportConfig transportConfig,
+      required BuildContext? Function() contextProvider,
+      required PushNavigationResolver navigationResolver,
+      required Future<void> Function(RemoteMessage) onBackgroundMessage,
+      Future<void> Function()? presentationGate,
+      required Stream<dynamic>? authChangeStream,
+      required String Function() platformResolver,
+      PushMessagePresenter? presenterOverride,
+      Future<bool> Function(StepData step)? gatekeeper,
+      Future<List<OptionItem>> Function(OptionSource source)? optionsBuilder,
+      Future<void> Function(AnswerPayload answer, StepData step)? onStepSubmit,
+      String? Function(StepData step, String? value)? stepValidator,
+      Future<void> Function(ButtonData button, StepData step)? onCustomAction,
+      void Function(PushEvent event)? onPushEvent,
+    });
 
 abstract class ApplicationContract extends ModularAppContract {
-  ApplicationContract({super.key});
+  ApplicationContract({super.key}) : _appRouter = AppRouter();
 
-  @override
-  final AppRouterContract appRouter = AppRouter();
-
-  @override
-  final ModuleSettingsContract moduleSettings = ModuleSettings();
+  final AppRouter _appRouter;
+  final _moduleSettings = ModuleSettings();
+  late final AppStartupNavigationCoordinator _startupNavigationCoordinator =
+      AppStartupNavigationCoordinator(planLoader: _loadStartupNavigationPlan);
+  static const Locale appLocale = Locale('pt', 'BR');
+  StreamSubscription<RemoteMessage>? _pushMessageSubscription;
+  StreamSubscription<RemoteMessage>? _pushTapSubscription;
+  StreamSubscription<dynamic>? _telemetryIdentitySubscription;
+  StreamSubscription<dynamic>? _deferredIosPushAuthSubscription;
+  PushHandlerRepositoryContract? _pushRepository;
+  AuthRepositoryContract? _deferredIosPushAuthRepository;
+  Future<bool> Function()? _deferredIosPushInitializer;
+  bool _pushPresentationReady = false;
+  bool _deferredIosPushInitializationInFlight = false;
 
   Future<void> initialSettingsPlatform();
+
+  @override
+  AppRouter get appRouter => _appRouter;
+
+  @override
+  ModuleSettings get moduleSettings => _moduleSettings;
+
+  @visibleForTesting
+  AppStartupNavigationCoordinator get startupNavigationCoordinatorForTesting =>
+      _startupNavigationCoordinator;
+
+  Future<void> initialSettings() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    await initializeDateFormatting('pt_BR');
+    Intl.defaultLocale = 'pt_BR';
+  }
 
   @override
   Future<void> init() async {
     await initialSettings();
     await initialSettingsPlatform();
+
+    // Log build info once to help verify the running version (web/mobile/desktop).
+    try {
+      final info = await PackageInfo.fromPlatform();
+      debugPrint(
+        '[BuildInfo] ${info.appName} ${info.version}+${info.buildNumber} (${info.packageName})',
+      );
+    } catch (_) {
+      // expected_control_flow: package metadata can be unavailable on some platforms.
+    }
+
     await super.init();
-    await _initializePushRuntime();
+    await _startupNavigationCoordinator.initialize();
+    await _initializeFirebaseIfAvailable();
+    await _initializePushHandler();
+    _initializeTelemetryIdentityListener();
   }
 
-  Future<void> _initializePushRuntime() async {
-    final appDataRepository = GetIt.I.get<AppDataRepository>();
-    final authRepository = GetIt.I.get<AuthRepositoryContract>();
-    final telemetryRepository = GetIt.I.get<TelemetryRepositoryContract>();
-    final firebaseReady = await FirebaseRuntimeBootstrap.initialize(
-      appDataRepository.appData,
+  Future<AppStartupNavigationPlan> _loadStartupNavigationPlan() async {
+    if (!GetIt.I.isRegistered<AppStartupPlanResolver>()) {
+      return const AppStartupNavigationPlan.none();
+    }
+    final resolver = GetIt.I.get<AppStartupPlanResolver>();
+    return resolver.resolvePlan();
+  }
+
+  Future<void> _initializePushHandler() async {
+    await _initializePushHandlerBootstrap();
+  }
+
+  @visibleForTesting
+  Future<void> initializePushHandlerForTesting({
+    bool? isWebOverride,
+    String? platformOverride,
+    PushHandlerRepositoryFactory? repositoryFactory,
+    AuthRepositoryContract? authRepositoryOverride,
+    InvitePushTapSource? invitePushTapSourceOverride,
+    InvitePushRuntimeCoordinator? invitePushRuntimeCoordinatorOverride,
+  }) async {
+    await _initializePushHandlerBootstrap(
+      isWebOverride: isWebOverride,
+      platformOverride: platformOverride,
+      repositoryFactory: repositoryFactory,
+      authRepositoryOverride: authRepositoryOverride,
+      invitePushTapSourceOverride:
+          invitePushTapSourceOverride ?? kNoopInvitePushTapSource,
+      invitePushRuntimeCoordinatorOverride:
+          invitePushRuntimeCoordinatorOverride,
     );
-    final telemetryForwarder = PushTelemetryForwarder(
-      telemetryRepository: telemetryRepository,
+  }
+
+  @visibleForTesting
+  Future<void> handlePushPresentationReady() async {
+    if (_pushPresentationReady) {
+      InviteFlowDebugLogger.log(
+        'push.presentation.ready.duplicate',
+        fields: const <String, Object?>{'presentation_ready': true},
+      );
+      return;
+    }
+    _pushPresentationReady = true;
+    InviteFlowDebugLogger.log(
+      'push.presentation.ready',
+      fields: const <String, Object?>{'presentation_ready': true},
     );
-    final repository = PushHandlerRepositoryDefault(
-      transportConfig: PushTransportConfigurator.build(
-        appDataRepository: appDataRepository,
+    await _maybeInitializeDeferredIosPush();
+  }
+
+  Future<void> disposeRuntimeResources() async {
+    await _pushMessageSubscription?.cancel();
+    _pushMessageSubscription = null;
+    await _pushTapSubscription?.cancel();
+    _pushTapSubscription = null;
+    await _telemetryIdentitySubscription?.cancel();
+    _telemetryIdentitySubscription = null;
+    await _deferredIosPushAuthSubscription?.cancel();
+    _deferredIosPushAuthSubscription = null;
+    _deferredIosPushAuthRepository = null;
+    _deferredIosPushInitializer = null;
+    _deferredIosPushInitializationInFlight = false;
+    _pushPresentationReady = false;
+    final repository = _pushRepository;
+    _pushRepository = null;
+    if (repository != null) {
+      await repository.dispose();
+    }
+  }
+
+  Future<void> _initializePushHandlerBootstrap({
+    bool? isWebOverride,
+    String? platformOverride,
+    PushHandlerRepositoryFactory? repositoryFactory,
+    AuthRepositoryContract? authRepositoryOverride,
+    InvitePushTapSource? invitePushTapSourceOverride,
+    InvitePushRuntimeCoordinator? invitePushRuntimeCoordinatorOverride,
+  }) async {
+    const disablePush = bool.fromEnvironment(
+      'DISABLE_PUSH',
+      defaultValue: false,
+    );
+    final isWeb = isWebOverride ?? kIsWeb;
+    final resolvedPlatform =
+        platformOverride ?? BellugaConstants.settings.platform;
+    final traceId = InviteFlowDebugLogger.nextTraceId('push.bootstrap');
+    InviteFlowDebugLogger.log(
+      'push.bootstrap.start',
+      traceId: traceId,
+      fields: <String, Object?>{
+        'platform': resolvedPlatform,
+        'is_web': isWeb,
+        'push_disabled': disablePush,
+        'presentation_ready': _pushPresentationReady,
+      },
+    );
+    if (disablePush) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: traceId,
+        fields: const <String, Object?>{'reason': 'disabled'},
+      );
+      debugPrint('[Push] Disabled via DISABLE_PUSH dart-define.');
+      return;
+    }
+    if (isWeb) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: traceId,
+        fields: const <String, Object?>{'reason': 'web'},
+      );
+      debugPrint(
+        '[Push] Web registration skipped; Firebase web config/VAPID not configured.',
+      );
+      return;
+    }
+    if (!_canUseFirebaseMessagingRuntime(resolvedPlatform)) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: traceId,
+        fields: <String, Object?>{
+          'reason': 'firebase_runtime_unavailable',
+          'platform': resolvedPlatform,
+        },
+      );
+      return;
+    }
+    final authRepository =
+        authRepositoryOverride ?? GetIt.I.get<AuthRepositoryContract>();
+    final invitePushTapSource =
+        invitePushTapSourceOverride ??
+        (isWeb ? kNoopInvitePushTapSource : kFirebaseInvitePushTapSource);
+    final invitePushRuntimeCoordinator =
+        invitePushRuntimeCoordinatorOverride ??
+        _buildInvitePushRuntimeCoordinator();
+    if (resolvedPlatform == 'ios') {
+      await _initializeInvitePushTapHandling(
+        isWeb: isWeb,
+        tapSource: invitePushTapSource,
+        coordinator: invitePushRuntimeCoordinator,
+        debugTraceId: traceId,
+      );
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.deferred_ios',
+        traceId: traceId,
+        fields: <String, Object?>{
+          'platform': resolvedPlatform,
+          'is_authorized': authRepository.isAuthorized,
+        },
+      );
+      await _bindDeferredIosPushInitialization(
         authRepository: authRepository,
-      ),
-      contextProvider: () => appRouter.globalRouterKey.currentContext,
-      navigationResolver: BoilerplatePushNavigationResolver(
-        router: appRouter,
-      ).resolve,
-      onBackgroundMessage: PushHandler.onBackgroundMessage,
+        initializer: () => _initializePushHandlerInternal(
+          isWebOverride: false,
+          platformOverride: resolvedPlatform,
+          repositoryFactory: repositoryFactory,
+          authRepositoryOverride: authRepository,
+          invitePushTapSourceOverride: invitePushTapSource,
+          invitePushRuntimeCoordinatorOverride: invitePushRuntimeCoordinator,
+          initializeInviteTapHandling: false,
+          debugTraceId: traceId,
+        ),
+      );
+      return;
+    }
+    await _initializePushHandlerInternal(
+      isWebOverride: isWeb,
+      platformOverride: resolvedPlatform,
+      repositoryFactory: repositoryFactory,
+      authRepositoryOverride: authRepository,
+      invitePushTapSourceOverride: invitePushTapSource,
+      invitePushRuntimeCoordinatorOverride: invitePushRuntimeCoordinator,
+      debugTraceId: traceId,
+    );
+  }
+
+  Future<void> _bindDeferredIosPushInitialization({
+    required AuthRepositoryContract authRepository,
+    required Future<bool> Function() initializer,
+  }) async {
+    await _deferredIosPushAuthSubscription?.cancel();
+    _deferredIosPushAuthRepository = authRepository;
+    _deferredIosPushInitializer = initializer;
+    _deferredIosPushAuthSubscription = authRepository.userStreamValue.stream
+        .listen((_) {
+          unawaited(_maybeInitializeDeferredIosPush());
+        });
+    await _maybeInitializeDeferredIosPush();
+  }
+
+  Future<void> _maybeInitializeDeferredIosPush() async {
+    final authRepository = _deferredIosPushAuthRepository;
+    final initializer = _deferredIosPushInitializer;
+    if (!_pushPresentationReady ||
+        authRepository == null ||
+        initializer == null ||
+        _deferredIosPushInitializationInFlight ||
+        _pushRepository != null ||
+        !authRepository.isAuthorized) {
+      return;
+    }
+    _deferredIosPushInitializationInFlight = true;
+    try {
+      final initialized = await initializer();
+      if (!initialized) {
+        return;
+      }
+      _deferredIosPushInitializer = null;
+      await _deferredIosPushAuthSubscription?.cancel();
+      _deferredIosPushAuthSubscription = null;
+      _deferredIosPushAuthRepository = null;
+    } finally {
+      _deferredIosPushInitializationInFlight = false;
+    }
+  }
+
+  Future<bool> _initializePushHandlerInternal({
+    bool? isWebOverride,
+    String? platformOverride,
+    PushHandlerRepositoryFactory? repositoryFactory,
+    AuthRepositoryContract? authRepositoryOverride,
+    InvitePushTapSource? invitePushTapSourceOverride,
+    InvitePushRuntimeCoordinator? invitePushRuntimeCoordinatorOverride,
+    bool initializeInviteTapHandling = true,
+    String? debugTraceId,
+  }) async {
+    if (_pushRepository != null) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.repository_reused',
+        traceId: debugTraceId,
+        fields: const <String, Object?>{'repository_present': true},
+      );
+      return true;
+    }
+    const disablePush = bool.fromEnvironment(
+      'DISABLE_PUSH',
+      defaultValue: false,
+    );
+    if (disablePush) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: debugTraceId,
+        fields: const <String, Object?>{'reason': 'disabled_internal'},
+      );
+      debugPrint('[Push] Disabled via DISABLE_PUSH dart-define.');
+      return false;
+    }
+    final isWeb = isWebOverride ?? kIsWeb;
+    if (isWeb) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: debugTraceId,
+        fields: const <String, Object?>{'reason': 'web_internal'},
+      );
+      debugPrint(
+        '[Push] Web registration skipped; Firebase web config/VAPID not configured.',
+      );
+      return false;
+    }
+    final resolvedPlatform =
+        platformOverride ?? BellugaConstants.settings.platform;
+    if (!_canUseFirebaseMessagingRuntime(resolvedPlatform)) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.skipped',
+        traceId: debugTraceId,
+        fields: <String, Object?>{
+          'reason': 'firebase_runtime_unavailable_internal',
+          'platform': resolvedPlatform,
+        },
+      );
+      return false;
+    }
+    final authRepository =
+        authRepositoryOverride ?? GetIt.I.get<AuthRepositoryContract>();
+    final transportConfig = PushTransportConfigurator.build(
+      authRepository: authRepository,
+    );
+    final navigationResolver = moduleSettings.buildPushNavigationResolver();
+    final answerResolver = GetIt.I.isRegistered<PushAnswerResolver>()
+        ? GetIt.I.get<PushAnswerResolver>()
+        : null;
+    final gatekeeper = PushGatekeeper(
+      contextProvider: () => appRouter.navigatorKey.currentContext,
+      answerResolver: answerResolver,
+    );
+    final optionsResolver = GetIt.I.get<PushOptionsResolver>();
+    final telemetryForwarder = PushTelemetryForwarder();
+    final stepValidator = PushStepValidator();
+    final actionDispatcher = PushActionDispatcher(
+      optionsBuilder: optionsResolver.resolve,
+      onStepSubmit: (answer, step) async {
+        await _handlePushAnswer(answer, step);
+      },
+      onOpenSelector: _openPushOptionSelector,
+      onShowToast: _showPushToast,
+    );
+    final factory =
+        repositoryFactory ??
+        ({
+          required PushTransportConfig transportConfig,
+          required BuildContext? Function() contextProvider,
+          required PushNavigationResolver navigationResolver,
+          required Future<void> Function(RemoteMessage) onBackgroundMessage,
+          Future<void> Function()? presentationGate,
+          required Stream<dynamic>? authChangeStream,
+          required String Function() platformResolver,
+          PushMessagePresenter? presenterOverride,
+          Future<bool> Function(StepData step)? gatekeeper,
+          Future<List<OptionItem>> Function(OptionSource source)?
+          optionsBuilder,
+          Future<void> Function(AnswerPayload answer, StepData step)?
+          onStepSubmit,
+          String? Function(StepData step, String? value)? stepValidator,
+          Future<void> Function(ButtonData button, StepData step)?
+          onCustomAction,
+          void Function(PushEvent event)? onPushEvent,
+        }) {
+          return PushHandlerRepositoryDefault(
+            transportConfig: transportConfig,
+            contextProvider: contextProvider,
+            navigationResolver: navigationResolver,
+            onBackgroundMessage: onBackgroundMessage,
+            presentationGate: presentationGate,
+            authChangeStream: authChangeStream,
+            platformResolver: platformResolver,
+            presenterOverride: presenterOverride,
+            gatekeeper: gatekeeper,
+            optionsBuilder: optionsBuilder,
+            onStepSubmit: onStepSubmit,
+            stepValidator: stepValidator,
+            onCustomAction: onCustomAction,
+            onPushEvent: onPushEvent,
+          );
+        };
+    final repository = factory(
+      transportConfig: transportConfig,
+      contextProvider: () => appRouter.navigatorKey.currentContext,
+      navigationResolver: navigationResolver,
+      onBackgroundMessage: (message) async {},
+      presentationGate: () async {
+        if (!GetIt.I.isRegistered<PushPresentationGateContract>()) {
+          return;
+        }
+        final gate = GetIt.I.get<PushPresentationGateContract>();
+        if (gate.isReady) {
+          return;
+        }
+        await gate.waitUntilReady();
+      },
       authChangeStream: authRepository.userStreamValue.stream,
-      platformResolver: () =>
-          appDataRepository.appData.platformType.value?.name ?? 'web',
-      enableFirebaseMessaging: firebaseReady,
+      platformResolver: () => resolvedPlatform,
+      presenterOverride: InviteAwarePushMessagePresenter(
+        contextProvider: () => appRouter.navigatorKey.currentContext,
+        navigationResolver: navigationResolver,
+        gatekeeper: gatekeeper.check,
+        optionsBuilder: optionsResolver.resolve,
+        onStepSubmit: (answer, step) => _handlePushAnswer(answer, step),
+        stepValidator: stepValidator.validate,
+        onCustomAction: (button, step) =>
+            actionDispatcher.dispatch(button: button, step: step),
+      ),
+      gatekeeper: gatekeeper.check,
+      optionsBuilder: optionsResolver.resolve,
+      onStepSubmit: (answer, step) => _handlePushAnswer(answer, step),
+      stepValidator: stepValidator.validate,
+      onCustomAction: (button, step) =>
+          actionDispatcher.dispatch(button: button, step: step),
       onPushEvent: (event) {
         unawaited(telemetryForwarder.forward(event));
       },
     );
-    if (GetIt.I.isRegistered<PushHandlerRepositoryContract>()) {
-      GetIt.I.unregister<PushHandlerRepositoryContract>();
+    final invitePushRuntimeCoordinator =
+        invitePushRuntimeCoordinatorOverride ??
+        _buildInvitePushRuntimeCoordinator();
+    if (initializeInviteTapHandling) {
+      await _initializeInvitePushTapHandling(
+        isWeb: isWeb,
+        tapSource:
+            invitePushTapSourceOverride ??
+            (isWeb ? kNoopInvitePushTapSource : kFirebaseInvitePushTapSource),
+        coordinator: invitePushRuntimeCoordinator,
+        debugTraceId: debugTraceId,
+      );
     }
-    GetIt.I.registerSingleton<PushHandlerRepositoryContract>(repository);
-    await repository.init();
+    try {
+      await repository.init();
+    } catch (error, stackTrace) {
+      InviteFlowDebugLogger.log(
+        'push.bootstrap.init_failed',
+        traceId: debugTraceId,
+        fields: <String, Object?>{
+          'platform': resolvedPlatform,
+          'error_type': error.runtimeType.toString(),
+        },
+      );
+      await SentryErrorReporter.captureRecoverable(
+        origin: 'application.push.init',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      debugPrint('[Push] Init failed: $error');
+      return false;
+    }
+    _pushRepository = repository;
+    InviteFlowDebugLogger.log(
+      'push.bootstrap.initialized',
+      traceId: debugTraceId,
+      fields: <String, Object?>{
+        'platform': resolvedPlatform,
+        'invite_tap_handling_initialized': initializeInviteTapHandling,
+      },
+    );
+    _listenForInvitePushUpdates(repository, invitePushRuntimeCoordinator);
+    return true;
   }
 
-  @protected
-  Future<void> initialSettings() async {
-    WidgetsFlutterBinding.ensureInitialized();
-    await initializeDateFormatting();
-    await findSystemLocale();
+  Future<List<dynamic>?> _openPushOptionSelector(
+    PushOptionSelectorPayload payload,
+  ) async {
+    final context = appRouter.navigatorKey.currentContext;
+    if (context == null || !context.mounted) {
+      return null;
+    }
+    return PushOptionSelectorSheet.show(
+      context: context,
+      title: payload.title,
+      body: payload.body,
+      layout: payload.layout,
+      gridColumns: payload.gridColumns,
+      selectionMode: payload.selectionMode,
+      options: payload.options,
+      minSelected: payload.minSelected,
+      maxSelected: payload.maxSelected,
+      initialSelected: payload.initialSelected,
+    );
   }
+
+  void _showPushToast(String message) {
+    if (message.isEmpty) {
+      return;
+    }
+    final context = appRouter.navigatorKey.currentContext;
+    final messenger = context != null
+        ? ScaffoldMessenger.maybeOf(context)
+        : null;
+    messenger?.showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  InvitePushRuntimeCoordinator _buildInvitePushRuntimeCoordinator() {
+    return InvitePushRuntimeCoordinator(
+      invitesRepository: GetIt.I.isRegistered<InvitesRepositoryContract>()
+          ? GetIt.I.get<InvitesRepositoryContract>()
+          : null,
+      navigatePath: _navigatePushPath,
+      currentPathProvider: () => appRouter.currentPath,
+    );
+  }
+
+  Future<void> _navigatePushPath(String path) async {
+    final normalized = path.trim();
+    if (normalized.isEmpty) {
+      return;
+    }
+    await appRouter.pushPath(normalized);
+  }
+
+  Future<void> _initializeInvitePushTapHandling({
+    required bool isWeb,
+    required InvitePushTapSource tapSource,
+    required InvitePushRuntimeCoordinator coordinator,
+    String? debugTraceId,
+  }) async {
+    await _pushTapSubscription?.cancel();
+    _pushTapSubscription = null;
+
+    if (isWeb) {
+      return;
+    }
+
+    final initialMessage = await tapSource.getInitialMessage();
+    if (initialMessage != null) {
+      InviteFlowDebugLogger.log(
+        'push.tap.initial_message_detected',
+        traceId: debugTraceId,
+        fields: _pushDebugSummary(initialMessage),
+      );
+      final initialPath = coordinator.prepareNotificationTapPath(
+        initialMessage,
+      );
+      if (initialPath != null) {
+        _startupNavigationCoordinator.overrideInitialPath(initialPath);
+        unawaited(coordinator.refreshNotificationTapData(initialMessage));
+      }
+    }
+
+    _pushTapSubscription = tapSource.onMessageOpenedApp.listen((message) {
+      InviteFlowDebugLogger.log(
+        'push.tap.opened_app_message',
+        traceId: debugTraceId,
+        fields: _pushDebugSummary(message),
+      );
+      unawaited(coordinator.handleNotificationTap(message));
+    });
+  }
+
+  bool _canUseFirebaseMessagingRuntime(String platform) {
+    if (Firebase.apps.isNotEmpty) {
+      return true;
+    }
+    if (!GetIt.I.isRegistered<AppDataRepositoryContract>()) {
+      return true;
+    }
+    final settings = GetIt.I
+        .get<AppDataRepositoryContract>()
+        .appData
+        .firebaseSettings;
+    if (settings == null) {
+      debugPrint(
+        '[Push] Firebase settings missing; skipping push registration.',
+      );
+      return false;
+    }
+
+    final appId = _firebaseAppIdForPlatform(settings, platform);
+    if (appId == null || appId.isEmpty) {
+      debugPrint(
+        '[Push] Firebase app id missing for platform '
+        '$platform; skipping push registration.',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  void _listenForInvitePushUpdates(
+    PushHandlerRepositoryContract repository,
+    InvitePushRuntimeCoordinator coordinator,
+  ) {
+    _pushMessageSubscription?.cancel();
+    _pushMessageSubscription = repository.messageStream.listen((message) async {
+      if (message.data.isEmpty) {
+        InviteFlowDebugLogger.log(
+          'push.message.empty_payload',
+          fields: <String, Object?>{
+            'message_id_present': message.messageId?.trim().isNotEmpty == true,
+          },
+        );
+        return;
+      }
+      InviteFlowDebugLogger.log(
+        'push.message.received',
+        fields: _pushDebugSummary(message),
+      );
+      await coordinator.handleIncomingMessage(message);
+    });
+  }
+
+  void _initializeTelemetryIdentityListener() {
+    if (!GetIt.I.isRegistered<AuthRepositoryContract>() ||
+        !GetIt.I.isRegistered<TelemetryRepositoryContract>()) {
+      return;
+    }
+    final authRepository = GetIt.I.get<AuthRepositoryContract>();
+    final telemetryRepository = GetIt.I.get<TelemetryRepositoryContract>();
+    _telemetryIdentitySubscription?.cancel();
+    _telemetryIdentitySubscription = authRepository.userStreamValue.stream
+        .listen((user) async {
+          if (user == null) {
+            return;
+          }
+          final storedUserId = await authRepository.getUserId();
+          if (storedUserId == null || storedUserId.isEmpty) {
+            return;
+          }
+          await telemetryRepository.mergeIdentity(
+            previousUserId: telemetryRepoString(storedUserId),
+          );
+        });
+    final currentUser = authRepository.userStreamValue.value;
+    if (currentUser != null) {
+      unawaited(
+        _handleTelemetryIdentityMerge(
+          authRepository: authRepository,
+          telemetryRepository: telemetryRepository,
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleTelemetryIdentityMerge({
+    required AuthRepositoryContract authRepository,
+    required TelemetryRepositoryContract telemetryRepository,
+  }) async {
+    final storedUserId = await authRepository.getUserId();
+    if (storedUserId == null || storedUserId.isEmpty) {
+      return;
+    }
+    await telemetryRepository.mergeIdentity(
+      previousUserId: telemetryRepoString(storedUserId),
+    );
+  }
+
+  Future<void> _handlePushAnswer(AnswerPayload answer, StepData step) async {
+    if (GetIt.I.isRegistered<PushAnswerHandler>()) {
+      final handler = GetIt.I.get<PushAnswerHandler>();
+      await handler.handle(answer, step);
+    }
+  }
+
+  @visibleForTesting
+  Future<void> debugPresentPushMessage(String messageId) async {
+    await _pushRepository?.debugInjectMessageId(messageId);
+  }
+
+  @visibleForTesting
+  FirebaseOptions? firebaseOptionsForTesting({required String platform}) =>
+      _firebaseOptionsForPlatform(platform);
+
+  Future<void> _initializeFirebaseIfAvailable() async {
+    if (Firebase.apps.isNotEmpty) {
+      debugPrint('[Push] Firebase already initialized; skipping runtime init.');
+      return;
+    }
+
+    final options = _firebaseOptionsForPlatform(
+      BellugaConstants.settings.platform,
+    );
+    if (options == null) {
+      return;
+    }
+
+    debugPrint('[Push] Firebase init for project ${options.projectId}.');
+    await Firebase.initializeApp(options: options);
+  }
+
+  FirebaseOptions? _firebaseOptionsForPlatform(String platform) {
+    final settings = GetIt.I
+        .get<AppDataRepositoryContract>()
+        .appData
+        .firebaseSettings;
+    if (settings == null) {
+      debugPrint('[Push] Firebase settings missing; skipping init.');
+      return null;
+    }
+
+    final appId = _firebaseAppIdForPlatform(settings, platform);
+    if (appId == null || appId.isEmpty) {
+      debugPrint(
+        '[Push] Firebase app id missing for platform '
+        '$platform; skipping init.',
+      );
+      return null;
+    }
+
+    return FirebaseOptions(
+      apiKey: settings.apiKey,
+      appId: appId,
+      messagingSenderId: settings.messagingSenderId,
+      projectId: settings.projectId,
+      storageBucket: settings.storageBucket,
+    );
+  }
+
+  String? _firebaseAppIdForPlatform(
+    FirebaseSettings settings,
+    String platform,
+  ) {
+    final normalizedPlatform = platform.trim().toLowerCase();
+    if (normalizedPlatform == 'ios') {
+      return settings.iosBootstrapAppId;
+    }
+    if (normalizedPlatform == 'android') {
+      return settings.androidBootstrapAppId;
+    }
+
+    final resolvedLegacyAppId = settings.appId?.trim();
+    if (resolvedLegacyAppId != null && resolvedLegacyAppId.isNotEmpty) {
+      return resolvedLegacyAppId;
+    }
+
+    return settings.androidBootstrapAppId ?? settings.iosBootstrapAppId;
+  }
+
+  Map<String, Object?> _pushDebugSummary(RemoteMessage message) {
+    final payloadKeys =
+        message.data.keys.map((key) => key.toString()).toList(growable: false)
+          ..sort();
+    return <String, Object?>{
+      'push_type': _resolvePushType(message.data),
+      'key_count': payloadKeys.length,
+      'payload_keys': payloadKeys,
+      'has_invite_id': _payloadHasValue(message.data, 'invite_id'),
+      'has_event_id': _payloadHasValue(message.data, 'event_id'),
+      'has_occurrence_id': _payloadHasValue(message.data, 'occurrence_id'),
+      'has_push_message_id': _payloadHasValue(message.data, 'push_message_id'),
+      'message_id_present': message.messageId?.trim().isNotEmpty == true,
+    };
+  }
+
+  String _resolvePushType(Map<String, dynamic> data) {
+    final pushType = data['push_type']?.toString().trim();
+    if (pushType != null && pushType.isNotEmpty) {
+      return pushType;
+    }
+    final eventType = data['event']?.toString().trim();
+    if (eventType != null && eventType.isNotEmpty) {
+      return eventType;
+    }
+    return 'unknown';
+  }
+
+  bool _payloadHasValue(Map<String, dynamic> data, String key) {
+    final value = data[key]?.toString().trim() ?? '';
+    return value.isNotEmpty;
+  }
+
+  ThemeData getThemeData() => GetIt.I
+      .get<AppDataRepositoryContract>()
+      .appData
+      .themeDataSettings
+      .themeData();
+
+  ThemeData getLightThemeData() => GetIt.I
+      .get<AppDataRepositoryContract>()
+      .appData
+      .themeDataSettings
+      .themeDataLight();
+
+  ThemeData getDarkThemeData() => GetIt.I
+      .get<AppDataRepositoryContract>()
+      .appData
+      .themeDataSettings
+      .themeDataDark();
+
+  ThemeMode get themeMode => GetIt.I.get<AppDataRepositoryContract>().themeMode;
 
   @override
   State<ApplicationContract> createState() => _ApplicationContractState();
 }
 
-class _ApplicationContractState extends State<ApplicationContract> {
-  final navigatorKey = GlobalKey<NavigatorState>();
+class _ApplicationContractState extends State<ApplicationContract>
+    with WidgetsBindingObserver {
+  bool _didTrackAppInit = false;
+  bool _appInitInFlight = false;
+  AppLifecycleState? _lastLifecycleState;
+  EventTrackerLifecycleObserver? _telemetryLifecycleObserver;
+  EventTrackerTimedEventHandle? _routerTimedEvent;
+  String? _lastRouterSignature;
+  Future<void> _routerTrackPending = Future.value();
+  VoidCallback? _routerListener;
+  final List<AppLifecycleState> _lifecycleStateBuffer = [];
+  Timer? _lifecycleDebounceTimer;
+  static const Duration _lifecycleDebounceWindow = Duration(milliseconds: 400);
+  static const int _appInitMaxRetries = 10;
+  static const Duration _appInitRetryDelay = Duration(milliseconds: 500);
+  static const Duration _postAuthHydrationRetryDelay = Duration(
+    milliseconds: 100,
+  );
+  static const int _postAuthHydrationMaxRetries = 20;
+  int _appInitRetryCount = 0;
+  Timer? _appInitRetryTimer;
+  int _postAuthHydrationRetryCount = 0;
+  Timer? _postAuthHydrationRetryTimer;
+  bool _didMarkPushPresentationReady = false;
+  PostAuthIdentityHydrationCoordinator? _postAuthIdentityHydrationCoordinator;
 
-  ThemeData getThemeData() {
-    return ThemeData(
-      progressIndicatorTheme: ProgressIndicatorThemeData(
-        strokeWidth: 4,
+  void _debugWebTelemetry(String message, [Object? details]) {
+    if (kIsWeb) {
+      final payload = details == null ? message : '$message | $details';
+      // ignore: avoid_print
+      print('[Telemetry][Web][AppRouter] $payload');
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _registerTelemetryLifecycleObserver();
+    _registerRouterTelemetryObserver();
+    _initializePostAuthIdentityHydration();
+    unawaited(_trackAppInit());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _didMarkPushPresentationReady) {
+        return;
+      }
+      _didMarkPushPresentationReady = true;
+      if (GetIt.I.isRegistered<PushPresentationGateContract>()) {
+        GetIt.I.get<PushPresentationGateContract>().markReady();
+      }
+      unawaited(widget.handlePushPresentationReady());
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (_telemetryLifecycleObserver != null) {
+      WidgetsBinding.instance.removeObserver(_telemetryLifecycleObserver!);
+      _telemetryLifecycleObserver = null;
+    }
+    if (_routerListener != null) {
+      widget.appRouter.removeListener(_routerListener!);
+      _routerListener = null;
+    }
+    _appInitRetryTimer?.cancel();
+    _postAuthHydrationRetryTimer?.cancel();
+    _lifecycleDebounceTimer?.cancel();
+    _postAuthIdentityHydrationCoordinator?.dispose();
+    _postAuthIdentityHydrationCoordinator = null;
+    unawaited(widget.disposeRuntimeResources());
+    super.dispose();
+  }
+
+  void _initializePostAuthIdentityHydration() {
+    if (_postAuthIdentityHydrationCoordinator != null) {
+      return;
+    }
+    if (!GetIt.I.isRegistered<AuthRepositoryContract>()) {
+      _schedulePostAuthIdentityHydrationRetry();
+      return;
+    }
+    _postAuthHydrationRetryTimer?.cancel();
+    _postAuthHydrationRetryTimer = null;
+    _postAuthHydrationRetryCount = 0;
+    final coordinator = PostAuthIdentityHydrationCoordinator();
+    coordinator.bind();
+    _postAuthIdentityHydrationCoordinator = coordinator;
+  }
+
+  void _schedulePostAuthIdentityHydrationRetry() {
+    if (_postAuthHydrationRetryTimer != null ||
+        _postAuthHydrationRetryCount >= _postAuthHydrationMaxRetries) {
+      return;
+    }
+    _postAuthHydrationRetryCount += 1;
+    _postAuthHydrationRetryTimer = Timer(_postAuthHydrationRetryDelay, () {
+      _postAuthHydrationRetryTimer = null;
+      if (!mounted) {
+        return;
+      }
+      _initializePostAuthIdentityHydration();
+    });
+  }
+
+  void _registerRouterTelemetryObserver() {
+    if (!kIsWeb || _routerListener != null) return;
+
+    void enqueueCurrentRoute(String reason) {
+      final route = widget.appRouter.topRoute;
+      _debugWebTelemetry(reason, {'route': route.name, 'match': route.match});
+      _enqueueRouterTrack(route);
+    }
+
+    _routerListener = () => enqueueCurrentRoute('listener fired');
+    widget.appRouter.addListener(_routerListener!);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      enqueueCurrentRoute('post frame enqueue');
+    });
+  }
+
+  void _enqueueRouterTrack(RouteData routeData) {
+    _debugWebTelemetry('enqueue track', {
+      'route': routeData.name,
+      'match': routeData.match,
+    });
+    _routerTrackPending = _routerTrackPending
+        .then((_) => _trackRouterRoute(routeData))
+        .catchError((_) {});
+  }
+
+  Future<void> _trackRouterRoute(RouteData routeData) async {
+    if (!GetIt.I.isRegistered<TelemetryRepositoryContract>()) {
+      return;
+    }
+    final signature = _buildRouterSignature(routeData);
+    if (signature == _lastRouterSignature) {
+      _debugWebTelemetry('skip (same signature)', signature);
+      return;
+    }
+    _lastRouterSignature = signature;
+    _finishRouterTimedEvent();
+    final telemetry = GetIt.I.get<TelemetryRepositoryContract>();
+    final screenContext = _buildRouterScreenContext(routeData);
+    telemetry.setScreenContext(telemetryRepoMap(screenContext));
+    _routerTimedEvent = await telemetry.startTimedEvent(
+      EventTrackerEvents.viewContent,
+      eventName: telemetryRepoString('screen_view'),
+      properties: telemetryRepoMap({'screen_context': screenContext}),
+    );
+    _debugWebTelemetry('timed event started', {
+      'route': routeData.name,
+      'handle': _routerTimedEvent?.id,
+    });
+  }
+
+  void _finishRouterTimedEvent() {
+    final handle = _routerTimedEvent;
+    if (handle == null) {
+      return;
+    }
+    _routerTimedEvent = null;
+    final telemetry = GetIt.I.get<TelemetryRepositoryContract>();
+    _debugWebTelemetry('timed event finish', handle.id);
+    unawaited(telemetry.finishTimedEvent(handle));
+  }
+
+  String _buildRouterSignature(RouteData routeData) {
+    return '${routeData.name}|${routeData.match}|'
+        '${routeData.params.rawMap}|${routeData.queryParams.rawMap}';
+  }
+
+  Map<String, dynamic> _buildRouterScreenContext(RouteData routeData) {
+    final params = {
+      ...routeData.params.rawMap,
+      ...routeData.queryParams.rawMap,
+    };
+    final sanitized = _sanitizeRouteParams(params);
+    return {
+      'route_name': routeData.name,
+      'route_type': routeData.type.runtimeType.toString(),
+      'is_overlay': false,
+      if (sanitized != null && sanitized.isNotEmpty) 'route_params': sanitized,
+    };
+  }
+
+  Map<String, dynamic>? _sanitizeRouteParams(Map<String, dynamic> params) {
+    if (params.isEmpty) {
+      return null;
+    }
+    final sanitized = <String, dynamic>{};
+    params.forEach((key, value) {
+      final safeValue = _sanitizeJsonValue(value);
+      if (safeValue != null) {
+        sanitized[key.toString()] = safeValue;
+      }
+    });
+    return sanitized.isEmpty ? null : sanitized;
+  }
+
+  Object? _sanitizeJsonValue(Object? value) {
+    if (value == null || value is String || value is num || value is bool) {
+      return value;
+    }
+    if (value is Map) {
+      final sanitized = <String, dynamic>{};
+      value.forEach((key, nested) {
+        final safeValue = _sanitizeJsonValue(nested);
+        if (safeValue != null) {
+          sanitized[key.toString()] = safeValue;
+        }
+      });
+      return sanitized.isEmpty ? null : sanitized;
+    }
+    if (value is Iterable) {
+      final sanitized = value
+          .map(_sanitizeJsonValue)
+          .where((item) => item != null)
+          .toList();
+      return sanitized.isEmpty ? null : sanitized;
+    }
+    return null;
+  }
+
+  void _registerTelemetryLifecycleObserver() {
+    if (!GetIt.I.isRegistered<TelemetryRepositoryContract>()) {
+      return;
+    }
+    final telemetry = GetIt.I.get<TelemetryRepositoryContract>();
+    final observer = telemetry.buildLifecycleObserver();
+    if (observer == null) {
+      return;
+    }
+    _telemetryLifecycleObserver = observer;
+    WidgetsBinding.instance.addObserver(observer);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (_lastLifecycleState == state) {
+      return;
+    }
+    final previousState = _lastLifecycleState;
+    _lastLifecycleState = state;
+    if (!kIsWeb) {
+      _bufferAppLifecycle(state);
+    }
+    if (state == AppLifecycleState.resumed &&
+        (previousState == AppLifecycleState.paused ||
+            previousState == AppLifecycleState.detached)) {
+      _didTrackAppInit = false;
+      _appInitRetryCount = 0;
+      _appInitRetryTimer?.cancel();
+      unawaited(_trackAppInit());
+    }
+  }
+
+  Future<void> _trackAppInit() async {
+    if (_didTrackAppInit || _appInitInFlight) {
+      return;
+    }
+    if (!GetIt.I.isRegistered<TelemetryRepositoryContract>()) {
+      _scheduleAppInitRetry();
+      return;
+    }
+    if (!GetIt.I.isRegistered<AuthRepositoryContract>()) {
+      _scheduleAppInitRetry();
+      return;
+    }
+
+    _appInitInFlight = true;
+    _appInitRetryTimer?.cancel();
+    final telemetry = GetIt.I.get<TelemetryRepositoryContract>();
+    var success = false;
+    try {
+      success = (await telemetry.logEvent(
+        EventTrackerEvents.openApp,
+        eventName: telemetryRepoString('app_init'),
+      )).value;
+    } catch (_) {
+      success = false;
+    }
+    _appInitInFlight = false;
+    if (success) {
+      _didTrackAppInit = true;
+      _appInitRetryTimer?.cancel();
+    } else {
+      _scheduleAppInitRetry();
+    }
+  }
+
+  void _scheduleAppInitRetry() {
+    if (_appInitRetryTimer != null ||
+        _appInitRetryCount >= _appInitMaxRetries) {
+      return;
+    }
+    _appInitRetryCount += 1;
+    _appInitRetryTimer = Timer(_appInitRetryDelay, () {
+      _appInitRetryTimer = null;
+      if (!mounted) return;
+      unawaited(_trackAppInit());
+    });
+  }
+
+  void _bufferAppLifecycle(AppLifecycleState state) {
+    _lifecycleStateBuffer.add(state);
+    _lifecycleDebounceTimer?.cancel();
+    _lifecycleDebounceTimer = Timer(_lifecycleDebounceWindow, () {
+      _lifecycleDebounceTimer = null;
+      if (!mounted || _lifecycleStateBuffer.isEmpty) {
+        _lifecycleStateBuffer.clear();
+        return;
+      }
+      final sequence = _lifecycleStateBuffer
+          .map((item) => item.name)
+          .toList(growable: false);
+      final finalState = _lifecycleStateBuffer.last;
+      _lifecycleStateBuffer.clear();
+      _trackAppLifecycle(finalState, sequence);
+    });
+  }
+
+  void _trackAppLifecycle(AppLifecycleState finalState, List<String> sequence) {
+    if (!GetIt.I.isRegistered<TelemetryRepositoryContract>()) {
+      return;
+    }
+    final telemetry = GetIt.I.get<TelemetryRepositoryContract>();
+    unawaited(
+      telemetry.logEvent(
+        EventTrackerEvents.openApp,
+        eventName: telemetryRepoString('app_lifecycle'),
+        properties: telemetryRepoMap({
+          'state': finalState.name,
+          'sequence': sequence,
+        }),
       ),
-      elevatedButtonTheme: ElevatedButtonThemeData(
-        style: ElevatedButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(100.0),
-          ),
-          padding: EdgeInsets.symmetric(vertical: 16.0, horizontal: 32.0),
-        ),
-      ),
-      colorScheme: ColorScheme.fromSeed(seedColor: Color(0xFF00E6B8)),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return StreamValueBuilder<ThemeData?>(
-        streamValue: GetIt.I.get<ThemeRepository>().themeStreamValue,
-        builder: (context, themeData) {
-          final ThemeData _themeData = themeData ?? getThemeData();
-          final routerConfig = widget.appRouter.config(
-            includePrefixMatches: false,
-            deepLinkBuilder: _resolvePlatformDeepLink,
-          );
-
-          return MaterialApp.router(
-            theme: _themeData,
-            scrollBehavior: CustomScrollBehavior(),
-            routeInformationParser: routerConfig.routeInformationParser,
-            routeInformationProvider: widget.appRouter.routeInfoProvider(),
-            routerDelegate: routerConfig.routerDelegate,
-            backButtonDispatcher: routerConfig.backButtonDispatcher,
-          );
-        });
-  }
-
-  DeepLink _resolvePlatformDeepLink(PlatformDeepLink deepLink) {
-    final browserPath = initialBrowserPath();
-    if (browserPath == null || browserPath == '/') {
-      return deepLink;
-    }
-
-    return DeepLink.path(browserPath, includePrefixMatches: false);
+    final appDataRepository = GetIt.I.get<AppDataRepositoryContract>();
+    return StreamValueBuilder<ThemeMode?>(
+      streamValue: appDataRepository.themeModeStreamValue,
+      builder: (context, themeMode) {
+        final resolvedThemeMode = themeMode ?? ThemeMode.system;
+        final routerConfig = widget.appRouter.config(
+          includePrefixMatches: false,
+          deepLinkBuilder:
+              widget._startupNavigationCoordinator.resolvePlatformDeepLink,
+          navigatorObservers: () =>
+              kIsWeb ? const [] : [TelemetryRouteObserver()],
+        );
+        return MaterialApp.router(
+          locale: ApplicationContract.appLocale,
+          supportedLocales: const <Locale>[ApplicationContract.appLocale],
+          localizationsDelegates: const <LocalizationsDelegate<dynamic>>[
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+            ...FlutterQuillLocalizations.localizationsDelegates,
+            ...PhoneFieldLocalization.delegates,
+          ],
+          themeMode: resolvedThemeMode,
+          theme: widget.getLightThemeData(),
+          darkTheme: widget.getDarkThemeData(),
+          scrollBehavior: CustomScrollBehavior(),
+          routeInformationParser: routerConfig.routeInformationParser,
+          routeInformationProvider: widget.appRouter.routeInfoProvider(),
+          routerDelegate: routerConfig.routerDelegate,
+          backButtonDispatcher: routerConfig.backButtonDispatcher,
+          builder: (context, child) {
+            return ListenableBuilder(
+              listenable: widget.appRouter,
+              child: child ?? const SizedBox.shrink(),
+              builder: (context, routedChild) {
+                return TenantPublicWebDesktopFrame(
+                  routeName: widget.appRouter.topRoute.name,
+                  child: routedChild ?? const SizedBox.shrink(),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
   }
 }

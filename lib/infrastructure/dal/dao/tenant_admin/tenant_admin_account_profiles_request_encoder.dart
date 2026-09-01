@@ -1,0 +1,373 @@
+import 'package:belluga_contact_channels/belluga_contact_channels.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile_gallery_update.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_profile_group.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_poi_visual.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_terms.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+
+class TenantAdminAccountProfilesRequestEncoder {
+  const TenantAdminAccountProfilesRequestEncoder();
+
+  TenantAdminAccountProfileGalleryEncodedPayload
+  encodeUpdateAccountProfileGallery(
+    List<TenantAdminAccountProfileGalleryUpdateGroup> groups,
+  ) {
+    final uploads = <String, TenantAdminMediaUpload>{};
+
+    final payload = groups
+        .map((group) {
+          final items = group.items
+              .map((item) {
+                final upload = item.upload;
+                String? uploadKey;
+                if (upload != null) {
+                  uploadKey = 'upload_${group.groupId}_${item.itemId}'
+                      .replaceAll(RegExp(r'[^a-zA-Z0-9_]+'), '_');
+                  uploads[uploadKey] = upload;
+                }
+
+                return <String, dynamic>{
+                  'item_id': item.itemId,
+                  'description': item.description,
+                  'order': item.order,
+                  'upload': ?uploadKey,
+                };
+              })
+              .toList(growable: false);
+
+          return <String, dynamic>{
+            'group_id': group.groupId,
+            'subtitle': group.subtitle,
+            'order': group.order,
+            'items': items,
+          };
+        })
+        .toList(growable: false);
+
+    return (galleryGroups: payload, uploads: uploads);
+  }
+
+  Map<String, dynamic> encodeFetchAccountProfilesQuery({
+    String? accountId,
+    String? profileType,
+    String? contactMode,
+    bool contactChannelsEnabledOnly = false,
+    bool queryableOnly = false,
+    String? excludeAccountProfileId,
+    String? search,
+    int? page,
+    int? pageSize,
+  }) {
+    final payload = <String, dynamic>{};
+    if (accountId != null && accountId.trim().isNotEmpty) {
+      payload['account_id'] = accountId.trim();
+    }
+    if (profileType != null && profileType.trim().isNotEmpty) {
+      payload['profile_type'] = profileType.trim();
+    }
+    if (contactMode != null && contactMode.trim().isNotEmpty) {
+      payload['contact_mode'] = contactMode.trim();
+    }
+    if (contactChannelsEnabledOnly) {
+      payload['contact_channels_enabled_only'] = 1;
+    }
+    if (queryableOnly) {
+      payload['queryable_only'] = 1;
+    }
+    if (excludeAccountProfileId != null &&
+        excludeAccountProfileId.trim().isNotEmpty) {
+      payload['exclude_account_profile_id'] = excludeAccountProfileId.trim();
+    }
+    if (search != null && search.trim().isNotEmpty) {
+      payload['search'] = search.trim();
+    }
+    if (page != null && page > 0) {
+      payload['page'] = page;
+    }
+    if (pageSize != null && pageSize > 0) {
+      payload['page_size'] = pageSize;
+    }
+
+    return payload;
+  }
+
+  Map<String, dynamic> encodeFetchAccountProfileCandidatesQuery({
+    required String scope,
+    required String search,
+    required int page,
+    required int perPage,
+    String? excludeAccountProfileId,
+  }) {
+    final payload = <String, dynamic>{
+      'scope': scope,
+      'search': search.trim(),
+      'page': page,
+      'per_page': perPage,
+    };
+    if (excludeAccountProfileId != null &&
+        excludeAccountProfileId.trim().isNotEmpty) {
+      payload['exclude_account_profile_id'] = excludeAccountProfileId.trim();
+    }
+    return payload;
+  }
+
+  Map<String, dynamic> encodeFetchNestedGroupMembersQuery({
+    int? perPage,
+    String? cursor,
+  }) {
+    final payload = <String, dynamic>{};
+    if (perPage != null && perPage > 0) {
+      payload['per_page'] = perPage;
+    }
+    if (cursor != null && cursor.trim().isNotEmpty) {
+      payload['cursor'] = cursor.trim();
+    }
+    return payload;
+  }
+
+  Map<String, dynamic> encodePatchNestedGroupMembers({
+    List<String> addIds = const <String>[],
+    List<String> removeIds = const <String>[],
+  }) {
+    return <String, dynamic>{'add_ids': addIds, 'remove_ids': removeIds};
+  }
+
+  Map<String, dynamic> encodeCreateNestedProfileGroup({required String label}) {
+    return <String, dynamic>{'label': label.trim()};
+  }
+
+  Map<String, dynamic> encodeDeleteNestedProfileGroup() {
+    return const <String, dynamic>{};
+  }
+
+  Map<String, dynamic> encodePatchNestedProfileGroupLabel({
+    required String label,
+  }) => <String, dynamic>{'label': label.trim()};
+
+  Map<String, dynamic> encodeCreateAccountProfile({
+    required String accountId,
+    required String profileType,
+    required String displayName,
+    TenantAdminLocation? location,
+    TenantAdminTaxonomyTerms taxonomyTerms =
+        const TenantAdminTaxonomyTerms.empty(),
+    String? bio,
+    String? content,
+    String? avatarUrl,
+    String? coverUrl,
+    List<TenantAdminNestedProfileGroup> nestedProfileGroups =
+        const <TenantAdminNestedProfileGroup>[],
+    BellugaContactSourceMode contactMode = BellugaContactSourceMode.own,
+    String? contactSourceAccountProfileId,
+    List<BellugaContactChannelDraft> contactChannelDrafts =
+        const <BellugaContactChannelDraft>[],
+    BellugaContactBubbleSelectionMutation bubbleSelection =
+        const BellugaContactBubbleSelectionMutation.omit(),
+  }) {
+    final payload = <String, dynamic>{
+      'account_id': accountId,
+      'profile_type': profileType,
+      'display_name': displayName,
+      if (location != null)
+        'location': {'lat': location.latitude, 'lng': location.longitude},
+      if (taxonomyTerms.isNotEmpty)
+        'taxonomy_terms': taxonomyTerms
+            .map((term) => {'type': term.type, 'value': term.value})
+            .toList(),
+      'bio': ?bio,
+      'content': ?content,
+      'avatar_url': ?avatarUrl,
+      'cover_url': ?coverUrl,
+      'contact_mode': contactMode.rawValue,
+      'contact_source_account_profile_id': ?contactSourceAccountProfileId,
+      'contact_channels': contactChannelDrafts
+          .map(_encodeContactChannelDraft)
+          .toList(growable: false),
+    };
+    _encodeBubbleSelection(payload, bubbleSelection);
+    return payload;
+  }
+
+  Map<String, dynamic> encodeUpdateAccountProfile({
+    String? profileType,
+    String? displayName,
+    String? slug,
+    int? aggregateRevision,
+    TenantAdminLocation? location,
+    TenantAdminTaxonomyTerms? taxonomyTerms,
+    String? bio,
+    String? content,
+    String? avatarUrl,
+    String? coverUrl,
+    bool? removeAvatar,
+    bool? removeCover,
+    List<TenantAdminNestedProfileGroup>? nestedProfileGroups,
+    BellugaContactSourceMode? contactMode,
+    String? contactSourceAccountProfileId,
+    List<BellugaContactChannelDraft>? contactChannelDrafts,
+    BellugaContactBubbleSelectionMutation bubbleSelection =
+        const BellugaContactBubbleSelectionMutation.omit(),
+  }) {
+    final payload = <String, dynamic>{};
+    if (profileType != null) payload['profile_type'] = profileType;
+    if (displayName != null) payload['display_name'] = displayName;
+    if (slug != null && slug.trim().isNotEmpty) payload['slug'] = slug.trim();
+    if (aggregateRevision != null) {
+      payload['aggregate_revision'] = aggregateRevision;
+    }
+    if (location != null) {
+      payload['location'] = {
+        'lat': location.latitude,
+        'lng': location.longitude,
+      };
+    }
+    if (taxonomyTerms != null) {
+      payload['taxonomy_terms'] = taxonomyTerms
+          .map((term) => {'type': term.type, 'value': term.value})
+          .toList();
+    }
+    if (bio != null) payload['bio'] = bio;
+    if (content != null) payload['content'] = content;
+    if (avatarUrl != null) payload['avatar_url'] = avatarUrl;
+    if (coverUrl != null) payload['cover_url'] = coverUrl;
+    if (removeAvatar == true) payload['remove_avatar'] = true;
+    if (removeCover == true) payload['remove_cover'] = true;
+    if (contactMode != null) {
+      payload['contact_mode'] = contactMode.rawValue;
+    }
+    if (contactSourceAccountProfileId != null) {
+      payload['contact_source_account_profile_id'] =
+          contactSourceAccountProfileId;
+    }
+    if (contactChannelDrafts != null) {
+      payload['contact_channels'] = contactChannelDrafts
+          .map(_encodeContactChannelDraft)
+          .toList(growable: false);
+    }
+    _encodeBubbleSelection(payload, bubbleSelection);
+    return payload;
+  }
+
+  Map<String, dynamic> encodeCreateProfileType({
+    required String type,
+    required String label,
+    String? pluralLabel,
+    required List<String> allowedTaxonomies,
+    required TenantAdminProfileTypeCapabilities capabilities,
+    TenantAdminPoiVisual? visual,
+    bool includeVisual = false,
+    bool? removeTypeAsset,
+  }) {
+    final normalizedPlural = (pluralLabel ?? label).trim();
+    return {
+      'type': type,
+      'label': label,
+      'labels': {
+        'singular': label,
+        'plural': normalizedPlural.isEmpty ? label : normalizedPlural,
+      },
+      'allowed_taxonomies': allowedTaxonomies,
+      if (includeVisual) 'visual': visual?.toJson(),
+      if (includeVisual) 'poi_visual': visual?.toJson(),
+      if (removeTypeAsset == true) 'remove_type_asset': true,
+      'capabilities': _encodeCapabilities(capabilities),
+    };
+  }
+
+  Map<String, dynamic> encodeUpdateProfileType({
+    String? newType,
+    String? label,
+    String? pluralLabel,
+    List<String>? allowedTaxonomies,
+    TenantAdminProfileTypeCapabilities? capabilities,
+    TenantAdminPoiVisual? visual,
+    bool includeVisual = false,
+    bool? removeTypeAsset,
+  }) {
+    final payload = <String, dynamic>{};
+    if (newType != null && newType.trim().isNotEmpty) {
+      payload['type'] = newType.trim();
+    }
+    if (label != null) {
+      payload['label'] = label;
+      final normalizedPlural = (pluralLabel ?? label).trim();
+      payload['labels'] = {
+        'singular': label,
+        'plural': normalizedPlural.isEmpty ? label : normalizedPlural,
+      };
+    } else if (pluralLabel != null) {
+      final normalizedPlural = pluralLabel.trim();
+      payload['labels'] = {'plural': normalizedPlural};
+    }
+    if (allowedTaxonomies != null) {
+      payload['allowed_taxonomies'] = allowedTaxonomies;
+    }
+    if (capabilities != null) {
+      payload['capabilities'] = _encodeCapabilities(capabilities);
+    }
+    if (includeVisual) {
+      payload['visual'] = visual?.toJson();
+      payload['poi_visual'] = visual?.toJson();
+    }
+    if (removeTypeAsset == true) {
+      payload['remove_type_asset'] = true;
+    }
+    return payload;
+  }
+
+  Map<String, dynamic> _encodeCapabilities(
+    TenantAdminProfileTypeCapabilities capabilities,
+  ) {
+    return Map<String, dynamic>.from(capabilities.toCapabilityMap().toJson());
+  }
+}
+
+Map<String, dynamic> _encodeContactChannelDraft(
+  BellugaContactChannelDraft draft,
+) {
+  return <String, dynamic>{
+    if (draft.id != null) 'id': draft.id,
+    if (!draft.isPersisted) 'draft_key': draft.draftKey,
+    'type': draft.type.rawValue,
+    'value': draft.value,
+    if (draft.title != null) 'title': draft.title,
+    if (draft.initialMessages.isNotEmpty)
+      'metadata': <String, dynamic>{
+        'initial_messages': draft.initialMessages
+            .map(
+              (message) => <String, dynamic>{
+                'id': message.id,
+                'cta': message.cta,
+                'mensagem': message.message,
+              },
+            )
+            .toList(growable: false),
+      },
+  };
+}
+
+void _encodeBubbleSelection(
+  Map<String, dynamic> payload,
+  BellugaContactBubbleSelectionMutation selection,
+) {
+  switch (selection) {
+    case BellugaContactBubbleSelectionOmit():
+      return;
+    case BellugaContactBubbleSelectionClear():
+      payload['contact_bubble_channel_id'] = null;
+      return;
+    case BellugaContactBubbleSelectionPersisted(:final channelId):
+      payload['contact_bubble_channel_id'] = channelId;
+      return;
+    case BellugaContactBubbleSelectionDraft(:final draftKey):
+      payload['contact_bubble_channel_draft_key'] = draftKey;
+      return;
+  }
+}
+
+typedef TenantAdminAccountProfileGalleryEncodedPayload = ({
+  List<Map<String, dynamic>> galleryGroups,
+  Map<String, TenantAdminMediaUpload> uploads,
+});

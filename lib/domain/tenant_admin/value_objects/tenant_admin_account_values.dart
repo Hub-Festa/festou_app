@@ -1,0 +1,28 @@
+import 'package:festou_app/domain/tenant_admin/ownership_state.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_document.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_value_parsers.dart';
+
+TenantAdminAccount tenantAdminAccountFromRaw({
+  required Object? id,
+  required Object? name,
+  required Object? slug,
+  required TenantAdminDocument document,
+  required TenantAdminOwnershipState ownershipState,
+  Object? organizationId,
+  Object? avatarUrl,
+  Object? publicationStatus,
+}) {
+  return TenantAdminAccount(
+    idValue: tenantAdminRequiredText(id),
+    nameValue: tenantAdminRequiredText(name),
+    slugValue: tenantAdminRequiredText(slug),
+    document: document,
+    ownershipState: ownershipState,
+    publication: tenantAdminAccountPublicationFromRaw(
+      status: publicationStatus,
+    ),
+    organizationIdValue: tenantAdminOptionalText(organizationId),
+    avatarUrlValue: tenantAdminOptionalUrl(avatarUrl),
+  );
+}

@@ -1,0 +1,2089 @@
+import 'package:belluga_contact_channels/belluga_contact_channels.dart';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:belluga_form_validation/belluga_form_validation.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_account_profiles_repository_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_group_label_mutation_result.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_poi_visual.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_hex_color_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_text_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_required_text_value.dart';
+import 'package:festou_app/infrastructure/repositories/tenant_admin/tenant_admin_account_profiles_repository.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_unknown_mutation_failure.dart';
+import 'package:festou_app/infrastructure/services/tenant_admin/tenant_admin_base_url_resolver.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+import 'support/tenant_admin_paged_stream_contract.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  Future<TenantAdminNestedGroupLabelMutationResult> patchLabel(
+    TenantAdminAccountProfilesRepository repository,
+  ) => repository.patchNestedProfileGroupLabel(
+    accountProfileId: tenantAdminAccountProfilesRepoString(
+      'profile-1',
+      defaultValue: '',
+      isRequired: true,
+    ),
+    groupId: tenantAdminAccountProfilesRepoString(
+      'artists',
+      defaultValue: '',
+      isRequired: true,
+    ),
+    label: tenantAdminAccountProfilesRepoString(
+      'Artists',
+      defaultValue: '',
+      isRequired: true,
+    ),
+  );
+
+  setUp(() async {
+    await GetIt.I.reset();
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(_StubAuthRepo());
+    GetIt.I.registerSingleton<TenantAdminTenantScopeContract>(
+      _StubTenantScope('https://tenant.test'),
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test('createAccountProfile uses multipart when upload is provided', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.createAccountProfile(
+      accountId: tenantAdminAccountProfilesRepoString(
+        'account-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      profileType: tenantAdminAccountProfilesRepoString(
+        'personal',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      displayName: tenantAdminAccountProfilesRepoString(
+        'Profile',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      avatarUpload: tenantAdminMediaUploadFromRaw(
+        bytes: Uint8List.fromList([1, 2, 3]),
+        fileName: 'avatar.png',
+      ),
+    );
+
+    final data = adapter.lastRequest?.data;
+    expect(
+      adapter.lastRequest?.path,
+      contains('https://tenant.test/admin/api/v1/account_profiles'),
+    );
+    expect(data, isA<FormData>());
+    final formData = data as FormData;
+    expect(formData.files.any((entry) => entry.key == 'avatar'), isTrue);
+    expect(adapter.lastRequest?.contentType, contains('multipart/form-data'));
+  });
+
+  test(
+    'patchNestedProfileGroupLabel sends one scoped PATCH with correlation only',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: {
+          'data': {
+            'group': {'id': 'artists', 'label': 'Artists'},
+          },
+        },
+      );
+      final repository = TenantAdminAccountProfilesRepository(
+        dio: Dio()..httpClientAdapter = adapter,
+      );
+      final result = await repository.patchNestedProfileGroupLabel(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        groupId: tenantAdminAccountProfilesRepoString(
+          'artists',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        label: tenantAdminAccountProfilesRepoString(
+          'Artists',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+      final request = adapter.lastRequest!;
+      expect(request.method, 'PATCH');
+      expect(
+        request.path,
+        endsWith(
+          '/v1/account_profiles/profile-1/nested_profile_groups/artists',
+        ),
+      );
+      expect(request.data, {'label': 'Artists'});
+      expect(request.headers['X-Request-Id'], isNotEmpty);
+      expect(request.headers, isNot(contains('Idempotency-Key')));
+      expect(adapter.requests, hasLength(1));
+      expect(result.id, 'artists');
+      expect(result.label, 'Artists');
+    },
+  );
+
+  test('patchNestedProfileGroupLabel preserves structured 422', () async {
+    final adapter = _CaptureAdapter(
+      statusCode: 422,
+      responseBody: const {
+        'message': 'The given data was invalid.',
+        'errors': {
+          'label': ['Invalid label.'],
+        },
+      },
+    );
+    final repository = TenantAdminAccountProfilesRepository(
+      dio: Dio()..httpClientAdapter = adapter,
+    );
+
+    await expectLater(
+      patchLabel(repository),
+      throwsA(
+        isA<FormValidationFailure>().having(
+          (error) => error.fieldErrors['label'],
+          'label',
+          ['Invalid label.'],
+        ),
+      ),
+    );
+  });
+
+  test('patchNestedProfileGroupLabel keeps 5xx definitive', () async {
+    final adapter = _CaptureAdapter(
+      statusCode: 500,
+      responseBody: const {'message': 'Internal failure.'},
+    );
+    final repository = TenantAdminAccountProfilesRepository(
+      dio: Dio()..httpClientAdapter = adapter,
+    );
+
+    await expectLater(
+      patchLabel(repository),
+      throwsA(
+        isA<Exception>().having(
+          (error) => error is TenantAdminUnknownMutationFailure,
+          'is unknown mutation failure',
+          isFalse,
+        ),
+      ),
+    );
+  });
+
+  test(
+    'patchNestedProfileGroupLabel classifies connection loss as unknown',
+    () async {
+      final repository = TenantAdminAccountProfilesRepository(
+        dio: Dio()..httpClientAdapter = _ConnectionFailureAdapter(),
+      );
+
+      await expectLater(
+        patchLabel(repository),
+        throwsA(isA<TenantAdminUnknownMutationFailure>()),
+      );
+    },
+  );
+
+  test(
+    'createAccountProfile sends both avatar and cover files in multipart',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.createAccountProfile(
+        accountId: tenantAdminAccountProfilesRepoString(
+          'account-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        profileType: tenantAdminAccountProfilesRepoString(
+          'personal',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        displayName: tenantAdminAccountProfilesRepoString(
+          'Profile',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        avatarUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([1, 2, 3]),
+          fileName: 'avatar.png',
+        ),
+        coverUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([4, 5, 6]),
+          fileName: 'cover.png',
+        ),
+      );
+
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<FormData>());
+      final formData = data as FormData;
+      expect(formData.files.any((entry) => entry.key == 'avatar'), isTrue);
+      expect(formData.files.any((entry) => entry.key == 'cover'), isTrue);
+      expect(adapter.lastRequest?.contentType, contains('multipart/form-data'));
+    },
+  );
+
+  test('updateAccountProfile sends slug when provided', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.updateAccountProfile(
+      accountProfileId: tenantAdminAccountProfilesRepoString(
+        'profile-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      slug: tenantAdminAccountProfilesRepoString('profile-slug-custom'),
+    );
+
+    expect(adapter.lastRequest?.method, 'PATCH');
+    expect(
+      adapter.lastRequest?.path,
+      contains('https://tenant.test/admin/api/v1/account_profiles/profile-1'),
+    );
+    final data = adapter.lastRequest?.data;
+    expect(data, isA<Map<String, dynamic>>());
+    expect((data as Map<String, dynamic>)['slug'], 'profile-slug-custom');
+  });
+
+  test('updateAccountProfile keeps empty bio as string payload', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.updateAccountProfile(
+      accountProfileId: tenantAdminAccountProfilesRepoString(
+        'profile-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      bio: tenantAdminAccountProfilesRepoString(''),
+    );
+
+    final data = adapter.lastRequest?.data;
+    expect(data, isA<Map<String, dynamic>>());
+    expect((data as Map<String, dynamic>)['bio'], '');
+  });
+
+  test('createAccountProfile encodes typed contact draft payload', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.createAccountProfile(
+      accountId: tenantAdminAccountProfilesRepoString(
+        'account-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      profileType: tenantAdminAccountProfilesRepoString(
+        'personal',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      displayName: tenantAdminAccountProfilesRepoString(
+        'Profile',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      contactMode: BellugaContactSourceMode.own,
+      contactChannelDrafts: <BellugaContactChannelDraft>[
+        BellugaContactChannelDraft(
+          draftKey: 'draft-whatsapp-primary',
+          type: BellugaContactChannelType.whatsapp,
+          value: '+55 (27) 99999-9999',
+          title: 'Atendimento',
+          initialMessages: const [
+            BellugaContactInitialMessage(
+              id: 'wa-cta-1',
+              cta: 'Quero falar',
+              message: 'Quero falar sobre o perfil.',
+            ),
+          ],
+        ),
+      ],
+      bubbleSelection: BellugaContactBubbleSelectionMutation.setDraft(
+        'draft-whatsapp-primary',
+      ),
+    );
+
+    final data = adapter.lastRequest?.data;
+    expect(data, isA<Map<String, dynamic>>());
+    expect((data as Map<String, dynamic>)['contact_mode'], 'own');
+    expect(data['contact_source_account_profile_id'], isNull);
+    expect(data['contact_bubble_channel_id'], isNull);
+    expect(data['contact_bubble_channel_draft_key'], 'draft-whatsapp-primary');
+    expect(data['contact_channels'], [
+      {
+        'draft_key': 'draft-whatsapp-primary',
+        'type': 'whatsapp',
+        'value': '+55 (27) 99999-9999',
+        'title': 'Atendimento',
+        'metadata': {
+          'initial_messages': [
+            {
+              'id': 'wa-cta-1',
+              'cta': 'Quero falar',
+              'mensagem': 'Quero falar sobre o perfil.',
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test(
+    'draft write creates server-owned channel identities and selects a new bubble atomically',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.createAccountProfile(
+        accountId: tenantAdminAccountProfilesRepoString(
+          'account-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        profileType: tenantAdminAccountProfilesRepoString(
+          'personal',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        displayName: tenantAdminAccountProfilesRepoString(
+          'Profile',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        contactMode: BellugaContactSourceMode.own,
+        contactChannelDrafts: <BellugaContactChannelDraft>[
+          BellugaContactChannelDraft(
+            draftKey: 'draft-whatsapp-primary',
+            type: BellugaContactChannelType.whatsapp,
+            value: '+55 (27) 99999-9999',
+          ),
+        ],
+        bubbleSelection: BellugaContactBubbleSelectionMutation.setDraft(
+          'draft-whatsapp-primary',
+        ),
+      );
+
+      final data = adapter.lastRequest?.data as Map<String, dynamic>;
+      expect(data['contact_bubble_channel_id'], isNull);
+      expect(
+        data['contact_bubble_channel_draft_key'],
+        'draft-whatsapp-primary',
+      );
+      expect(data['contact_channels'], <Map<String, dynamic>>[
+        <String, dynamic>{
+          'draft_key': 'draft-whatsapp-primary',
+          'type': 'whatsapp',
+          'value': '+55 (27) 99999-9999',
+        },
+      ]);
+    },
+  );
+
+  test(
+    'createAccountProfile omits nested profile group lifecycle from aggregate payload',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.createAccountProfile(
+        accountId: tenantAdminAccountProfilesRepoString(
+          'account-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        profileType: tenantAdminAccountProfilesRepoString(
+          'personal',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        displayName: tenantAdminAccountProfilesRepoString(
+          'Profile',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        nestedProfileGroups: <TenantAdminNestedProfileGroup>[
+          TenantAdminNestedProfileGroup(
+            idValue: TenantAdminNestedProfileGroupTextValue('parceiros'),
+            labelValue: TenantAdminNestedProfileGroupTextValue('Parceiros'),
+            orderValue: TenantAdminNestedProfileGroupOrderValue(0),
+            accountProfileIdValues: <TenantAdminNestedProfileGroupTextValue>[
+              TenantAdminNestedProfileGroupTextValue(
+                '507f1f77bcf86cd799439081',
+              ),
+            ],
+          ),
+        ],
+      );
+
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<Map<String, dynamic>>());
+      expect(
+        (data as Map<String, dynamic>).containsKey('nested_profile_groups'),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'updateAccountProfile omits nested profile group lifecycle from aggregate payload',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.updateAccountProfile(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        aggregateRevision: tenantAdminAccountProfilesRepoInt(
+          4,
+          defaultValue: 4,
+        ),
+        nestedProfileGroups: <TenantAdminNestedProfileGroup>[
+          TenantAdminNestedProfileGroup(
+            idValue: TenantAdminNestedProfileGroupTextValue('parceiros'),
+            labelValue: TenantAdminNestedProfileGroupTextValue('Parceiros'),
+            orderValue: TenantAdminNestedProfileGroupOrderValue(0),
+            accountProfileIdValues: <TenantAdminNestedProfileGroupTextValue>[
+              TenantAdminNestedProfileGroupTextValue(
+                '507f1f77bcf86cd799439081',
+              ),
+              TenantAdminNestedProfileGroupTextValue(
+                '507f1f77bcf86cd799439082',
+              ),
+            ],
+          ),
+        ],
+      );
+
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<Map<String, dynamic>>());
+      expect(
+        (data as Map<String, dynamic>).containsKey('nested_profile_groups'),
+        isFalse,
+      );
+      expect(data['aggregate_revision'], 4);
+    },
+  );
+
+  test('updateAccountProfile encodes mirrored contact payload', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.updateAccountProfile(
+      accountProfileId: tenantAdminAccountProfilesRepoString(
+        'profile-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      contactMode: BellugaContactSourceMode.mirroredAccountProfile,
+      contactSourceAccountProfileId: tenantAdminAccountProfilesRepoString(
+        'source-profile-1',
+      ),
+      contactChannelDrafts: const <BellugaContactChannelDraft>[],
+      bubbleSelection: BellugaContactBubbleSelectionMutation.setPersisted(
+        'whatsapp-primary',
+      ),
+    );
+
+    final data = adapter.lastRequest?.data;
+    expect(data, isA<Map<String, dynamic>>());
+    expect(
+      (data as Map<String, dynamic>)['contact_mode'],
+      'mirrored_account_profile',
+    );
+    expect(data['contact_source_account_profile_id'], 'source-profile-1');
+    expect(data['contact_channels'], const <Map<String, dynamic>>[]);
+    expect(data['contact_bubble_channel_id'], 'whatsapp-primary');
+  });
+
+  test(
+    'fetchNestedGroupMembersPage uses canonical members subresource contract',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: <String, dynamic>{
+          'data': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': '507f1f77bcf86cd799439081',
+              'display_name': 'Active artist',
+              'is_queryable_candidate': true,
+            },
+            <String, dynamic>{
+              'id': '507f1f77bcf86cd799439082',
+              'display_name': null,
+              'is_queryable_candidate': false,
+            },
+          ],
+          'next_cursor': 'cursor-2',
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final page = await repository.fetchNestedGroupMembersPage(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        groupId: tenantAdminAccountProfilesRepoString(
+          'linked',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        perPage: tenantAdminAccountProfilesRepoInt(20, defaultValue: 20),
+      );
+
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          'https://tenant.test/admin/api/v1/account_profiles/profile-1/nested_profile_groups/linked/members',
+        ),
+      );
+      expect(adapter.lastRequest?.queryParameters, <String, dynamic>{
+        'per_page': 20,
+      });
+      expect(page.nextCursor, 'cursor-2');
+      expect(page.items, hasLength(2));
+      expect(page.items.first.id, '507f1f77bcf86cd799439081');
+      expect(page.items.first.displayName, 'Active artist');
+      expect(page.items.first.isQueryableCandidate, isTrue);
+      expect(page.items.last.id, '507f1f77bcf86cd799439082');
+      expect(page.items.last.displayName, isNull);
+      expect(page.items.last.isQueryableCandidate, isFalse);
+    },
+  );
+
+  test(
+    'fetchNestedGroupMembersPage sends cursor without conflicting per_page',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: <String, dynamic>{
+          'data': const <Map<String, dynamic>>[],
+          'next_cursor': null,
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.fetchNestedGroupMembersPage(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        groupId: tenantAdminAccountProfilesRepoString(
+          'linked',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        perPage: tenantAdminAccountProfilesRepoInt(20, defaultValue: 20),
+        cursor: tenantAdminAccountProfilesRepoString(
+          'cursor-2',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(adapter.lastRequest?.queryParameters, <String, dynamic>{
+        'cursor': 'cursor-2',
+      });
+    },
+  );
+
+  test(
+    'patchNestedGroupMembers sends delta ids without aggregate revision',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: <String, dynamic>{
+          'data': <String, dynamic>{'member_count': 2},
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final result = await repository.patchNestedGroupMembers(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        groupId: tenantAdminAccountProfilesRepoString(
+          'linked',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        addIds: <TenantAdminAccountProfilesRepoString>[
+          tenantAdminAccountProfilesRepoString(
+            '507f1f77bcf86cd799439081',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ],
+        removeIds: <TenantAdminAccountProfilesRepoString>[
+          tenantAdminAccountProfilesRepoString(
+            '507f1f77bcf86cd799439082',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ],
+      );
+
+      expect(adapter.lastRequest?.method, 'PATCH');
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          'https://tenant.test/admin/api/v1/account_profiles/profile-1/nested_profile_groups/linked/members',
+        ),
+      );
+      expect(adapter.lastRequest?.data, <String, dynamic>{
+        'add_ids': <String>['507f1f77bcf86cd799439081'],
+        'remove_ids': <String>['507f1f77bcf86cd799439082'],
+      });
+      expect(result.memberCount, 2);
+    },
+  );
+
+  test(
+    'createNestedProfileGroup uses dedicated endpoint and decodes group metadata',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: <String, dynamic>{
+          'data': <String, dynamic>{
+            'nested_profile_groups': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'id': 'partners',
+                'label': 'Parceiros',
+                'order': 0,
+                'member_count': 0,
+              },
+            ],
+          },
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final result = await repository.createNestedProfileGroup(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        label: tenantAdminAccountProfilesRepoString(
+          'Parceiros',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(adapter.lastRequest?.method, 'POST');
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          'https://tenant.test/admin/api/v1/account_profiles/profile-1/nested_profile_groups',
+        ),
+      );
+      expect(adapter.lastRequest?.data, <String, dynamic>{
+        'label': 'Parceiros',
+      });
+      expect(result.deletedGroupId, isNull);
+      expect(result.groups, hasLength(1));
+      expect(result.groups.single.id, 'partners');
+      expect(result.groups.single.label, 'Parceiros');
+      expect(result.groups.single.memberCount, 0);
+    },
+  );
+
+  test(
+    'createNestedProfileGroup rethrows accepted 422 responses as validation failures',
+    () async {
+      final adapter = _PermissiveNestedGroupValidationAdapter();
+      final dio = Dio(
+        BaseOptions(validateStatus: (status) => status != null && status < 500),
+      )..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await expectLater(
+        () => repository.createNestedProfileGroup(
+          accountProfileId: tenantAdminAccountProfilesRepoString(
+            'profile-1',
+            defaultValue: '',
+            isRequired: true,
+          ),
+          label: tenantAdminAccountProfilesRepoString(
+            'Parceiros',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ),
+        throwsA(
+          isA<FormValidationFailure>().having(
+            (error) => error.fieldErrors['nested_profile_groups'],
+            'fieldErrors.nested_profile_groups',
+            contains('Nested profile groups exceed the configured limit.'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'deleteNestedProfileGroup uses dedicated endpoint and decodes group metadata',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: <String, dynamic>{
+          'data': <String, dynamic>{
+            'deleted_group_id': 'partners',
+            'nested_profile_groups': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'id': 'artists',
+                'label': 'Artistas',
+                'order': 0,
+                'member_count': 2,
+              },
+            ],
+          },
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final result = await repository.deleteNestedProfileGroup(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        groupId: tenantAdminAccountProfilesRepoString(
+          'partners',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(adapter.lastRequest?.method, 'DELETE');
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          'https://tenant.test/admin/api/v1/account_profiles/profile-1/nested_profile_groups/partners',
+        ),
+      );
+      expect(adapter.lastRequest?.data, <String, dynamic>{});
+      expect(result.deletedGroupId, 'partners');
+      expect(result.groups, hasLength(1));
+      expect(result.groups.single.id, 'artists');
+      expect(result.groups.single.label, 'Artistas');
+      expect(result.groups.single.memberCount, 2);
+    },
+  );
+
+  test(
+    'updateAccountProfileGallery sends multipart patch tunnel with encoded groups and uploads',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.updateAccountProfileGallery(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        galleryGroups: <TenantAdminAccountProfileGalleryUpdateGroup>[
+          TenantAdminAccountProfileGalleryUpdateGroup(
+            groupIdValue: TenantAdminNestedProfileGroupTextValue('group/1'),
+            subtitleValue: TenantAdminNestedProfileGroupTextValue(
+              'Ambiente principal',
+            ),
+            orderValue: TenantAdminNestedProfileGroupOrderValue(0),
+            items: <TenantAdminAccountProfileGalleryUpdateItem>[
+              TenantAdminAccountProfileGalleryUpdateItem(
+                itemIdValue: TenantAdminNestedProfileGroupTextValue(
+                  'item 1/novo',
+                ),
+                descriptionValue: TenantAdminOptionalTextValue()
+                  ..parse('Vista para o palco'),
+                orderValue: TenantAdminNestedProfileGroupOrderValue(0),
+                upload: tenantAdminMediaUploadFromRaw(
+                  bytes: Uint8List.fromList([7, 8, 9]),
+                  fileName: 'gallery.png',
+                ),
+              ),
+              TenantAdminAccountProfileGalleryUpdateItem(
+                itemIdValue: TenantAdminNestedProfileGroupTextValue(
+                  'existing-item',
+                ),
+                descriptionValue: TenantAdminOptionalTextValue(),
+                orderValue: TenantAdminNestedProfileGroupOrderValue(1),
+              ),
+            ],
+          ),
+        ],
+      );
+
+      expect(adapter.lastRequest?.method, 'POST');
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          'https://tenant.test/admin/api/v1/account_profiles/profile-1/gallery',
+        ),
+      );
+      expect(adapter.lastRequest?.contentType, contains('multipart/form-data'));
+
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<FormData>());
+      final formData = data as FormData;
+      expect(
+        formData.fields.any(
+          (entry) => entry.key == '_method' && entry.value == 'PATCH',
+        ),
+        isTrue,
+      );
+
+      final encodedGalleryGroups =
+          jsonDecode(
+                formData.fields
+                    .firstWhere((entry) => entry.key == 'gallery_groups')
+                    .value,
+              )
+              as List<dynamic>;
+      expect(encodedGalleryGroups, hasLength(1));
+
+      final group = encodedGalleryGroups.single as Map<String, dynamic>;
+      expect(group['group_id'], 'group/1');
+      expect(group['subtitle'], 'Ambiente principal');
+      expect(group['order'], 0);
+
+      final items = group['items'] as List<dynamic>;
+      expect(items, hasLength(2));
+
+      final uploadedItem = items.first as Map<String, dynamic>;
+      expect(uploadedItem['item_id'], 'item 1/novo');
+      expect(uploadedItem['description'], 'Vista para o palco');
+      expect(uploadedItem['order'], 0);
+      expect(uploadedItem['upload'], 'upload_group_1_item_1_novo');
+
+      final existingItem = items.last as Map<String, dynamic>;
+      expect(existingItem['item_id'], 'existing-item');
+      expect(existingItem['description'], isNull);
+      expect(existingItem['order'], 1);
+      expect(existingItem.containsKey('upload'), isFalse);
+
+      expect(
+        formData.files.map((entry) => entry.key),
+        contains('upload_group_1_item_1_novo'),
+      );
+      final uploadEntry = formData.files.singleWhere(
+        (entry) => entry.key == 'upload_group_1_item_1_novo',
+      );
+      expect(uploadEntry.value.filename, 'gallery.png');
+    },
+  );
+
+  test(
+    'updateAccountProfileGallery sends explicit empty gallery_groups array for clear-all',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.updateAccountProfileGallery(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        galleryGroups: const <TenantAdminAccountProfileGalleryUpdateGroup>[],
+      );
+
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<FormData>());
+
+      final formData = data as FormData;
+      expect(
+        formData.fields.any(
+          (entry) => entry.key == '_method' && entry.value == 'PATCH',
+        ),
+        isTrue,
+      );
+      expect(
+        jsonDecode(
+          formData.fields
+              .firstWhere((entry) => entry.key == 'gallery_groups')
+              .value,
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'fetchAccountProfiles sends queryable selector filters when requested',
+    () async {
+      final adapter = _ProfileListMediaAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.fetchAccountProfiles(
+        queryableOnly: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: true,
+        ),
+        excludeAccountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      final request = adapter.requests.single;
+      expect(request.queryParameters['queryable_only'], 1);
+      expect(
+        request.queryParameters['exclude_account_profile_id'],
+        'profile-1',
+      );
+    },
+  );
+
+  test(
+    'fetchAccountProfilesPage sends pagination and search filters and parses page window',
+    () async {
+      final adapter = _ProfileListMediaAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final page = await repository.fetchAccountProfilesPage(
+        page: tenantAdminAccountProfilesRepoInt(2, defaultValue: 2),
+        pageSize: tenantAdminAccountProfilesRepoInt(20, defaultValue: 20),
+        search: tenantAdminAccountProfilesRepoString('runtime'),
+        queryableOnly: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: true,
+        ),
+        excludeAccountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      final request = adapter.requests.single;
+      expect(request.queryParameters['page'], 2);
+      expect(request.queryParameters['page_size'], 20);
+      expect(request.queryParameters['search'], 'runtime');
+      expect(request.queryParameters['queryable_only'], 1);
+      expect(
+        request.queryParameters['exclude_account_profile_id'],
+        'profile-1',
+      );
+      expect(page.items, hasLength(2));
+      expect(page.pagination?.currentPage, 2);
+      expect(page.pagination?.pageSize, 20);
+      expect(page.hasMore, isTrue);
+    },
+  );
+
+  test(
+    'fetchAccountProfile adds a distinct cache-busting _ts query param per request',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.fetchAccountProfile(
+        tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+      await repository.fetchAccountProfile(
+        tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(adapter.requests, hasLength(2));
+      final firstRequest = adapter.requests.first;
+      final secondRequest = adapter.requests.last;
+      expect(
+        firstRequest.path,
+        contains('https://tenant.test/admin/api/v1/account_profiles/profile-1'),
+      );
+      final firstCacheBuster =
+          firstRequest.queryParameters['_ts']?.toString() ?? '';
+      final secondCacheBuster =
+          secondRequest.queryParameters['_ts']?.toString() ?? '';
+      expect(firstCacheBuster, isNotEmpty);
+      expect(secondCacheBuster, isNotEmpty);
+      expect(secondCacheBuster, isNot(firstCacheBuster));
+    },
+  );
+
+  test(
+    'fetchAccountProfilesPage encodes canonical contact-eligible filters on the generic endpoint',
+    () async {
+      final adapter = _CaptureAdapter(
+        responseBody: {
+          'data': [
+            {
+              'id': 'profile-own-1',
+              'account_id': 'account-own-1',
+              'profile_type': 'venue',
+              'display_name': 'Perfil Fonte',
+              'slug': 'perfil-fonte',
+              'contact_mode': 'own',
+              'contact_channels': [
+                {
+                  'id': 'email-1',
+                  'type': 'email',
+                  'value': 'fonte@tenant.test',
+                  'title': 'Comercial',
+                },
+              ],
+              'effective_contact_channels': [
+                {
+                  'id': 'email-1',
+                  'type': 'email',
+                  'value': 'fonte@tenant.test',
+                  'title': 'Comercial',
+                },
+              ],
+            },
+          ],
+          'page': 1,
+          'per_page': 20,
+          'has_more': false,
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final page = await repository.fetchAccountProfilesPage(
+        page: tenantAdminAccountProfilesRepoInt(1, defaultValue: 1),
+        pageSize: tenantAdminAccountProfilesRepoInt(20, defaultValue: 20),
+        search: tenantAdminAccountProfilesRepoString(
+          'perfil',
+          defaultValue: '',
+        ),
+        profileType: tenantAdminAccountProfilesRepoString(
+          'venue',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        contactMode: tenantAdminAccountProfilesRepoString(
+          'own',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        contactChannelsEnabledOnly: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: true,
+        ),
+        excludeAccountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-own-2',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      final request = adapter.requests.single;
+      expect(
+        request.path,
+        contains('https://tenant.test/admin/api/v1/account_profiles'),
+      );
+      expect(request.queryParameters['page'], 1);
+      expect(request.queryParameters['page_size'], 20);
+      expect(request.queryParameters['search'], 'perfil');
+      expect(request.queryParameters['profile_type'], 'venue');
+      expect(request.queryParameters['contact_mode'], 'own');
+      expect(request.queryParameters['contact_channels_enabled_only'], 1);
+      expect(
+        request.queryParameters['exclude_account_profile_id'],
+        'profile-own-2',
+      );
+      expect(page.pagination?.currentPage, 1);
+      expect(page.pagination?.pageSize, 20);
+      expect(page.hasMore, isFalse);
+      expect(page.items, hasLength(1));
+      expect(page.items.single.displayName, 'Perfil Fonte');
+      expect(page.items.single.contactMode, BellugaContactSourceMode.own);
+      expect(page.items.single.effectiveContactChannels, hasLength(1));
+      expect(
+        page.items.single.effectiveContactChannels.single.value,
+        'fonte@tenant.test',
+      );
+    },
+  );
+
+  test(
+    'updateAccountProfile sends explicit remove avatar/cover flags',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.updateAccountProfile(
+        accountProfileId: tenantAdminAccountProfilesRepoString(
+          'profile-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        removeAvatar: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: true,
+        ),
+        removeCover: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: true,
+        ),
+      );
+
+      expect(adapter.lastRequest?.method, 'PATCH');
+      final data = adapter.lastRequest?.data;
+      expect(data, isA<Map<String, dynamic>>());
+      final payload = data as Map<String, dynamic>;
+      expect(payload['remove_avatar'], isTrue);
+      expect(payload['remove_cover'], isTrue);
+    },
+  );
+
+  test('updateAccountProfile omits bio when null', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.updateAccountProfile(
+      accountProfileId: tenantAdminAccountProfilesRepoString(
+        'profile-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      bio: null,
+      displayName: tenantAdminAccountProfilesRepoString('New Name'),
+    );
+
+    final data = adapter.lastRequest?.data;
+    expect(data, isA<Map<String, dynamic>>());
+    expect((data as Map<String, dynamic>).containsKey('bio'), isFalse);
+    expect(data['display_name'], 'New Name');
+  });
+
+  test(
+    'fetchAccountProfiles maps list media fields without detail fallback',
+    () async {
+      final adapter = _ProfileListMediaAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final profiles = await repository.fetchAccountProfiles(
+        accountId: tenantAdminAccountProfilesRepoString(
+          'acc-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(profiles, hasLength(1));
+      expect(profiles.first.id, 'profile-1');
+      expect(profiles.first.avatarUrl, 'https://cdn.test/profile-1-avatar.png');
+      expect(profiles.first.coverUrl, 'https://cdn.test/profile-1-cover.png');
+      expect(adapter.requests, hasLength(1));
+      expect(
+        adapter.requests.first.path,
+        contains('/admin/api/v1/account_profiles'),
+      );
+    },
+  );
+
+  test(
+    'fetchProfileTypesPage sends pagination params and parses hasMore',
+    () async {
+      final adapter = _ProfileTypesRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final page = await repository.fetchProfileTypesPage(
+        page: tenantAdminAccountProfilesRepoInt(1, defaultValue: 1),
+        pageSize: tenantAdminAccountProfilesRepoInt(2, defaultValue: 2),
+      );
+
+      expect(page.items, hasLength(2));
+      expect(page.hasMore, isTrue);
+      expect(page.items.first.visual?.mode, TenantAdminPoiVisualMode.icon);
+      expect(page.items.first.visual?.icon, 'place');
+      expect(page.items.first.visual?.color, '#FF8800');
+      expect(page.items.first.visual?.iconColor, '#FFFFFF');
+      expect(adapter.requests, hasLength(1));
+      expect(adapter.requests.single.queryParameters['page'], 1);
+      expect(adapter.requests.single.queryParameters['page_size'], 2);
+    },
+  );
+
+  test(
+    'createProfileTypeWithVisual sends canonical and legacy visual payloads',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.createProfileTypeWithVisual(
+        type: tenantAdminAccountProfilesRepoString(
+          'venue',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        label: tenantAdminAccountProfilesRepoString(
+          'Venue',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        allowedTaxonomies: <TenantAdminAccountProfilesRepoString>[
+          tenantAdminAccountProfilesRepoString(
+            'genre',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ],
+        capabilities: TenantAdminProfileTypeCapabilities(
+          isFavoritable: TenantAdminFlagValue(true),
+          isPoiEnabled: TenantAdminFlagValue(true),
+          isReferenceLocationEnabled: TenantAdminFlagValue(true),
+          hasBio: TenantAdminFlagValue(true),
+          hasContent: TenantAdminFlagValue(true),
+          hasTaxonomies: TenantAdminFlagValue(true),
+          hasAvatar: TenantAdminFlagValue(true),
+          hasCover: TenantAdminFlagValue(true),
+          hasEvents: TenantAdminFlagValue(true),
+          hasNestedProfileGroups: TenantAdminFlagValue(true),
+        ),
+        visual: TenantAdminPoiVisual.icon(
+          iconValue: TenantAdminRequiredTextValue()..parse('place'),
+          colorValue: TenantAdminHexColorValue()..parse('#FF8800'),
+        ),
+      );
+
+      final payload = adapter.lastRequest?.data as Map<String, dynamic>;
+      expect(payload['capabilities']['has_nested_profile_groups'], isTrue);
+      expect(payload['visual'], <String, dynamic>{
+        'mode': 'icon',
+        'icon': 'place',
+        'color': '#FF8800',
+        'icon_color': '#FFFFFF',
+      });
+      expect(payload['poi_visual'], <String, dynamic>{
+        'mode': 'icon',
+        'icon': 'place',
+        'color': '#FF8800',
+        'icon_color': '#FFFFFF',
+      });
+    },
+  );
+
+  test('updateProfileTypeWithVisual sends nullable visual payloads', () async {
+    final adapter = _CaptureAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+    await repository.updateProfileTypeWithVisual(
+      type: tenantAdminAccountProfilesRepoString(
+        'venue',
+        defaultValue: '',
+        isRequired: true,
+      ),
+      capabilities: TenantAdminProfileTypeCapabilities(
+        isFavoritable: TenantAdminFlagValue(true),
+        isPoiEnabled: TenantAdminFlagValue(false),
+        hasBio: TenantAdminFlagValue(true),
+        hasContent: TenantAdminFlagValue(true),
+        hasTaxonomies: TenantAdminFlagValue(true),
+        hasAvatar: TenantAdminFlagValue(true),
+        hasCover: TenantAdminFlagValue(true),
+        hasEvents: TenantAdminFlagValue(true),
+      ),
+      visual: null,
+    );
+
+    final payload = adapter.lastRequest?.data as Map<String, dynamic>;
+    expect(payload.containsKey('visual'), isTrue);
+    expect(payload['visual'], isNull);
+    expect(payload.containsKey('poi_visual'), isTrue);
+    expect(payload['poi_visual'], isNull);
+  });
+
+  test(
+    'createProfileTypeWithVisual uses multipart when type_asset upload exists',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.createProfileTypeWithVisual(
+        type: tenantAdminAccountProfilesRepoString(
+          'restaurant',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        label: tenantAdminAccountProfilesRepoString(
+          'Restaurant',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        capabilities: TenantAdminProfileTypeCapabilities(
+          isFavoritable: TenantAdminFlagValue(true),
+          isPoiEnabled: TenantAdminFlagValue(true),
+          isReferenceLocationEnabled: TenantAdminFlagValue(true),
+          hasBio: TenantAdminFlagValue(true),
+          hasContent: TenantAdminFlagValue(true),
+          hasTaxonomies: TenantAdminFlagValue(true),
+          hasAvatar: TenantAdminFlagValue(true),
+          hasCover: TenantAdminFlagValue(true),
+          hasEvents: TenantAdminFlagValue(true),
+        ),
+        visual: TenantAdminPoiVisual.image(
+          imageSource: TenantAdminPoiVisualImageSource.typeAsset,
+          colorValue: TenantAdminHexColorValue()..parse('#00897B'),
+        ),
+        typeAssetUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([7, 8, 9]),
+          fileName: 'type-asset.png',
+        ),
+      );
+
+      expect(adapter.lastRequest?.method, 'POST');
+      expect(adapter.lastRequest?.contentType, contains('multipart/form-data'));
+      final payload = adapter.lastRequest?.data;
+      expect(payload, isA<FormData>());
+      final formData = payload as FormData;
+      expect(formData.files.any((entry) => entry.key == 'type_asset'), isTrue);
+      expect(
+        formData.fields.any((entry) => entry.key == 'visual[image_source]'),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) => entry.key == 'visual[color]' && entry.value == '#00897B',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[is_favoritable]' && entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[is_poi_enabled]' && entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[is_reference_location_enabled]' &&
+              entry.value == '1',
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'updateProfileTypeWithVisual uses multipart patch tunnel for type_asset upload and removal',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await repository.updateProfileTypeWithVisual(
+        type: tenantAdminAccountProfilesRepoString(
+          'restaurant',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        capabilities: TenantAdminProfileTypeCapabilities(
+          isFavoritable: TenantAdminFlagValue(true),
+          isPoiEnabled: TenantAdminFlagValue(true),
+          isReferenceLocationEnabled: TenantAdminFlagValue(true),
+          hasBio: TenantAdminFlagValue(true),
+          hasContent: TenantAdminFlagValue(true),
+          hasTaxonomies: TenantAdminFlagValue(true),
+          hasAvatar: TenantAdminFlagValue(true),
+          hasCover: TenantAdminFlagValue(true),
+          hasEvents: TenantAdminFlagValue(true),
+          hasGallery: TenantAdminFlagValue(true),
+          hasNestedProfileGroups: TenantAdminFlagValue(true),
+        ),
+        visual: TenantAdminPoiVisual.image(
+          imageSource: TenantAdminPoiVisualImageSource.typeAsset,
+        ),
+        typeAssetUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([7, 8, 9]),
+          fileName: 'type-asset.png',
+        ),
+        removeTypeAsset: tenantAdminAccountProfilesRepoBool(
+          true,
+          defaultValue: false,
+        ),
+      );
+
+      expect(adapter.lastRequest?.method, 'POST');
+      expect(adapter.lastRequest?.contentType, contains('multipart/form-data'));
+      final payload = adapter.lastRequest?.data;
+      expect(payload, isA<FormData>());
+      final formData = payload as FormData;
+      expect(formData.files.any((entry) => entry.key == 'type_asset'), isTrue);
+      expect(formData.fields, contains(const MapEntry('_method', 'PATCH')));
+      expect(
+        formData.fields.any(
+          (entry) => entry.key == 'remove_type_asset' && entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[is_favoritable]' && entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[is_reference_location_enabled]' &&
+              entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[has_gallery]' && entry.value == '1',
+        ),
+        isTrue,
+      );
+      expect(
+        formData.fields.any(
+          (entry) =>
+              entry.key == 'capabilities[has_nested_profile_groups]' &&
+              entry.value == '1',
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'fetchProfileTypeMapPoiProjectionImpact returns projection count',
+    () async {
+      final adapter = _CaptureAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      final count = await repository.fetchProfileTypeMapPoiProjectionImpact(
+        type: tenantAdminAccountProfilesRepoString(
+          'venue',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(count.value, 67);
+      expect(
+        adapter.lastRequest?.path,
+        contains(
+          '/admin/api/v1/account_profile_types/venue/map_poi_projection_impact',
+        ),
+      );
+    },
+  );
+
+  test(
+    'load/reset/next follow paged stream contract for profile types',
+    () async {
+      final adapter = _ProfileTypesRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await verifyTenantAdminPagedStreamContract(
+        scope: 'account profile types',
+        loadFirstPage: () => repository.loadProfileTypes(
+          pageSize: tenantAdminAccountProfilesRepoInt(2, defaultValue: 2),
+        ),
+        loadNextPage: () => repository.loadNextProfileTypesPage(
+          pageSize: tenantAdminAccountProfilesRepoInt(2, defaultValue: 2),
+        ),
+        resetState: repository.resetProfileTypesState,
+        readItems: () => repository.profileTypesStreamValue.value,
+        readHasMore: () =>
+            repository.hasMoreProfileTypesStreamValue.value.value,
+        readError: () => repository.profileTypesErrorStreamValue.value?.value,
+        expectedCountsPerStep: const [2, 3],
+        loadNextCalls: 1,
+      );
+    },
+  );
+
+  test(
+    'createAccountProfile preserves structured 422 validation failure',
+    () async {
+      final adapter = _ProfileCreateValidationAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await expectLater(
+        repository.createAccountProfile(
+          accountId: tenantAdminAccountProfilesRepoString(
+            'account-1',
+            defaultValue: '',
+            isRequired: true,
+          ),
+          profileType: tenantAdminAccountProfilesRepoString(
+            'venue',
+            defaultValue: '',
+            isRequired: true,
+          ),
+          displayName: tenantAdminAccountProfilesRepoString(
+            'Perfil',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ),
+        throwsA(
+          isA<FormValidationFailure>()
+              .having(
+                (error) => error.message,
+                'message',
+                'The given data was invalid.',
+              )
+              .having(
+                (error) => error.fieldErrors['location.lat'],
+                'location.lat error',
+                <String>['Latitude obrigatoria.'],
+              ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'createAccountProfile surfaces structured 403 security failure',
+    () async {
+      final adapter = _ProfileCreateOriginDeniedAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TenantAdminAccountProfilesRepository(dio: dio);
+
+      await expectLater(
+        repository.createAccountProfile(
+          accountId: tenantAdminAccountProfilesRepoString(
+            'account-1',
+            defaultValue: '',
+            isRequired: true,
+          ),
+          profileType: tenantAdminAccountProfilesRepoString(
+            'venue',
+            defaultValue: '',
+            isRequired: true,
+          ),
+          displayName: tenantAdminAccountProfilesRepoString(
+            'Perfil',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        ),
+        throwsA(
+          isA<FormApiFailure>()
+              .having((error) => error.statusCode, 'statusCode', 403)
+              .having(
+                (error) => error.errorCode,
+                'errorCode',
+                'origin_access_denied',
+              ),
+        ),
+      );
+    },
+  );
+}
+
+class _StubAuthRepo implements LandlordAuthRepositoryContract {
+  @override
+  bool get hasValidSession => true;
+
+  @override
+  String get token => 'test-token';
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    LandlordAuthRepositoryContractPrimString email,
+    LandlordAuthRepositoryContractPrimString password,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+}
+
+class _StubTenantScope implements TenantAdminTenantScopeContract {
+  _StubTenantScope(this._selectedTenantDomain);
+
+  String? _selectedTenantDomain;
+
+  @override
+  String? get selectedTenantDomain => _selectedTenantDomain;
+
+  @override
+  String get selectedTenantAdminBaseUrl =>
+      resolveTenantAdminBaseUrl(_selectedTenantDomain ?? '');
+
+  @override
+  StreamValue<String?> get selectedTenantDomainStreamValue =>
+      StreamValue<String?>(defaultValue: _selectedTenantDomain);
+
+  @override
+  void clearSelectedTenantDomain() {
+    _selectedTenantDomain = null;
+  }
+
+  @override
+  void selectTenantDomain(Object tenantDomain) {
+    _selectedTenantDomain = tenantDomain is String
+        ? tenantDomain
+        : (tenantDomain as dynamic).value as String;
+  }
+}
+
+class _CaptureAdapter implements HttpClientAdapter {
+  _CaptureAdapter({this.responseBody, this.statusCode = 200});
+
+  RequestOptions? lastRequest;
+  final List<RequestOptions> requests = <RequestOptions>[];
+  final Object? responseBody;
+  final int statusCode;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    lastRequest = options;
+    requests.add(options);
+    if (responseBody != null) {
+      return ResponseBody.fromString(
+        jsonEncode(responseBody),
+        statusCode,
+        headers: {
+          Headers.contentTypeHeader: ['application/json'],
+        },
+      );
+    }
+    if (options.path.endsWith('/map_poi_projection_impact')) {
+      return ResponseBody.fromString(
+        jsonEncode({
+          'data': {'profile_type': 'venue', 'projection_count': 67},
+        }),
+        200,
+        headers: {
+          Headers.contentTypeHeader: ['application/json'],
+        },
+      );
+    }
+    if (options.path.contains('/v1/account_profile_types')) {
+      return ResponseBody.fromString(
+        jsonEncode({
+          'data': {
+            'type': 'venue',
+            'label': 'Venue',
+            'poi_visual': {
+              'mode': 'icon',
+              'icon': 'place',
+              'color': '#FF8800',
+              'icon_color': '#FFFFFF',
+            },
+            'allowed_taxonomies': <String>[],
+            'capabilities': {
+              'is_favoritable': true,
+              'is_poi_enabled': true,
+              'is_reference_location_enabled': true,
+              'has_bio': true,
+              'has_content': true,
+              'has_taxonomies': true,
+              'has_avatar': true,
+              'has_cover': true,
+              'has_events': true,
+              'has_gallery': true,
+              'has_nested_profile_groups': true,
+            },
+          },
+        }),
+        200,
+        headers: {
+          Headers.contentTypeHeader: ['application/json'],
+        },
+      );
+    }
+    final payload = jsonEncode({
+      'data': {
+        'id': 'profile-1',
+        'account_id': 'account-1',
+        'profile_type': 'personal',
+        'display_name': 'Profile',
+      },
+    });
+    return ResponseBody.fromString(
+      payload,
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _ConnectionFailureAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<void>? cancelFuture,
+  ) => throw DioException(
+    requestOptions: options,
+    type: DioExceptionType.connectionError,
+    error: const SocketException('connection lost'),
+  );
+}
+
+class _ProfileTypesRoutingAdapter implements HttpClientAdapter {
+  final List<RequestOptions> requests = [];
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    requests.add(options);
+    final pageRaw = options.queryParameters['page'];
+    final page = pageRaw is int ? pageRaw : int.tryParse('$pageRaw') ?? 1;
+
+    if (options.path.endsWith('/v1/account_profile_types') && page == 1) {
+      return _jsonResponse({
+        'data': [
+          _profileType(id: 'pt-1', type: 'artist', label: 'Artist'),
+          _profileType(id: 'pt-2', type: 'venue', label: 'Venue'),
+        ],
+        'current_page': 1,
+        'last_page': 2,
+      });
+    }
+
+    if (options.path.endsWith('/v1/account_profile_types') && page == 2) {
+      return _jsonResponse({
+        'data': [
+          _profileType(id: 'pt-3', type: 'restaurant', label: 'Restaurant'),
+        ],
+        'current_page': 2,
+        'last_page': 2,
+      });
+    }
+
+    return _jsonResponse({
+      'data': const [],
+      'current_page': page,
+      'last_page': page,
+    });
+  }
+
+  Map<String, dynamic> _profileType({
+    required String id,
+    required String type,
+    required String label,
+  }) {
+    return {
+      'id': id,
+      'type': type,
+      'label': label,
+      'poi_visual': {
+        'mode': 'icon',
+        'icon': 'place',
+        'color': '#FF8800',
+        'icon_color': '#FFFFFF',
+      },
+      'allowed_taxonomies': const <String>[],
+      'capabilities': const {
+        'is_favoritable': true,
+        'is_poi_enabled': false,
+        'has_bio': true,
+        'has_content': true,
+        'has_taxonomies': true,
+        'has_avatar': true,
+        'has_cover': true,
+        'has_events': false,
+      },
+    };
+  }
+
+  ResponseBody _jsonResponse(Map<String, dynamic> payload) {
+    return ResponseBody.fromString(
+      jsonEncode(payload),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _PermissiveNestedGroupValidationAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    if (options.path.endsWith('/nested_profile_groups') &&
+        options.method == 'POST') {
+      return ResponseBody.fromString(
+        jsonEncode({
+          'message': 'The given data was invalid.',
+          'errors': {
+            'nested_profile_groups': [
+              'Nested profile groups exceed the configured limit.',
+            ],
+          },
+        }),
+        422,
+        headers: {
+          Headers.contentTypeHeader: ['application/json'],
+        },
+      );
+    }
+
+    return ResponseBody.fromString(
+      jsonEncode({'data': {}}),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _ProfileListMediaAdapter implements HttpClientAdapter {
+  final List<RequestOptions> requests = <RequestOptions>[];
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    requests.add(options);
+
+    if (options.path.endsWith('/v1/account_profiles')) {
+      if (options.queryParameters.containsKey('page')) {
+        return _jsonResponse({
+          'current_page': options.queryParameters['page'],
+          'last_page': 3,
+          'page_size': options.queryParameters['page_size'],
+          'data': [
+            {
+              'id': 'profile-21',
+              'account_id': 'acc-21',
+              'profile_type': 'artist',
+              'display_name': 'Runtime Sender',
+              'slug': 'runtime-sender',
+              'avatar_url': 'https://cdn.test/profile-21-avatar.png',
+              'cover_url': 'https://cdn.test/profile-21-cover.png',
+            },
+            {
+              'id': 'profile-22',
+              'account_id': 'acc-22',
+              'profile_type': 'venue',
+              'display_name': 'Runtime Venue',
+              'slug': 'runtime-venue',
+              'avatar_url': 'https://cdn.test/profile-22-avatar.png',
+              'cover_url': 'https://cdn.test/profile-22-cover.png',
+            },
+          ],
+        });
+      }
+      return _jsonResponse({
+        'data': [
+          {
+            'id': 'profile-1',
+            'account_id': 'acc-1',
+            'profile_type': 'artist',
+            'display_name': 'Profile 1',
+            'slug': 'profile-1',
+            'avatar_url': 'https://cdn.test/profile-1-avatar.png',
+            'cover_url': 'https://cdn.test/profile-1-cover.png',
+          },
+        ],
+      });
+    }
+
+    return _jsonResponse({'data': const []});
+  }
+
+  ResponseBody _jsonResponse(Map<String, dynamic> payload) {
+    return ResponseBody.fromString(
+      jsonEncode(payload),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _ProfileCreateValidationAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'message': 'The given data was invalid.',
+        'errors': {
+          'location.lat': ['Latitude obrigatoria.'],
+        },
+      }),
+      422,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _ProfileCreateOriginDeniedAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'code': 'origin_access_denied',
+        'message': 'Direct origin access is not allowed.',
+        'correlation_id': 'corr-origin-1',
+      }),
+      403,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+AppData _buildAppData() {
+  final remoteData = {
+    'name': 'Tenant Test',
+    'type': 'tenant',
+    'main_domain': 'https://tenant.test',
+    'profile_types': [
+      {
+        'type': 'personal',
+        'label': 'Personal',
+        'allowed_taxonomies': [],
+        'capabilities': {'is_favoritable': false, 'is_poi_enabled': false},
+      },
+    ],
+    'domains': ['https://tenant.test'],
+    'app_domains': const [],
+    'theme_data_settings': {
+      'brightness_default': 'light',
+      'primary_seed_color': '#FFFFFF',
+      'secondary_seed_color': '#000000',
+    },
+    'main_color': '#FFFFFF',
+    'tenant_id': 'tenant-1',
+    'telemetry': const {'trackers': []},
+    'telemetry_context': const {'location_freshness_minutes': 5},
+    'firebase': null,
+    'push': null,
+  };
+  final localInfo = {
+    'platformType': PlatformTypeValue()..parse('mobile'),
+    'hostname': 'tenant.test',
+    'href': 'https://tenant.test',
+    'port': null,
+    'device': 'test-device',
+  };
+  return buildAppDataFromInitialization(
+    remoteData: remoteData,
+    localInfo: localInfo,
+  );
+}

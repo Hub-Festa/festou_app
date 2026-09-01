@@ -1,0 +1,44 @@
+import 'package:festou_app/domain/invites/projections/friend_resume.dart';
+import 'package:festou_app/domain/repositories/friends_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/friends_repository_contract_bool_value.dart';
+import 'package:festou_app/domain/user/friend.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+/// Repository implementation for managing friends data with app-wide caching
+class FriendsRepository extends FriendsRepositoryContract {
+  FriendsRepository({
+    List<Friend>? initialFriends,
+  }) : _friends = List<Friend>.unmodifiable(initialFriends ?? const []);
+
+  final List<Friend> _friends;
+
+  @override
+  final friendsStreamValue = StreamValue<List<InviteFriendResume>>(
+    defaultValue: const [],
+  );
+
+  @override
+  Future<void> fetchAndCacheFriends({
+    FriendsRepositoryContractBoolValue? forceRefresh,
+  }) async {
+    final shouldForceRefresh = forceRefresh?.value ?? false;
+
+    // Skip if already cached and not forcing refresh
+    if (!shouldForceRefresh && friendsStreamValue.value.isNotEmpty) {
+      return;
+    }
+
+    final friends = await fetchFriends();
+    final friendResumes =
+        friends.map(InviteFriendResume.fromFriend).toList(growable: false);
+
+    friendsStreamValue.addValue(friendResumes);
+  }
+
+  @override
+  Future<List<Friend>> fetchFriends() async {
+    // Runtime uses backend-driven flows; until a dedicated friends API is added,
+    // keep this repository deterministic with an empty/default list.
+    return _friends;
+  }
+}

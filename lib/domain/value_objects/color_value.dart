@@ -1,18 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:value_object_pattern/value_object.dart';
 
-class ColorValue extends ValueObject<Color?> {
-
+class ColorValue extends ValueObject<Color> {
   ColorValue({
-    super.defaultValue,
-    super.isRequired = false,
+    required super.defaultValue,
+    super.isRequired = true,
   });
 
   @override
   Color doParse(String? parseValue) {
-    String formattedHex = parseValue!.startsWith('#')
-        ? parseValue
-        : '#$parseValue';
+    String formattedHex =
+        parseValue!.startsWith('#') ? parseValue : '#$parseValue';
 
     // 2. Add the alpha channel (FF for opaque) if it's missing.
     // Handles formats like #RGB, #RRGGBB

@@ -1,0 +1,1485 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:festou_app/application/invites/invite_contact_import_hashes.dart';
+import 'package:festou_app/application/time/timezone_converter.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/contacts/contact_model.dart';
+import 'package:festou_app/domain/invites/invite_accept_result.dart';
+import 'package:festou_app/domain/invites/invite_account_profile_ids.dart';
+import 'package:festou_app/domain/invites/invite_contact_group.dart';
+import 'package:festou_app/domain/invites/invite_contact_match.dart';
+import 'package:festou_app/domain/invites/invite_decline_result.dart';
+import 'package:festou_app/domain/invites/invite_materialize_result.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/invite_runtime_settings.dart';
+import 'package:festou_app/domain/invites/invite_share_code_result.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_accepted_at_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_account_profile_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_attendance_policy_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_cooldowns_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_credited_acceptance_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_decline_status_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_declined_at_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_event_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_has_other_pending_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_materialization_status_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_message_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_occurrence_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_rate_limits_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_share_code_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_contact_group_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_contact_group_name_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/schedule/friend_resume.dart';
+import 'package:festou_app/domain/schedule/invite_status.dart';
+import 'package:festou_app/domain/schedule/sent_invite_status.dart';
+import 'package:festou_app/domain/schedule/sent_invite_summary.dart';
+import 'package:festou_app/domain/tenant/value_objects/tenant_id_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_avatar_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_display_name_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_id_value.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invite_contact_import_cache.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invite_contact_import_cache_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invite_contact_match_cache_dto.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invites_response_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invites_backend_requests.dart';
+import 'package:festou_app/infrastructure/dal/dao/push/invite_push_payload_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/invites_backend/laravel_invites_backend.dart';
+import 'package:festou_app/infrastructure/dal/dto/invites/invite_realtime_delta_dto.dart';
+import 'package:festou_app/infrastructure/observability/invite_flow_debug_logger.dart';
+import 'package:festou_app/infrastructure/repositories/push/push_payload_upsert_mixin.dart';
+import 'package:festou_app/infrastructure/services/invites_backend_contract.dart';
+import 'package:festou_app/domain/repositories/friends_repository_contract.dart';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:get_it/get_it.dart';
+import 'package:value_object_pattern/domain/value_objects/date_time_value.dart';
+
+class InvitesRepository extends InvitesRepositoryContract
+    with PushPayloadUpsertMixin<InviteModel>, PushInvitePayloadMixin
+    implements PushInvitePayloadAware {
+  static const Duration _contactImportCacheTtl = Duration(hours: 12);
+  static const String _tenantIdStorageKey = 'tenant_id';
+  static const Duration _inviteRealtimeReconnectDelay = Duration(seconds: 3);
+
+  InvitesRepository({
+    InvitesBackendContract? backend,
+    FriendsRepositoryContract? friendsRepository,
+    InviteContactImportCacheContract? contactImportCache,
+    this._authRepository,
+    FlutterSecureStorage? storage,
+    DateTime Function()? now,
+    Future<void> Function(Duration duration)? wait,
+    this._currentUserIdProvider,
+    this._tenantCacheScopeProvider,
+    this._persistedTenantCacheScopeProvider,
+    this._userEventsRepositoryResolver,
+  }) : _backend = backend ?? LaravelInvitesBackend(),
+       _contactImportCache = contactImportCache ?? InviteContactImportCache(),
+       _storage = storage ?? const FlutterSecureStorage(),
+       _now = now ?? DateTime.now,
+       _wait = wait ?? Future<void>.delayed;
+
+  final InvitesBackendContract _backend;
+  final InviteContactImportCacheContract _contactImportCache;
+  AuthRepositoryContract? _authRepository;
+  final FlutterSecureStorage _storage;
+  final DateTime Function() _now;
+  final Future<void> Function(Duration duration) _wait;
+  final Future<String?> Function()? _currentUserIdProvider;
+  final Future<String?> Function()? _tenantCacheScopeProvider;
+  final Future<String?> Function()? _persistedTenantCacheScopeProvider;
+  final UserEventsRepositoryContract Function()? _userEventsRepositoryResolver;
+  final InvitesResponseDecoder _responseDecoder =
+      const InvitesResponseDecoder();
+  final InvitePushPayloadDecoder _pushPayloadDecoder =
+      const InvitePushPayloadDecoder();
+  final Map<String, Future<List<SentInviteStatus>>> _activeSentStatusRefreshes =
+      <String, Future<List<SentInviteStatus>>>{};
+  final Map<String, Future<SentInviteSummary>> _activeSentSummaryRefreshes =
+      <String, Future<SentInviteSummary>>{};
+  UserEventsRepositoryContract? _userEventsRepository;
+  StreamSubscription<Object?>? _inviteRealtimeAuthSubscription;
+  StreamSubscription<InviteRealtimeDeltaDto>? _inviteRealtimeStreamSubscription;
+  Future<void>? _inviteRealtimeLoopFuture;
+  Future<void>? _inviteRealtimeRefreshFuture;
+  Completer<void>? _inviteRealtimeStopCompleter;
+  String? _inviteRealtimeLastEventId;
+  String? _inviteRealtimeBoundUserId;
+  int _inviteRealtimeGeneration = 0;
+
+  AuthRepositoryContract? get _resolvedAuthRepository {
+    if (_authRepository != null) {
+      return _authRepository;
+    }
+    if (!GetIt.I.isRegistered<AuthRepositoryContract>()) {
+      return null;
+    }
+    _authRepository = GetIt.I.get<AuthRepositoryContract>();
+    return _authRepository;
+  }
+
+  UserEventsRepositoryContract? get _resolvedUserEventsRepository {
+    if (_userEventsRepository != null) {
+      return _userEventsRepository;
+    }
+    final resolver = _userEventsRepositoryResolver;
+    if (resolver != null) {
+      _userEventsRepository = resolver.call();
+      return _userEventsRepository;
+    }
+    if (!GetIt.I.isRegistered<UserEventsRepositoryContract>()) {
+      return null;
+    }
+    _userEventsRepository = GetIt.I.get<UserEventsRepositoryContract>();
+    return _userEventsRepository;
+  }
+
+  @override
+  Future<void> init() async {
+    await _seedInviteRealtimeCursorForAuthorizedSession();
+    await super.init();
+    _bindInviteRealtimeAuthLifecycle();
+    await _syncInviteRealtimeLifecycle();
+  }
+
+  Future<void> _seedInviteRealtimeCursorForAuthorizedSession() async {
+    final authRepository = _resolvedAuthRepository;
+    if (authRepository?.isAuthorized != true) {
+      return;
+    }
+
+    final currentUserId = _normalizeNullable(await _currentUserId());
+    if (currentUserId == null || _inviteRealtimeLastEventId != null) {
+      return;
+    }
+
+    _inviteRealtimeLastEventId = _buildInviteRealtimeCursorSeed();
+  }
+
+  Future<void> dispose() async {
+    _inviteRealtimeBoundUserId = null;
+    _inviteRealtimeLastEventId = null;
+    _inviteRealtimeGeneration += 1;
+    _signalInviteRealtimeStop();
+    await _inviteRealtimeStreamSubscription?.cancel();
+    _inviteRealtimeStreamSubscription = null;
+    await _inviteRealtimeAuthSubscription?.cancel();
+    _inviteRealtimeAuthSubscription = null;
+    final loopFuture = _inviteRealtimeLoopFuture;
+    _inviteRealtimeLoopFuture = null;
+    if (loopFuture != null) {
+      await loopFuture;
+    }
+    _inviteRealtimeRefreshFuture = null;
+  }
+
+  @override
+  Future<void> clearCurrentIdentityState() async {
+    await super.clearCurrentIdentityState();
+    await _contactImportCache.clearAll();
+    await _syncInviteRealtimeLifecycle();
+  }
+
+  @override
+  Future<List<InviteContactMatch>?> hydrateImportedContactMatchesFromCache(
+    InviteContacts contacts,
+  ) async {
+    final snapshot = await _resolveFreshImportedContactMatchSnapshot(contacts);
+    final matches = snapshot?.matches;
+    if (matches == null) {
+      return null;
+    }
+    importedContactMatchesStreamValue.addValue(matches);
+    return matches;
+  }
+
+  @override
+  Future<List<InviteModel>> fetchInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    final resolvedPage =
+        page ?? invitesRepoInt(1, defaultValue: 1, isRequired: true);
+    final resolvedPageSize =
+        pageSize ?? invitesRepoInt(20, defaultValue: 20, isRequired: true);
+    final response = await _backend.fetchInvites(
+      page: resolvedPage.value,
+      pageSize: resolvedPageSize.value,
+    );
+    final invitesRaw = response['invites'];
+    final invites = _responseDecoder
+        .decodeInviteDtos(invitesRaw)
+        .map((dto) => dto.toDomain())
+        .toList(growable: false);
+
+    if (resolvedPage.value == 1) {
+      pendingInvitesStreamValue.addValue(invites);
+    }
+
+    return invites;
+  }
+
+  void _bindInviteRealtimeAuthLifecycle() {
+    if (_inviteRealtimeAuthSubscription != null) {
+      return;
+    }
+    final authRepository = _resolvedAuthRepository;
+    if (authRepository == null) {
+      return;
+    }
+
+    _inviteRealtimeAuthSubscription = authRepository.userStreamValue.stream
+        .listen((_) {
+          unawaited(_syncInviteRealtimeLifecycle());
+        });
+  }
+
+  Future<void> _syncInviteRealtimeLifecycle() async {
+    final authRepository = _resolvedAuthRepository;
+    final isAuthorized = authRepository?.isAuthorized ?? false;
+    final nextUserId = isAuthorized ? await _currentUserId() : null;
+    final normalizedUserId = _normalizeNullable(nextUserId);
+    final previousBoundUserId = _inviteRealtimeBoundUserId;
+    final userChanged = normalizedUserId != previousBoundUserId;
+
+    if (normalizedUserId == _inviteRealtimeBoundUserId &&
+        _inviteRealtimeLoopFuture != null) {
+      return;
+    }
+
+    _inviteRealtimeBoundUserId = normalizedUserId;
+    if (userChanged) {
+      if (normalizedUserId == null) {
+        _inviteRealtimeLastEventId = null;
+      } else if (previousBoundUserId != null ||
+          _inviteRealtimeLastEventId == null) {
+        _inviteRealtimeLastEventId = _buildInviteRealtimeCursorSeed();
+      }
+    }
+    _inviteRealtimeGeneration += 1;
+    final generation = _inviteRealtimeGeneration;
+    _signalInviteRealtimeStop();
+
+    await _inviteRealtimeStreamSubscription?.cancel();
+    _inviteRealtimeStreamSubscription = null;
+
+    if (normalizedUserId == null) {
+      _inviteRealtimeLoopFuture = null;
+      return;
+    }
+
+    final stopCompleter = Completer<void>();
+    _inviteRealtimeStopCompleter = stopCompleter;
+    final loopFuture = _runInviteRealtimeLoop(generation, stopCompleter);
+    _inviteRealtimeLoopFuture = loopFuture;
+    await Future<void>.value();
+  }
+
+  Future<void> _runInviteRealtimeLoop(
+    int generation,
+    Completer<void> stopCompleter,
+  ) async {
+    while (generation == _inviteRealtimeGeneration &&
+        _inviteRealtimeBoundUserId != null) {
+      try {
+        final streamDone = Completer<void>();
+        final subscription = _backend
+            .watchInvitesStream(lastEventId: _inviteRealtimeLastEventId)
+            .listen(
+              _applyInviteRealtimeDelta,
+              onError: (Object error, StackTrace stackTrace) {
+                if (!streamDone.isCompleted) {
+                  streamDone.completeError(error, stackTrace);
+                }
+              },
+              onDone: () {
+                if (!streamDone.isCompleted) {
+                  streamDone.complete();
+                }
+              },
+              cancelOnError: true,
+            );
+        _inviteRealtimeStreamSubscription = subscription;
+        await Future.any([streamDone.future, stopCompleter.future]);
+      } catch (_) {
+        // The loop retries on the next cycle.
+      } finally {
+        await _inviteRealtimeStreamSubscription?.cancel();
+        _inviteRealtimeStreamSubscription = null;
+      }
+
+      if (generation != _inviteRealtimeGeneration ||
+          _inviteRealtimeBoundUserId == null) {
+        break;
+      }
+
+      await Future.any([
+        _wait(_inviteRealtimeReconnectDelay),
+        stopCompleter.future,
+      ]);
+    }
+
+    if (generation == _inviteRealtimeGeneration) {
+      _inviteRealtimeLoopFuture = null;
+    }
+    if (identical(_inviteRealtimeStopCompleter, stopCompleter)) {
+      _inviteRealtimeStopCompleter = null;
+    }
+  }
+
+  void _signalInviteRealtimeStop() {
+    final stopCompleter = _inviteRealtimeStopCompleter;
+    if (stopCompleter == null || stopCompleter.isCompleted) {
+      return;
+    }
+    stopCompleter.complete();
+  }
+
+  String _buildInviteRealtimeCursorSeed() {
+    return TimezoneConverter.localToUtc(_now()).toIso8601String();
+  }
+
+  void _applyInviteRealtimeDelta(InviteRealtimeDeltaDto delta) {
+    if (delta.lastEventId != null && delta.lastEventId!.trim().isNotEmpty) {
+      _inviteRealtimeLastEventId = delta.lastEventId!.trim();
+    }
+
+    if (delta.isUpsert) {
+      _upsertRealtimeInvite(delta);
+      return;
+    }
+
+    if (delta.isDeleted) {
+      _removePendingInviteTarget(
+        eventId: delta.eventId!,
+        occurrenceId: delta.occurrenceId!,
+      );
+      return;
+    }
+
+    unawaited(_refreshPendingInvitesFromRealtime());
+  }
+
+  void _upsertRealtimeInvite(InviteRealtimeDeltaDto delta) {
+    final inviteDto = delta.invite;
+    if (inviteDto == null) {
+      return;
+    }
+
+    try {
+      final next = upsertItems(
+        current: pendingInvitesStreamValue.value,
+        updates: [inviteDto.toDomain()],
+        idResolver: (invite) => invite.idValue.value,
+      );
+      pendingInvitesStreamValue.addValue(next);
+    } catch (_) {
+      unawaited(_refreshPendingInvitesFromRealtime());
+    }
+  }
+
+  Future<void> _refreshPendingInvitesFromRealtime() {
+    final inFlight = _inviteRealtimeRefreshFuture;
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final refresh = refreshPendingInvites().whenComplete(() {
+      _inviteRealtimeRefreshFuture = null;
+    });
+    _inviteRealtimeRefreshFuture = refresh;
+    return refresh;
+  }
+
+  void _removePendingInviteTarget({
+    required String eventId,
+    required String occurrenceId,
+  }) {
+    final normalizedEventId = eventId.trim();
+    final normalizedOccurrenceId = occurrenceId.trim();
+    if (normalizedEventId.isEmpty || normalizedOccurrenceId.isEmpty) {
+      return;
+    }
+
+    final current = pendingInvitesStreamValue.value;
+    final next = current
+        .where(
+          (invite) =>
+              invite.eventId != normalizedEventId ||
+              invite.occurrenceId != normalizedOccurrenceId,
+        )
+        .toList(growable: false);
+
+    if (next.length == current.length) {
+      return;
+    }
+
+    pendingInvitesStreamValue.addValue(next);
+  }
+
+  @override
+  Future<InviteRuntimeSettings> fetchSettings() async {
+    final response = await _backend.fetchSettings();
+    final settings = InviteRuntimeSettings(
+      tenantIdValue: _buildTenantIdValueOrNull(
+        _stringOrNull(response['tenant_id']),
+      ),
+      limitValues: InviteRateLimitsValue(_parseIntMap(response['limits'])),
+      cooldownValues: InviteCooldownsValue(_parseIntMap(response['cooldowns'])),
+      overQuotaMessageValue: _buildInviteMessageValueOrNull(
+        _stringOrNull(response['over_quota_message']),
+      ),
+    );
+    settingsStreamValue.addValue(settings);
+    return settings;
+  }
+
+  @override
+  Future<InviteAcceptResult> acceptInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) async {
+    final response = await _backend.acceptInvite(inviteId.value);
+    await fetchInvites();
+    final result = _decodeAcceptResult(response);
+    if (result.isAccepted) {
+      await _resolvedUserEventsRepository?.refreshConfirmedOccurrenceIds();
+    }
+    return result;
+  }
+
+  @override
+  Future<InviteAcceptResult> acceptInviteByCode(
+    InvitesRepositoryContractPrimString code,
+  ) async {
+    final response = await _backend.acceptShareCode(code.value);
+    clearShareCodeSessionContext(code: code);
+    await fetchInvites();
+    final result = _decodeAcceptResult(response);
+    if (result.isAccepted) {
+      await _resolvedUserEventsRepository?.refreshConfirmedOccurrenceIds();
+    }
+    return result;
+  }
+
+  InviteAcceptResult _decodeAcceptResult(Object? response) =>
+      _responseDecoder.decodeAcceptResult(response);
+
+  @override
+  Future<InviteDeclineResult> declineInvite(
+    InvitesRepositoryContractPrimString inviteId,
+  ) async {
+    final response = await _backend.declineInvite(inviteId.value);
+    await fetchInvites();
+    return InviteDeclineResult(
+      inviteIdValue: _buildInviteIdValue(_stringOrEmpty(response['invite_id'])),
+      statusValue: InviteDeclineStatusValue(_stringOrEmpty(response['status'])),
+      groupHasOtherPendingValue: InviteHasOtherPendingValue(
+        response['group_has_other_pending'] == true,
+      ),
+      declinedAtValue: InviteDeclinedAtValue(
+        _parseDateTime(response['declined_at']),
+      ),
+    );
+  }
+
+  @override
+  Future<InviteMaterializeResult> materializeShareCode(
+    InvitesRepositoryContractPrimString code,
+  ) async {
+    final response = await _backend.materializeShareCode(code.value);
+    return InviteMaterializeResult(
+      inviteIdValue: _buildInviteIdValueOrNull(response['invite_id']),
+      statusValue: _buildMaterializationStatusValue(
+        _stringOrEmpty(response['status']),
+      ),
+      creditedAcceptanceValue: _buildCreditedAcceptanceValue(
+        response['credited_acceptance'] == true,
+      ),
+      attendancePolicyValue: _buildAttendancePolicyValue(
+        _resolveAttendancePolicy(response['attendance_policy']),
+      ),
+      acceptedAtValue: _buildAcceptedAtValue(
+        _parseDateTime(response['accepted_at']),
+      ),
+    );
+  }
+
+  @override
+  Future<InviteModel?> previewShareCode(
+    InvitesRepositoryContractPrimString code,
+  ) async {
+    final response = await _backend.fetchShareCodePreview(code.value);
+    final inviteRaw = response['invite'];
+    final decoded = _responseDecoder.decodeRequiredInviteDto(
+      inviteRaw,
+      context: 'invite share preview',
+    );
+    return decoded.toDomain();
+  }
+
+  @override
+  Future<List<InviteContactMatch>> importContacts(
+    InviteContacts contacts,
+  ) async {
+    final traceId = InviteFlowDebugLogger.nextTraceId(
+      'contacts.import.repository',
+    );
+    final snapshot = await _resolveFreshImportedContactMatchSnapshot(contacts);
+    if (snapshot == null) {
+      InviteFlowDebugLogger.logContactsImportSkipped(
+        traceId: traceId,
+        inputContactCount: contacts.items.length,
+        forceImport: contacts.forceImport,
+        regionCodePresent: contacts.regionCode?.trim().isNotEmpty == true,
+      );
+      return const <InviteContactMatch>[];
+    }
+
+    InviteFlowDebugLogger.logContactsImportSnapshot(
+      traceId: traceId,
+      inputContactCount: contacts.items.length,
+      forceImport: contacts.forceImport,
+      regionCodePresent: contacts.regionCode?.trim().isNotEmpty == true,
+      importItemCount: snapshot.importItems.length,
+      cacheHit: snapshot.isFresh,
+      cachedMatchCount: snapshot.matches.length,
+    );
+
+    if (!contacts.forceImport && snapshot.isFresh) {
+      if (snapshot.matches.isNotEmpty) {
+        InviteFlowDebugLogger.logCount(
+          'contacts.import.repository.cache_used',
+          traceId: traceId,
+          field: 'cached_match_count',
+          count: snapshot.matches.length,
+        );
+        importedContactMatchesStreamValue.addValue(snapshot.matches);
+        return snapshot.matches;
+      }
+
+      InviteFlowDebugLogger.logReason(
+        'contacts.import.repository.cache_bypassed',
+        traceId: traceId,
+        reason: 'empty_cached_matches',
+      );
+    }
+
+    final response = await _backend.importContacts(
+      InviteContactImportRequest(contacts: snapshot.importItems),
+    );
+    final decodedMatches = _responseDecoder.decodeContactMatches(
+      response['matches'],
+    );
+    final matchesByProfileId = <String, InviteContactMatch>{};
+    for (final match in decodedMatches) {
+      matchesByProfileId.putIfAbsent(
+        match.receiverAccountProfileId,
+        () => match,
+      );
+    }
+
+    await _contactImportCache.write(
+      snapshot.cacheKey,
+      InviteContactImportCacheEntry(
+        signature: snapshot.signature,
+        importedAt: _now(),
+        matches: matchesByProfileId.values
+            .map(InviteContactMatchCacheDto.fromDomain)
+            .toList(growable: false),
+      ),
+    );
+
+    final matches = matchesByProfileId.values.toList(growable: false);
+    InviteFlowDebugLogger.logCount(
+      'contacts.import.repository.decoded',
+      traceId: traceId,
+      field: 'decoded_match_count',
+      count: matches.length,
+    );
+    importedContactMatchesStreamValue.addValue(matches);
+    return matches;
+  }
+
+  @override
+  Future<List<InviteContactGroup>> fetchContactGroups() async {
+    final response = await _backend.fetchContactGroups();
+    return _responseDecoder.decodeContactGroups(response['data']);
+  }
+
+  @override
+  Future<InviteContactGroup?> createContactGroup({
+    required InviteContactGroupNameValue nameValue,
+    required InviteAccountProfileIds recipientAccountProfileIds,
+  }) async {
+    final response = await _backend.createContactGroup(
+      name: nameValue.value,
+      recipientAccountProfileIds: recipientAccountProfileIds.toList(
+        growable: false,
+      ),
+    );
+    return _responseDecoder.decodeContactGroup(response['data'] ?? response);
+  }
+
+  @override
+  Future<InviteContactGroup?> updateContactGroup({
+    required InviteContactGroupIdValue groupIdValue,
+    InviteContactGroupNameValue? nameValue,
+    InviteAccountProfileIds? recipientAccountProfileIds,
+  }) async {
+    final response = await _backend.updateContactGroup(
+      groupId: groupIdValue.value,
+      name: nameValue?.value,
+      recipientAccountProfileIds: recipientAccountProfileIds?.toList(
+        growable: false,
+      ),
+    );
+    return _responseDecoder.decodeContactGroup(response['data'] ?? response);
+  }
+
+  @override
+  Future<void> deleteContactGroup(
+    InviteContactGroupIdValue groupIdValue,
+  ) async {
+    await _backend.deleteContactGroup(groupIdValue.value);
+  }
+
+  @override
+  Future<InviteShareCodeResult> createShareCode({
+    required InvitesRepositoryContractPrimString eventId,
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? accountProfileId,
+  }) async {
+    final normalizedOccurrenceId = occurrenceId.value.trim();
+    if (normalizedOccurrenceId.isEmpty) {
+      throw ArgumentError.value(
+        occurrenceId.value,
+        'occurrenceId',
+        'Share-code invite targets require an occurrence identity.',
+      );
+    }
+    final normalizedAccountProfileId = accountProfileId?.value.trim();
+    final response = await _backend.createShareCode(
+      InviteShareCodeCreateRequest(
+        targetRef: InviteTargetRefRequest(
+          eventId: eventId.value,
+          occurrenceId: normalizedOccurrenceId,
+        ),
+        accountProfileId: normalizedAccountProfileId,
+      ),
+    );
+
+    final targetRef = _responseDecoder.decodeShareCodeTargetRef(
+      response['target_ref'],
+      fallbackEventId: eventId.value,
+    );
+
+    return InviteShareCodeResult(
+      codeValue: InviteShareCodeValue(_stringOrEmpty(response['code'])),
+      eventIdValue: _buildInviteEventIdValue(targetRef.eventId),
+      occurrenceIdValue: _buildInviteOccurrenceIdValue(targetRef.occurrenceId),
+    );
+  }
+
+  @override
+  Future<void> sendInvites(
+    InvitesRepositoryContractPrimString eventId,
+    InviteRecipients recipients, {
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? message,
+  }) async {
+    final traceId = InviteFlowDebugLogger.nextTraceId(
+      'invites.send.repository',
+    );
+    if (recipients.isEmpty) {
+      InviteFlowDebugLogger.logReason(
+        'invites.send.repository.skipped',
+        traceId: traceId,
+        reason: 'no_recipients',
+      );
+      return;
+    }
+
+    final normalizedOccurrenceId = occurrenceId.value.trim();
+    if (normalizedOccurrenceId.isEmpty) {
+      throw ArgumentError.value(
+        occurrenceId.value,
+        'occurrenceId',
+        'Direct invite targets require an occurrence identity.',
+      );
+    }
+    final normalizedMessage = message?.value.trim();
+    final recipientPayloads = recipients.items
+        .map((recipient) => recipient.accountProfileId.trim())
+        .where((accountProfileId) => accountProfileId.isNotEmpty)
+        .map(
+          (accountProfileId) => InviteSendRecipientRequest(
+            receiverAccountProfileId: accountProfileId,
+          ),
+        )
+        .toList(growable: false);
+    if (recipientPayloads.isEmpty) {
+      InviteFlowDebugLogger.logReasonWithCount(
+        'invites.send.repository.skipped',
+        traceId: traceId,
+        reason: 'no_recipient_account_profiles',
+        countField: 'recipient_count',
+        count: recipients.items.length,
+      );
+      return;
+    }
+
+    final hasMessage =
+        normalizedMessage != null && normalizedMessage.isNotEmpty;
+    InviteFlowDebugLogger.logInviteSendRequest(
+      traceId: traceId,
+      recipientCount: recipientPayloads.length,
+      hasMessage: hasMessage,
+      messageLength: hasMessage ? normalizedMessage.length : 0,
+    );
+
+    final response = await _backend.sendInvites(
+      InviteSendRequest(
+        targetRef: InviteTargetRefRequest(
+          eventId: eventId.value,
+          occurrenceId: normalizedOccurrenceId,
+        ),
+        recipients: recipientPayloads,
+        message: normalizedMessage,
+      ),
+    );
+
+    final acknowledgedRecipientIds = <String>{
+      ..._parseRecipientIds(response['created']),
+      ..._parseRecipientIds(response['already_invited']),
+    };
+
+    if (acknowledgedRecipientIds.isEmpty) {
+      InviteFlowDebugLogger.logCount(
+        'invites.send.repository.acknowledged_none',
+        traceId: traceId,
+        field: 'acknowledged_count',
+        count: 0,
+      );
+      return;
+    }
+
+    final currentByOccurrence = sentInvitesByOccurrenceStreamValue.value;
+    final occurrenceKey = invitesRepoString(
+      normalizedOccurrenceId,
+      defaultValue: '',
+      isRequired: true,
+    );
+    final existing = List<SentInviteStatus>.from(
+      currentByOccurrence[occurrenceKey] ?? const [],
+    );
+    final existingByRecipient = <String, SentInviteStatus>{
+      for (final invite in existing) _sentInviteStatusKey(invite): invite,
+    };
+    final now = _now();
+
+    for (final recipient in recipients.items) {
+      final accountProfileId = recipient.accountProfileId.trim();
+      final acknowledged =
+          acknowledgedRecipientIds.contains(recipient.id) ||
+          (accountProfileId.isNotEmpty &&
+              acknowledgedRecipientIds.contains(accountProfileId));
+      if (!acknowledged) {
+        continue;
+      }
+      final recipientKey = _sentInviteRecipientKey(
+        userId: recipient.id,
+        accountProfileId: accountProfileId,
+      );
+      existingByRecipient[recipientKey] = SentInviteStatus(
+        friend: recipient,
+        status: InviteStatus.pending,
+        sentAtValue:
+            existingByRecipient[recipientKey]?.sentAtValue ??
+            (DateTimeValue()..parse(now.toIso8601String())),
+        respondedAtValue: existingByRecipient[recipientKey]?.respondedAtValue,
+      );
+    }
+
+    sentInvitesByOccurrenceStreamValue.addValue({
+      ...currentByOccurrence,
+      occurrenceKey: existingByRecipient.values.toList(growable: false),
+    });
+    InviteFlowDebugLogger.logInviteSendStateUpdated(
+      traceId: traceId,
+      recipientCount: recipientPayloads.length,
+      acknowledgedCount: acknowledgedRecipientIds.length,
+    );
+  }
+
+  @override
+  Future<List<SentInviteStatus>> refreshSentInvitesForOccurrence({
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? eventId,
+    Iterable<InvitesRepositoryContractPrimString> recipientAccountProfileIds =
+        const <InvitesRepositoryContractPrimString>[],
+  }) async {
+    final normalizedOccurrenceId = occurrenceId.value.trim();
+    if (normalizedOccurrenceId.isEmpty) {
+      return const <SentInviteStatus>[];
+    }
+
+    final normalizedEventId = eventId?.value.trim();
+    final normalizedRecipientIds = recipientAccountProfileIds
+        .map((value) => value.value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    final refreshKey = _sentStatusRefreshKey(
+      occurrenceId: normalizedOccurrenceId,
+      recipientAccountProfileIds: normalizedRecipientIds,
+    );
+    final activeRefresh = _activeSentStatusRefreshes[refreshKey];
+    if (activeRefresh != null) {
+      return activeRefresh;
+    }
+
+    late final Future<List<SentInviteStatus>> refresh;
+    refresh =
+        _fetchAndStoreSentInvitesForOccurrence(
+          occurrenceId: normalizedOccurrenceId,
+          eventId: normalizedEventId,
+          recipientAccountProfileIds: normalizedRecipientIds,
+        ).whenComplete(() {
+          if (identical(_activeSentStatusRefreshes[refreshKey], refresh)) {
+            _activeSentStatusRefreshes.remove(refreshKey);
+          }
+        });
+    _activeSentStatusRefreshes[refreshKey] = refresh;
+    return refresh;
+  }
+
+  Future<List<SentInviteStatus>> _fetchAndStoreSentInvitesForOccurrence({
+    required String occurrenceId,
+    required String? eventId,
+    required List<String> recipientAccountProfileIds,
+  }) async {
+    final response = await _backend.fetchSentInviteStatuses(
+      InviteSentStatusesRequest(
+        occurrenceId: occurrenceId,
+        eventId: eventId == null || eventId.isEmpty ? null : eventId,
+        recipientAccountProfileIds: recipientAccountProfileIds,
+      ),
+    );
+    final statuses = _responseDecoder.decodeSentInviteStatuses(
+      _responseDecoder.itemsPayload(response),
+    );
+    final occurrenceKey = invitesRepoString(
+      occurrenceId,
+      defaultValue: '',
+      isRequired: true,
+    );
+    final currentByOccurrence = sentInvitesByOccurrenceStreamValue.value;
+    final nextStatuses = recipientAccountProfileIds.isEmpty
+        ? statuses
+        : _replaceSentInviteStatusesForRecipients(
+            currentByOccurrence[occurrenceKey] ?? const <SentInviteStatus>[],
+            statuses,
+            recipientAccountProfileIds,
+          );
+    sentInvitesByOccurrenceStreamValue.addValue({
+      ...currentByOccurrence,
+      occurrenceKey: nextStatuses,
+    });
+    return nextStatuses;
+  }
+
+  @override
+  Future<SentInviteSummary> refreshSentInviteSummaryForOccurrence({
+    required InvitesRepositoryContractPrimString occurrenceId,
+    InvitesRepositoryContractPrimString? eventId,
+    InvitesRepositoryContractPrimInt? previewLimit,
+  }) async {
+    final normalizedOccurrenceId = occurrenceId.value.trim();
+    if (normalizedOccurrenceId.isEmpty) {
+      return SentInviteSummary.empty();
+    }
+
+    final refreshKey = normalizedOccurrenceId;
+    final activeRefresh = _activeSentSummaryRefreshes[refreshKey];
+    if (activeRefresh != null) {
+      return activeRefresh;
+    }
+
+    late final Future<SentInviteSummary> refresh;
+    refresh =
+        _fetchAndStoreSentInviteSummaryForOccurrence(
+          occurrenceId: normalizedOccurrenceId,
+          eventId: _normalizeNullable(eventId?.value),
+          previewLimit: previewLimit?.value ?? 5,
+        ).whenComplete(() {
+          if (identical(_activeSentSummaryRefreshes[refreshKey], refresh)) {
+            _activeSentSummaryRefreshes.remove(refreshKey);
+          }
+        });
+    _activeSentSummaryRefreshes[refreshKey] = refresh;
+    return refresh;
+  }
+
+  Future<SentInviteSummary> _fetchAndStoreSentInviteSummaryForOccurrence({
+    required String occurrenceId,
+    required String? eventId,
+    required int previewLimit,
+  }) async {
+    final response = await _backend.fetchSentInviteSummary(
+      InviteSentSummaryRequest(
+        occurrenceId: occurrenceId,
+        eventId: eventId,
+        previewLimit: previewLimit,
+      ),
+    );
+    final summary = _responseDecoder.decodeSentInviteSummary(
+      _responseDecoder.dataPayload(response),
+    );
+    final occurrenceKey = invitesRepoString(
+      occurrenceId,
+      defaultValue: '',
+      isRequired: true,
+    );
+    sentInviteSummariesByOccurrenceStreamValue.addValue({
+      ...sentInviteSummariesByOccurrenceStreamValue.value,
+      occurrenceKey: summary,
+    });
+    _storeSentInviteStatuses(
+      occurrenceId: occurrenceId,
+      statuses: summary.preview,
+      merge: true,
+    );
+    return summary;
+  }
+
+  void _storeSentInviteStatuses({
+    required String occurrenceId,
+    required List<SentInviteStatus> statuses,
+    required bool merge,
+  }) {
+    if (statuses.isEmpty) {
+      return;
+    }
+    final occurrenceKey = invitesRepoString(
+      occurrenceId,
+      defaultValue: '',
+      isRequired: true,
+    );
+    final currentByOccurrence = sentInvitesByOccurrenceStreamValue.value;
+    final nextStatuses = merge
+        ? _mergeSentInviteStatuses(
+            currentByOccurrence[occurrenceKey] ?? const <SentInviteStatus>[],
+            statuses,
+          )
+        : statuses;
+    sentInvitesByOccurrenceStreamValue.addValue({
+      ...currentByOccurrence,
+      occurrenceKey: nextStatuses,
+    });
+  }
+
+  @override
+  Future<List<SentInviteStatus>> getSentInvitesForOccurrence(
+    InvitesRepositoryContractPrimString occurrenceId,
+  ) async {
+    return List<SentInviteStatus>.from(
+      sentInvitesByOccurrenceStreamValue.value[occurrenceId] ??
+          const <SentInviteStatus>[],
+      growable: false,
+    );
+  }
+
+  @override
+  void applyInvitePushPayload(Object? payload) {
+    final current = pendingInvitesStreamValue.value;
+    final next = mergeInvitePayload(current: current, payload: payload);
+    if (!identical(current, next)) {
+      pendingInvitesStreamValue.addValue(next);
+    }
+    _applyAcceptedSentInvitePushPayload(payload);
+  }
+
+  void _applyAcceptedSentInvitePushPayload(Object? rawPayload) {
+    final payload = _pushPayloadDecoder.decodeAcceptedSentInvite(rawPayload);
+    if (payload == null) {
+      return;
+    }
+
+    final occurrenceKey = invitesRepoString(
+      payload.occurrenceId,
+      defaultValue: '',
+      isRequired: true,
+    );
+    final currentByOccurrence = sentInvitesByOccurrenceStreamValue.value;
+    final existing =
+        currentByOccurrence[occurrenceKey] ?? const <SentInviteStatus>[];
+    final next = List<SentInviteStatus>.from(existing);
+    final existingIndex = next.indexWhere(
+      (status) => _matchesSentInviteRecipient(
+        status,
+        accountProfileId: payload.accountProfileId,
+      ),
+    );
+
+    if (existingIndex == -1 && payload.accountProfileId == null) {
+      return;
+    }
+
+    final accepted = _acceptedSentInviteStatusFromPush(
+      existing: existingIndex == -1 ? null : next[existingIndex],
+      accountProfileId: payload.accountProfileId,
+      userId: payload.userId,
+      displayName: payload.displayName,
+      avatarUrl: payload.avatarUrl,
+    );
+
+    if (existingIndex == -1) {
+      next.add(accepted);
+    } else {
+      next[existingIndex] = accepted;
+    }
+
+    sentInvitesByOccurrenceStreamValue.addValue({
+      ...currentByOccurrence,
+      occurrenceKey: List<SentInviteStatus>.unmodifiable(next),
+    });
+  }
+
+  SentInviteStatus _acceptedSentInviteStatusFromPush({
+    required SentInviteStatus? existing,
+    required String? accountProfileId,
+    required String? userId,
+    required String? displayName,
+    required String? avatarUrl,
+  }) {
+    final nowValue = DateTimeValue()..parse(_now().toIso8601String());
+    final avatarValue = UserAvatarValue();
+    if (avatarUrl != null) {
+      avatarValue.parse(avatarUrl);
+    }
+    final friend =
+        existing?.friend ??
+        EventFriendResume(
+          idValue: UserIdValue()
+            ..parse(userId ?? accountProfileId ?? 'unknown'),
+          accountProfileIdValue: InviteAccountProfileIdValue()
+            ..parse(accountProfileId ?? ''),
+          displayNameValue: UserDisplayNameValue(
+            isRequired: false,
+            minLenght: null,
+          )..parse(displayName ?? ''),
+          avatarUrlValue: avatarValue,
+        );
+
+    return SentInviteStatus(
+      friend: friend,
+      status: InviteStatus.accepted,
+      sentAtValue: existing?.sentAtValue ?? nowValue,
+      respondedAtValue: existing?.respondedAtValue ?? nowValue,
+    );
+  }
+
+  bool _matchesSentInviteRecipient(
+    SentInviteStatus status, {
+    required String? accountProfileId,
+  }) {
+    final statusAccountProfileId = status.friend.accountProfileId.trim();
+    return accountProfileId != null &&
+        accountProfileId.isNotEmpty &&
+        statusAccountProfileId == accountProfileId;
+  }
+
+  List<SentInviteStatus> _mergeSentInviteStatuses(
+    List<SentInviteStatus> current,
+    List<SentInviteStatus> updates,
+  ) {
+    final mergedByRecipient = <String, SentInviteStatus>{
+      for (final status in current) _sentInviteStatusKey(status): status,
+    };
+    for (final status in updates) {
+      mergedByRecipient[_sentInviteStatusKey(status)] = status;
+    }
+    return List<SentInviteStatus>.unmodifiable(mergedByRecipient.values);
+  }
+
+  List<SentInviteStatus> _replaceSentInviteStatusesForRecipients(
+    List<SentInviteStatus> current,
+    List<SentInviteStatus> updates,
+    List<String> recipientAccountProfileIds,
+  ) {
+    final requestedKeys = recipientAccountProfileIds
+        .map((id) => _sentInviteRecipientKey(userId: '', accountProfileId: id))
+        .toSet();
+    final updatesByRecipient = <String, SentInviteStatus>{
+      for (final status in updates) _sentInviteStatusKey(status): status,
+    };
+    final consumedUpdateKeys = <String>{};
+    final next = <SentInviteStatus>[];
+
+    for (final status in current) {
+      final key = _sentInviteStatusKey(status);
+      if (!requestedKeys.contains(key)) {
+        next.add(status);
+        continue;
+      }
+
+      final update = updatesByRecipient[key];
+      if (update != null) {
+        next.add(update);
+        consumedUpdateKeys.add(key);
+      }
+    }
+
+    for (final entry in updatesByRecipient.entries) {
+      if (!consumedUpdateKeys.contains(entry.key)) {
+        next.add(entry.value);
+      }
+    }
+
+    return List<SentInviteStatus>.unmodifiable(next);
+  }
+
+  String _sentInviteStatusKey(SentInviteStatus status) {
+    return _sentInviteRecipientKey(
+      userId: status.friend.id,
+      accountProfileId: status.friend.accountProfileId,
+    );
+  }
+
+  String _sentInviteRecipientKey({
+    required String userId,
+    required String accountProfileId,
+  }) {
+    final normalizedAccountProfileId = accountProfileId.trim();
+    if (normalizedAccountProfileId.isNotEmpty) {
+      return 'account_profile:$normalizedAccountProfileId';
+    }
+    return 'user:${userId.trim()}';
+  }
+
+  String _sentStatusRefreshKey({
+    required String occurrenceId,
+    required List<String> recipientAccountProfileIds,
+  }) {
+    final normalizedRecipients = List<String>.from(recipientAccountProfileIds)
+      ..sort();
+    return sha256
+        .convert(
+          utf8.encode(
+            [
+              'occurrence=${occurrenceId.trim()}',
+              'recipients=${normalizedRecipients.join(',')}',
+            ].join('|'),
+          ),
+        )
+        .toString();
+  }
+
+  List<InviteContactImportItemRequest> _buildContactImportItems(
+    List<ContactModel> contacts, {
+    required String? regionCode,
+  }) {
+    final seen = <String>{};
+    final items = <InviteContactImportItemRequest>[];
+
+    for (final contact in contacts) {
+      for (final email in contact.emails) {
+        final normalized = email.value.trim().toLowerCase();
+        if (normalized.isEmpty) {
+          continue;
+        }
+        final hash = InviteContactImportHashes.contactHashes(
+          ContactModel(
+            idValue: contact.idValue,
+            displayNameValue: contact.displayNameValue,
+            emailValues: [email],
+          ),
+          regionCode: regionCode,
+        ).single;
+        final signature = 'email::$hash';
+        if (!seen.add(signature)) {
+          continue;
+        }
+        items.add(InviteContactImportItemRequest(type: 'email', hash: hash));
+      }
+
+      for (final phone in contact.phones) {
+        final phoneOnlyContact = ContactModel(
+          idValue: contact.idValue,
+          displayNameValue: contact.displayNameValue,
+          phoneValues: [phone],
+        );
+        for (final hash in InviteContactImportHashes.contactHashes(
+          phoneOnlyContact,
+          regionCode: regionCode,
+        )) {
+          final signature = 'phone::$hash';
+          if (!seen.add(signature)) {
+            continue;
+          }
+          items.add(InviteContactImportItemRequest(type: 'phone', hash: hash));
+        }
+      }
+    }
+
+    return items;
+  }
+
+  Future<String> _contactImportCacheKey({required String? regionCode}) async {
+    final userId = await _currentUserId();
+    final tenantScope = await _tenantCacheScope();
+    return sha256
+        .convert(
+          utf8.encode(
+            [
+              'tenant=${tenantScope ?? 'unknown'}',
+              'user=${userId ?? 'anonymous'}',
+              'region=${regionCode ?? ''}',
+            ].join('|'),
+          ),
+        )
+        .toString();
+  }
+
+  Future<String?> _tenantCacheScope() async {
+    final provider = _tenantCacheScopeProvider;
+    if (provider != null) {
+      final scoped = _normalizeNullable(await provider());
+      if (scoped != null) {
+        return scoped;
+      }
+    }
+
+    if (GetIt.I.isRegistered<AppData>()) {
+      final liveTenantId = _normalizeNullable(
+        GetIt.I.get<AppData>().tenantIdValue.value,
+      );
+      if (liveTenantId != null) {
+        return liveTenantId;
+      }
+    }
+
+    final persistedProvider = _persistedTenantCacheScopeProvider;
+    if (persistedProvider != null) {
+      return _normalizeNullable(await persistedProvider());
+    }
+
+    String? persistedTenantId;
+    try {
+      persistedTenantId = await _storage.read(key: _tenantIdStorageKey);
+    } on MissingPluginException {
+      persistedTenantId = null;
+    } on PlatformException {
+      persistedTenantId = null;
+    } catch (error, stackTrace) {
+      persistedTenantId = null;
+      debugPrint(
+        'InvitesRepository._tenantCacheScope storage read failed: '
+        '$error\n$stackTrace',
+      );
+    }
+
+    return _normalizeNullable(persistedTenantId);
+  }
+
+  Future<String?> _currentUserId() async {
+    final provider = _currentUserIdProvider;
+    if (provider != null) {
+      return _normalizeNullable(await provider());
+    }
+
+    final authRepository = _resolvedAuthRepository;
+    if (authRepository == null) {
+      return null;
+    }
+
+    return _normalizeNullable(await authRepository.getUserId());
+  }
+
+  String _contactImportSignature(List<InviteContactImportItemRequest> items) {
+    final normalized =
+        items.map((item) => '${item.type}:${item.hash}').toList(growable: false)
+          ..sort();
+    return sha256.convert(utf8.encode(normalized.join('|'))).toString();
+  }
+
+  String? _normalizeNullable(String? value) {
+    final normalized = value?.trim();
+    if (normalized == null || normalized.isEmpty) {
+      return null;
+    }
+    return normalized;
+  }
+
+  List<String> _parseRecipientIds(Object? raw) {
+    return _responseDecoder.decodeRecipientIds(raw);
+  }
+
+  Map<String, int> _parseIntMap(Object? raw) {
+    return _responseDecoder.decodeIntMap(raw);
+  }
+
+  DateTime? _parseDateTime(Object? raw) {
+    final value = raw?.toString();
+    if (value == null || value.trim().isEmpty) {
+      return null;
+    }
+    return DateTime.tryParse(value);
+  }
+
+  String _stringOrEmpty(Object? raw) => raw?.toString() ?? '';
+
+  String? _stringOrNull(Object? raw) {
+    final value = raw?.toString().trim();
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    return value;
+  }
+
+  String _resolveAttendancePolicy(Object? rawValue) {
+    final value = _stringOrEmpty(rawValue);
+    if (value.isEmpty) {
+      return 'free_confirmation_only';
+    }
+    return value;
+  }
+
+  InviteIdValue _buildInviteIdValue(String value) {
+    final inviteIdValue = InviteIdValue()..parse(value);
+    return inviteIdValue;
+  }
+
+  InviteIdValue? _buildInviteIdValueOrNull(Object? rawValue) {
+    final value = _stringOrEmpty(rawValue);
+    if (value.isEmpty) {
+      return null;
+    }
+    return _buildInviteIdValue(value);
+  }
+
+  InviteMaterializationStatusValue _buildMaterializationStatusValue(
+    String value,
+  ) {
+    final statusValue = InviteMaterializationStatusValue()..parse(value);
+    return statusValue;
+  }
+
+  InviteCreditedAcceptanceValue _buildCreditedAcceptanceValue(bool value) {
+    final creditedValue = InviteCreditedAcceptanceValue()
+      ..parse(value.toString());
+    return creditedValue;
+  }
+
+  InviteAttendancePolicyValue _buildAttendancePolicyValue(String value) {
+    final attendancePolicyValue = InviteAttendancePolicyValue()..parse(value);
+    return attendancePolicyValue;
+  }
+
+  InviteAcceptedAtValue _buildAcceptedAtValue(DateTime? value) {
+    final acceptedAtValue = InviteAcceptedAtValue()
+      ..parse(value?.toIso8601String());
+    return acceptedAtValue;
+  }
+
+  TenantIdValue? _buildTenantIdValueOrNull(String? value) {
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    final tenantIdValue = TenantIdValue()..parse(value);
+    return tenantIdValue;
+  }
+
+  InviteMessageValue? _buildInviteMessageValueOrNull(String? value) {
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    final messageValue = InviteMessageValue()..parse(value);
+    return messageValue;
+  }
+
+  InviteEventIdValue _buildInviteEventIdValue(String value) {
+    final eventIdValue = InviteEventIdValue()..parse(value);
+    return eventIdValue;
+  }
+
+  InviteOccurrenceIdValue _buildInviteOccurrenceIdValue(String value) {
+    final occurrenceIdValue = InviteOccurrenceIdValue()..parse(value);
+    return occurrenceIdValue;
+  }
+
+  Future<_ImportedContactMatchCacheSnapshot?>
+  _resolveFreshImportedContactMatchSnapshot(InviteContacts contacts) async {
+    final importItems = _buildContactImportItems(
+      contacts.items,
+      regionCode: contacts.regionCode,
+    );
+    if (importItems.isEmpty) {
+      return null;
+    }
+
+    final cacheKey = await _contactImportCacheKey(
+      regionCode: contacts.regionCode,
+    );
+    final signature = _contactImportSignature(importItems);
+    final cachedImport = await _contactImportCache.read(cacheKey);
+    final isFresh =
+        !contacts.forceImport &&
+        cachedImport != null &&
+        cachedImport.signature == signature &&
+        cachedImport.isFresh(_now(), _contactImportCacheTtl);
+
+    return _ImportedContactMatchCacheSnapshot(
+      cacheKey: cacheKey,
+      signature: signature,
+      importItems: importItems,
+      isFresh: isFresh,
+      matches: isFresh
+          ? _cachedImportedMatches(cachedImport)
+          : const <InviteContactMatch>[],
+    );
+  }
+
+  List<InviteContactMatch> _cachedImportedMatches(
+    InviteContactImportCacheEntry? cachedImport,
+  ) {
+    if (cachedImport != null && cachedImport.matches.isNotEmpty) {
+      return cachedImport.matches
+          .map((match) => match.toDomain())
+          .toList(growable: false);
+    }
+
+    final inMemory = importedContactMatchesStreamValue.value;
+    if (inMemory != null) {
+      return inMemory;
+    }
+
+    if (cachedImport == null) {
+      return const <InviteContactMatch>[];
+    }
+    return const <InviteContactMatch>[];
+  }
+}
+
+class _ImportedContactMatchCacheSnapshot {
+  const _ImportedContactMatchCacheSnapshot({
+    required this.cacheKey,
+    required this.signature,
+    required this.importItems,
+    required this.isFresh,
+    required this.matches,
+  });
+
+  final String cacheKey;
+  final String signature;
+  final List<InviteContactImportItemRequest> importItems;
+  final bool isFresh;
+  final List<InviteContactMatch> matches;
+}

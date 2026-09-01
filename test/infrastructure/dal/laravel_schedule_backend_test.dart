@@ -1,0 +1,532 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/auth_repository_contract_values.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/schedule_backend/laravel_schedule_backend.dart';
+import 'package:festou_app/infrastructure/services/sse/sse_client.dart';
+import 'package:festou_app/infrastructure/services/sse/sse_message.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    await GetIt.I.reset();
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      _FakeAuthRepository(),
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test(
+      'watchEventsStream serializes taxonomy as array fields and forwards auth',
+      () async {
+    final sseClient = _RecordingSseClient();
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = _NoopAdapter(),
+      sseClient: sseClient,
+    );
+
+    await backend
+        .watchEventsStream(
+      showPastOnly: true,
+      confirmedOnly: true,
+      categories: const ['music'],
+      taxonomy: const [
+        {'type': 'genre', 'value': 'jazz'},
+      ],
+      occurrenceIds: const ['507f1f77bcf86cd799439091'],
+      lastEventId: 'cursor-1',
+    )
+        .drain<void>();
+
+    final uri = sseClient.lastUri;
+    expect(uri, isNotNull);
+    expect(uri!.path, '/api/v1/events/stream');
+    expect(uri.queryParameters['past_only'], '1');
+    expect(uri.queryParameters['confirmed_only'], '1');
+    expect(uri.queryParametersAll['categories[]'], ['music']);
+    expect(uri.queryParameters['taxonomy[0][type]'], 'genre');
+    expect(uri.queryParameters['taxonomy[0][value]'], 'jazz');
+    expect(
+      uri.queryParametersAll['occurrence_ids[]'],
+      ['507f1f77bcf86cd799439091'],
+    );
+    expect(sseClient.lastEventId, 'cursor-1');
+    expect(sseClient.lastHeaders?['Authorization'], 'Bearer test-token');
+  });
+
+  test(
+      'watchEventsStream revalidates persisted token before tenant-public event stream requests',
+      () async {
+    final authRepository = GetIt.I.get<AuthRepositoryContract<UserContract>>()
+        as _FakeAuthRepository;
+    authRepository.setUserToken(authRepoString('stale-token'));
+    authRepository.tokenAfterInit = 'refreshed-token';
+    authRepository.refreshTokenOnInit = true;
+
+    final sseClient = _RecordingSseClient();
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = _NoopAdapter(),
+      sseClient: sseClient,
+    );
+
+    await backend.watchEventsStream().drain<void>();
+
+    expect(authRepository.ensureTenantPublicIdentityReadyCallCount, 1);
+    expect(authRepository.initCallCount, 0);
+    expect(sseClient.lastHeaders?['Authorization'], 'Bearer refreshed-token');
+  });
+
+  test('fetchEventsPage fails closed when auth repository is missing', () async {
+    await GetIt.I.reset();
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await expectLater(
+      () => backend.fetchEventsPage(page: 1, showPastOnly: false),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('require a registered AuthRepositoryContract'),
+        ),
+      ),
+    );
+    expect(adapter.lastOptions, isNull);
+  });
+
+  test('watchEventsStream forwards search and omits geo params when searching',
+      () async {
+    final sseClient = _RecordingSseClient();
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = _NoopAdapter(),
+      sseClient: sseClient,
+    );
+
+    await backend
+        .watchEventsStream(
+      searchQuery: 'Sola',
+      originLat: -20.0,
+      originLng: -40.0,
+      maxDistanceMeters: 5000,
+    )
+        .drain<void>();
+
+    final uri = sseClient.lastUri;
+    expect(uri, isNotNull);
+    expect(uri!.queryParameters['search'], 'Sola');
+    expect(uri.queryParameters.containsKey('origin_lat'), isFalse);
+    expect(uri.queryParameters.containsKey('origin_lng'), isFalse);
+    expect(uri.queryParameters.containsKey('max_distance_meters'), isFalse);
+  });
+
+  test('fetchEventsPage omits page_size by default for public agenda batches',
+      () async {
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 2,
+      showPastOnly: false,
+      originLat: -20.0,
+      originLng: -40.0,
+      maxDistanceMeters: 50000,
+    );
+
+    final params = adapter.lastOptions?.queryParameters;
+    expect(params?['page'], 2);
+    expect(params?.containsKey('page_size'), isFalse);
+    expect(params?['origin_lat'], -20.0);
+    expect(params?['origin_lng'], -40.0);
+    expect(params?['max_distance_meters'], 50000);
+  });
+
+  test('fetchEventsPage forwards search and omits geo params when searching',
+      () async {
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+      searchQuery: 'Sola',
+      originLat: -20.0,
+      originLng: -40.0,
+      maxDistanceMeters: 5000,
+    );
+
+    final options = adapter.lastOptions;
+    expect(options, isNotNull);
+    final params = options!.queryParameters;
+    expect(params.containsKey('page_size'), isFalse);
+    expect(params['search'], 'Sola');
+    expect(params.containsKey('origin_lat'), isFalse);
+    expect(params.containsKey('origin_lng'), isFalse);
+    expect(params.containsKey('max_distance_meters'), isFalse);
+  });
+
+  test('fetchEventsPage serializes category and taxonomy query filters',
+      () async {
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+      categories: const ['show'],
+      taxonomy: const [
+        {'type': 'music_styles', 'value': 'rock'},
+      ],
+    );
+
+    final params = adapter.lastOptions?.queryParameters;
+    expect(params?['categories'], const ['show']);
+    expect(params?['taxonomy[0][type]'], 'music_styles');
+    expect(params?['taxonomy[0][value]'], 'rock');
+  });
+
+  test('fetchEventsPage serializes occurrence id filters', () async {
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+      occurrenceIds: const [
+        '507f1f77bcf86cd799439091',
+        '507f1f77bcf86cd799439092',
+      ],
+    );
+
+    final params = adapter.lastOptions?.queryParameters;
+    expect(params?['occurrence_ids'], [
+      '507f1f77bcf86cd799439091',
+      '507f1f77bcf86cd799439092',
+    ]);
+  });
+
+  test('fetchEventsPage bootstraps auth when token is empty', () async {
+    final authRepository = GetIt.I.get<AuthRepositoryContract<UserContract>>()
+        as _FakeAuthRepository;
+    authRepository.setUserToken(authRepoString(''));
+
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+    );
+
+    expect(authRepository.ensureTenantPublicIdentityReadyCallCount, 1);
+    expect(authRepository.initCallCount, 0);
+    expect(
+      adapter.lastOptions?.queryParameters.containsKey('page_size'),
+      isFalse,
+    );
+    final headers = adapter.lastOptions?.headers ?? const <String, dynamic>{};
+    expect(headers['Authorization'], 'Bearer refreshed-token');
+  });
+
+  test(
+      'fetchEventsPage revalidates persisted token before tenant-public agenda requests',
+      () async {
+    final authRepository = GetIt.I.get<AuthRepositoryContract<UserContract>>()
+        as _FakeAuthRepository;
+    authRepository.setUserToken(authRepoString('stale-token'));
+    authRepository.tokenAfterInit = 'refreshed-token';
+    authRepository.refreshTokenOnInit = true;
+
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+    );
+
+    expect(authRepository.ensureTenantPublicIdentityReadyCallCount, 1);
+    expect(authRepository.initCallCount, 0);
+    final headers = adapter.lastOptions?.headers ?? const <String, dynamic>{};
+    expect(headers['Authorization'], 'Bearer refreshed-token');
+  });
+
+  test('fetchEventsPage forwards live_now_only query parameter', () async {
+    final adapter = _NoopAdapter(
+      responseData: const {
+        'data': {
+          'items': [],
+          'has_more': false,
+        },
+      },
+    );
+    final backend = LaravelScheduleBackend(
+      dio: Dio()..httpClientAdapter = adapter,
+      sseClient: _RecordingSseClient(),
+    );
+
+    await backend.fetchEventsPage(
+      page: 1,
+      showPastOnly: false,
+      liveNowOnly: true,
+    );
+
+    final options = adapter.lastOptions;
+    expect(options, isNotNull);
+    expect(options!.queryParameters['live_now_only'], 1);
+    expect(options.queryParameters.containsKey('page_size'), isFalse);
+    expect(options.queryParameters.containsKey('past_only'), isFalse);
+  });
+}
+
+class _RecordingSseClient implements SseClient {
+  Uri? lastUri;
+  Map<String, String>? lastHeaders;
+  String? lastEventId;
+
+  @override
+  Stream<SseMessage> connect(
+    Uri uri, {
+    Map<String, String>? headers,
+    String? lastEventId,
+  }) {
+    lastUri = uri;
+    lastHeaders = headers;
+    this.lastEventId = lastEventId;
+    return const Stream<SseMessage>.empty();
+  }
+}
+
+class _NoopAdapter implements HttpClientAdapter {
+  _NoopAdapter({
+    this.responseData = const <String, Object?>{},
+  });
+
+  final Map<String, Object?> responseData;
+  RequestOptions? lastOptions;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    lastOptions = options;
+    return ResponseBody.fromString(
+      jsonEncode(responseData),
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract<UserContract> {
+  String _token = 'test-token';
+  int initCallCount = 0;
+  int ensureTenantPublicIdentityReadyCallCount = 0;
+  bool refreshTokenOnInit = false;
+  String tokenAfterInit = 'refreshed-token';
+
+  @override
+  BackendContract get backend => throw UnimplementedError();
+
+  @override
+  String get userToken => _token;
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {
+    _token = token?.value ?? '';
+  }
+
+  @override
+  Future<String> getDeviceId() async => 'device-1';
+
+  @override
+  Future<String?> getUserId() async => 'user-1';
+
+  @override
+  bool get isUserLoggedIn => true;
+
+  @override
+  bool get isAuthorized => true;
+
+  @override
+  Future<void> init() async {
+    initCallCount += 1;
+    if (refreshTokenOnInit || _token.trim().isEmpty) {
+      _token = tokenAfterInit;
+    }
+  }
+
+  @override
+  Future<void> ensureTenantPublicIdentityReady() async {
+    ensureTenantPublicIdentityReadyCallCount += 1;
+    if (refreshTokenOnInit || _token.trim().isEmpty) {
+      _token = tokenAfterInit;
+    }
+  }
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(AuthRepositoryContractParamString email,
+      AuthRepositoryContractParamString password) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+      AuthRepositoryContractParamString email,
+      AuthRepositoryContractParamString codigoEnviado) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> createNewPassword(AuthRepositoryContractParamString newPassword,
+      AuthRepositoryContractParamString confirmPassword) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+      AuthRepositoryContractParamString email) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+AppData _buildAppData() {
+  final remoteData = {
+    'name': 'Tenant Test',
+    'type': 'tenant',
+    'main_domain': 'https://tenant.test',
+    'profile_types': [
+      {
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': [],
+        'capabilities': {
+          'is_favoritable': true,
+          'is_poi_enabled': false,
+        },
+      },
+    ],
+    'domains': ['https://tenant.test'],
+    'app_domains': const [],
+    'theme_data_settings': {
+      'brightness_default': 'light',
+      'primary_seed_color': '#FFFFFF',
+      'secondary_seed_color': '#000000',
+    },
+    'main_color': '#FFFFFF',
+    'tenant_id': 'tenant-1',
+    'telemetry': const {'trackers': []},
+    'telemetry_context': const {'location_freshness_minutes': 5},
+    'firebase': null,
+    'push': null,
+  };
+  final localInfo = {
+    'platformType': PlatformTypeValue()..parse('mobile'),
+    'hostname': 'tenant.test',
+    'href': 'https://tenant.test',
+    'port': null,
+    'device': 'test-device',
+  };
+  return buildAppDataFromInitialization(
+      remoteData: remoteData, localInfo: localInfo);
+}

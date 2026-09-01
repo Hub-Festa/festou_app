@@ -1,0 +1,489 @@
+{
+  "fontFamily": "FestouIcons",
+  "legacyFontFamilies": [
+    "Festou"
+  ],
+  "sourceIcomoonConfig": "assets/fonts/festou_icons_source/icomoon/festou.icomoon.json",
+  "sourceGeneratedDart": "assets/fonts/festou_icons_source/icomoon/festou_icons_icomoon.dart",
+  "sourceTtf": "assets/fonts/festou_icons_source/icomoon/FestouIcons.ttf",
+  "sourceOtf": "assets/fonts/festou_icons_source/icomoon/FestouIcons.otf",
+  "runtimeTtf": "assets/fonts/FestouIcons-746efb9c.ttf",
+  "glyphs": [
+    {
+      "name": "hot-air-balloon",
+      "codePoint": 61440
+    },
+    {
+      "name": "air-balloon",
+      "codePoint": 61441
+    },
+    {
+      "name": "mountain1",
+      "codePoint": 61503
+    },
+    {
+      "name": "mountain2",
+      "codePoint": 61504
+    },
+    {
+      "name": "mountain3",
+      "codePoint": 61505
+    },
+    {
+      "name": "mountains1",
+      "codePoint": 61506
+    },
+    {
+      "name": "mountains2",
+      "codePoint": 61507
+    },
+    {
+      "name": "beach",
+      "codePoint": 61508
+    },
+    {
+      "name": "badminton",
+      "codePoint": 61509
+    },
+    {
+      "name": "surfing",
+      "codePoint": 61510
+    },
+    {
+      "name": "kiosk1",
+      "codePoint": 61511
+    },
+    {
+      "name": "lounge-chair",
+      "codePoint": 61512
+    },
+    {
+      "name": "food",
+      "codePoint": 61513
+    },
+    {
+      "name": "shrimp",
+      "codePoint": 61514
+    },
+    {
+      "name": "microphone1",
+      "codePoint": 61515
+    },
+    {
+      "name": "event1",
+      "codePoint": 61516
+    },
+    {
+      "name": "ribbon-cutting",
+      "codePoint": 61517
+    },
+    {
+      "name": "promo1",
+      "codePoint": 61518
+    },
+    {
+      "name": "discount1",
+      "codePoint": 61519
+    },
+    {
+      "name": "pray",
+      "codePoint": 61520
+    },
+    {
+      "name": "islam",
+      "codePoint": 61521
+    },
+    {
+      "name": "cross",
+      "codePoint": 61522
+    },
+    {
+      "name": "hinduist",
+      "codePoint": 61523
+    },
+    {
+      "name": "therapy",
+      "codePoint": 61524
+    },
+    {
+      "name": "massage-therapist",
+      "codePoint": 61525
+    },
+    {
+      "name": "exercise",
+      "codePoint": 61526
+    },
+    {
+      "name": "podcast",
+      "codePoint": 61527
+    },
+    {
+      "name": "adventure-game",
+      "codePoint": 61528
+    },
+    {
+      "name": "sign-post",
+      "codePoint": 61529
+    },
+    {
+      "name": "motorbike",
+      "codePoint": 61530
+    },
+    {
+      "name": "take-away",
+      "codePoint": 61531
+    },
+    {
+      "name": "martini",
+      "codePoint": 61532
+    },
+    {
+      "name": "hot-coffee",
+      "codePoint": 61533
+    },
+    {
+      "name": "marketing",
+      "codePoint": 61534
+    },
+    {
+      "name": "marketing1",
+      "codePoint": 61535
+    },
+    {
+      "name": "fire",
+      "codePoint": 61536
+    },
+    {
+      "name": "whale",
+      "codePoint": 61537
+    },
+    {
+      "name": "whale1",
+      "codePoint": 61538
+    },
+    {
+      "name": "dolphin",
+      "codePoint": 61539
+    },
+    {
+      "name": "bus",
+      "codePoint": 61540
+    },
+    {
+      "name": "bin",
+      "codePoint": 61541
+    },
+    {
+      "name": "drug1",
+      "codePoint": 61542
+    },
+    {
+      "name": "medical-cross",
+      "codePoint": 61543
+    },
+    {
+      "name": "gas-station",
+      "codePoint": 61544
+    },
+    {
+      "name": "shopping-cart",
+      "codePoint": 61545
+    },
+    {
+      "name": "coffee-cup",
+      "codePoint": 61546
+    },
+    {
+      "name": "dj",
+      "codePoint": 61547
+    },
+    {
+      "name": "destination1",
+      "codePoint": 61548
+    },
+    {
+      "name": "airplane1",
+      "codePoint": 61549
+    },
+    {
+      "name": "maps",
+      "codePoint": 61550
+    },
+    {
+      "name": "location",
+      "codePoint": 61551
+    },
+    {
+      "name": "destination2",
+      "codePoint": 61552
+    },
+    {
+      "name": "hiker",
+      "codePoint": 61553
+    },
+    {
+      "name": "hiking",
+      "codePoint": 61554
+    },
+    {
+      "name": "map",
+      "codePoint": 61555
+    },
+    {
+      "name": "delivery",
+      "codePoint": 61556
+    },
+    {
+      "name": "travel",
+      "codePoint": 61557
+    },
+    {
+      "name": "mountain",
+      "codePoint": 61558
+    },
+    {
+      "name": "clapperboard",
+      "codePoint": 61500
+    },
+    {
+      "name": "whatsapp",
+      "codePoint": 61501
+    },
+    {
+      "name": "running",
+      "codePoint": 61502
+    },
+    {
+      "name": "invitation_outlined",
+      "codePoint": 61497
+    },
+    {
+      "name": "invitation",
+      "codePoint": 61498
+    },
+    {
+      "name": "appointment",
+      "codePoint": 61499
+    },
+    {
+      "name": "kiosk",
+      "codePoint": 61495
+    },
+    {
+      "name": "ice-cream",
+      "codePoint": 61496
+    },
+    {
+      "name": "coupon",
+      "codePoint": 61467
+    },
+    {
+      "name": "promo",
+      "codePoint": 61468
+    },
+    {
+      "name": "discount",
+      "codePoint": 61469
+    },
+    {
+      "name": "lunch",
+      "codePoint": 61470
+    },
+    {
+      "name": "restaurant",
+      "codePoint": 61471
+    },
+    {
+      "name": "museum",
+      "codePoint": 61472
+    },
+    {
+      "name": "bank",
+      "codePoint": 61473
+    },
+    {
+      "name": "church",
+      "codePoint": 61474
+    },
+    {
+      "name": "musical-note",
+      "codePoint": 61475
+    },
+    {
+      "name": "vinyl",
+      "codePoint": 61476
+    },
+    {
+      "name": "beach-umbrella",
+      "codePoint": 61477
+    },
+    {
+      "name": "hotel",
+      "codePoint": 61478
+    },
+    {
+      "name": "nature",
+      "codePoint": 61479
+    },
+    {
+      "name": "wave",
+      "codePoint": 61480
+    },
+    {
+      "name": "sunset",
+      "codePoint": 61481
+    },
+    {
+      "name": "wave1",
+      "codePoint": 61482
+    },
+    {
+      "name": "paddling",
+      "codePoint": 61483
+    },
+    {
+      "name": "swimmer",
+      "codePoint": 61484
+    },
+    {
+      "name": "drug",
+      "codePoint": 61485
+    },
+    {
+      "name": "pharmacy",
+      "codePoint": 61486
+    },
+    {
+      "name": "first-aid-kit",
+      "codePoint": 61487
+    },
+    {
+      "name": "hospital",
+      "codePoint": 61488
+    },
+    {
+      "name": "grocery-store",
+      "codePoint": 61489
+    },
+    {
+      "name": "shopping-bag",
+      "codePoint": 61490
+    },
+    {
+      "name": "event",
+      "codePoint": 61491
+    },
+    {
+      "name": "local",
+      "codePoint": 61492
+    },
+    {
+      "name": "ticket",
+      "codePoint": 61493
+    },
+    {
+      "name": "ticket1",
+      "codePoint": 61494
+    },
+    {
+      "name": "mountains",
+      "codePoint": 61457
+    },
+    {
+      "name": "destination",
+      "codePoint": 61458
+    },
+    {
+      "name": "chef",
+      "codePoint": 61459
+    },
+    {
+      "name": "chef1",
+      "codePoint": 61460
+    },
+    {
+      "name": "united",
+      "codePoint": 61461
+    },
+    {
+      "name": "theater",
+      "codePoint": 61462
+    },
+    {
+      "name": "handshake",
+      "codePoint": 61463
+    },
+    {
+      "name": "open-book",
+      "codePoint": 61464
+    },
+    {
+      "name": "luggage",
+      "codePoint": 61465
+    },
+    {
+      "name": "airplane",
+      "codePoint": 61466
+    },
+    {
+      "name": "group",
+      "codePoint": 61443
+    },
+    {
+      "name": "small-talk",
+      "codePoint": 61444
+    },
+    {
+      "name": "creative-team",
+      "codePoint": 61445
+    },
+    {
+      "name": "presentation",
+      "codePoint": 61446
+    },
+    {
+      "name": "workshop",
+      "codePoint": 61447
+    },
+    {
+      "name": "reading-book",
+      "codePoint": 61448
+    },
+    {
+      "name": "guitar-instrument",
+      "codePoint": 61449
+    },
+    {
+      "name": "live-music",
+      "codePoint": 61450
+    },
+    {
+      "name": "microphone",
+      "codePoint": 61451
+    },
+    {
+      "name": "users-linked",
+      "codePoint": 61452
+    },
+    {
+      "name": "stage",
+      "codePoint": 61453
+    },
+    {
+      "name": "bus-station",
+      "codePoint": 61454
+    },
+    {
+      "name": "market",
+      "codePoint": 61455
+    },
+    {
+      "name": "fireworks",
+      "codePoint": 61456
+    },
+    {
+      "name": "jubs",
+      "codePoint": 61442
+    }
+  ]
+}

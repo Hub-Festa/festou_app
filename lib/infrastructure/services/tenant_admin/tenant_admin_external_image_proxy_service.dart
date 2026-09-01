@@ -1,0 +1,69 @@
+import 'dart:typed_data';
+
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_external_image_proxy_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_url_value.dart';
+import 'package:dio/dio.dart';
+import 'package:get_it/get_it.dart';
+
+class TenantAdminExternalImageProxyService
+    implements TenantAdminExternalImageProxyContract {
+  TenantAdminExternalImageProxyService({
+    Dio? dio,
+    TenantAdminTenantScopeContract? tenantScope,
+  }) : this._internal(dio ?? Dio(), tenantScope);
+
+  TenantAdminExternalImageProxyService._internal(
+    this._dio, [
+    this._tenantScope,
+  ]);
+
+  final Dio _dio;
+  final TenantAdminTenantScopeContract? _tenantScope;
+
+  String get _apiBaseUrl =>
+      (_tenantScope ?? GetIt.I.get<TenantAdminTenantScopeContract>())
+          .selectedTenantAdminBaseUrl;
+
+  Map<String, String> _buildHeaders() {
+    final token = GetIt.I.get<LandlordAuthRepositoryContract>().token;
+    return {
+      'Authorization': 'Bearer $token',
+      'Accept': 'image/*',
+      'Content-Type': 'application/json',
+    };
+  }
+
+  @override
+  Future<Uint8List> fetchExternalImageBytes({
+    required TenantAdminOptionalUrlValue imageUrl,
+  }) async {
+    try {
+      final response = await _dio.post<List<int>>(
+        '$_apiBaseUrl/v1/media/external-image',
+        data: {'url': imageUrl.value.trim()},
+        options: Options(
+          headers: _buildHeaders(),
+          responseType: ResponseType.bytes,
+          validateStatus: (status) => status != null && status < 400,
+          followRedirects: false,
+          receiveTimeout: const Duration(seconds: 30),
+          sendTimeout: const Duration(seconds: 30),
+        ),
+      );
+
+      final data = response.data;
+      if (data == null || data.isEmpty) {
+        throw StateError('Empty proxy response.');
+      }
+      return Uint8List.fromList(data);
+    } on DioException catch (error) {
+      // Leave UX messaging up to the caller.
+      throw StateError(
+        'Failed to proxy external image: '
+        '${error.response?.statusCode ?? 'no-status'}',
+      );
+    }
+  }
+}

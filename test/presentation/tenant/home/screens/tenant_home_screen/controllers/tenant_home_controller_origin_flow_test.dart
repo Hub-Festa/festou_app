@@ -1,0 +1,654 @@
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/distance_in_meters_value.dart';
+import 'package:festou_app/domain/map/value_objects/latitude_value.dart';
+import 'package:festou_app/domain/map/value_objects/longitude_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_location_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_location_repository_contract_bool_value.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_events_repository_contract_values.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/domain/user/user_profile_contract.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_delta_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_page_dto.dart';
+import 'package:festou_app/infrastructure/repositories/schedule_repository.dart';
+import 'package:festou_app/infrastructure/repositories/user_events_repository.dart';
+import 'package:festou_app/infrastructure/services/location_origin_service.dart';
+import 'package:festou_app/infrastructure/services/schedule_backend_contract.dart';
+import 'package:festou_app/infrastructure/services/user_events_backend_contract.dart';
+import 'package:festou_app/presentation/tenant_public/home/screens/tenant_home_screen/controllers/tenant_home_controller.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+import 'package:value_object_pattern/domain/value_objects/mongo_id_value.dart';
+
+void main() {
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test('my-events home flow uses confirmed_only agenda contract', () async {
+    final tenantDefaultOrigin = _buildCoordinate(
+      latitude: -20.671339,
+      longitude: -40.495395,
+    );
+    final appData = _buildAppData(defaultOrigin: tenantDefaultOrigin);
+    final appDataRepository = _FakeAppDataRepository(appData);
+    final userLocationRepository = _FakeUserLocationRepository();
+    final backend = _CapturingScheduleBackend();
+
+    GetIt.I.registerSingleton<AppData>(appData);
+
+    final scheduleRepository = ScheduleRepository(backend: backend);
+    final userEventsRepository = UserEventsRepository(
+      scheduleRepository: scheduleRepository,
+      backend: _FakeUserEventsBackend(),
+      authRepository: _FakeAuthRepository(true),
+    );
+    await userEventsRepository.confirmEventAttendance(
+      userEventsRepoString(_CapturingScheduleBackend.eventId),
+      occurrenceId: userEventsRepoString(
+        _CapturingScheduleBackend.occurrenceId,
+      ),
+    );
+
+    final controller = _buildTenantHomeController(
+      userEventsRepository: userEventsRepository,
+      userLocationRepository: userLocationRepository,
+      appDataRepository: appDataRepository,
+      authRepository: _FakeAuthRepository(true),
+    );
+
+    await controller.init();
+
+    expect(backend.requests, isNotEmpty);
+    expect(backend.requests.first.confirmedOnly, isTrue);
+    expect(backend.requests.first.showPastOnly, isFalse);
+    expect(
+      controller.myEventsFilteredStreamValue.value.map((event) => event.id),
+      contains(_CapturingScheduleBackend.eventId),
+    );
+
+    controller.onDispose();
+  });
+
+  test(
+    'my-events home flow no longer depends on origin availability',
+    () async {
+      final appData = _buildAppData(defaultOrigin: null);
+      final appDataRepository = _FakeAppDataRepository(appData);
+      final userLocationRepository = _FakeUserLocationRepository();
+      final backend = _CapturingScheduleBackend();
+
+      GetIt.I.registerSingleton<AppData>(appData);
+
+      final scheduleRepository = ScheduleRepository(backend: backend);
+      final userEventsRepository = UserEventsRepository(
+        scheduleRepository: scheduleRepository,
+        backend: _FakeUserEventsBackend(),
+        authRepository: _FakeAuthRepository(true),
+      );
+      await userEventsRepository.confirmEventAttendance(
+        userEventsRepoString(_CapturingScheduleBackend.eventId),
+        occurrenceId: userEventsRepoString(
+          _CapturingScheduleBackend.occurrenceId,
+        ),
+      );
+
+      final controller = _buildTenantHomeController(
+        userEventsRepository: userEventsRepository,
+        userLocationRepository: userLocationRepository,
+        appDataRepository: appDataRepository,
+        authRepository: _FakeAuthRepository(true),
+      );
+
+      await controller.init();
+
+      expect(backend.requests, isNotEmpty);
+      expect(backend.requests.first.confirmedOnly, isTrue);
+      expect(
+        controller.myEventsFilteredStreamValue.value.map((event) => event.id),
+        contains(_CapturingScheduleBackend.eventId),
+      );
+
+      controller.onDispose();
+    },
+  );
+
+  test('my-events home flow uses the confirmed preview slice only', () async {
+    final tenantDefaultOrigin = _buildCoordinate(
+      latitude: -20.671339,
+      longitude: -40.495395,
+    );
+    final appData = _buildAppData(defaultOrigin: tenantDefaultOrigin);
+    final backend = _CapturingScheduleBackend(hasMoreFirstPage: true);
+
+    GetIt.I.registerSingleton<AppData>(appData);
+
+    final scheduleRepository = ScheduleRepository(backend: backend);
+    final userEventsRepository = UserEventsRepository(
+      scheduleRepository: scheduleRepository,
+      backend: _FakeUserEventsBackend(),
+      authRepository: _FakeAuthRepository(true),
+    );
+
+    final events = await userEventsRepository.fetchMyEvents();
+
+    expect(events.length, 1);
+    expect(backend.requests.map((sample) => sample.page), [1]);
+    expect(backend.requests.every((sample) => sample.confirmedOnly), isTrue);
+  });
+
+  test('anonymous home flow skips confirmed_only agenda request', () async {
+    final tenantDefaultOrigin = _buildCoordinate(
+      latitude: -20.671339,
+      longitude: -40.495395,
+    );
+    final appData = _buildAppData(defaultOrigin: tenantDefaultOrigin);
+    final appDataRepository = _FakeAppDataRepository(appData);
+    final userLocationRepository = _FakeUserLocationRepository();
+    final backend = _CapturingScheduleBackend();
+
+    GetIt.I.registerSingleton<AppData>(appData);
+
+    final scheduleRepository = ScheduleRepository(backend: backend);
+    final userEventsRepository = UserEventsRepository(
+      scheduleRepository: scheduleRepository,
+      backend: _FakeUserEventsBackend(),
+      authRepository: _FakeAuthRepository(false),
+    );
+
+    final controller = _buildTenantHomeController(
+      userEventsRepository: userEventsRepository,
+      userLocationRepository: userLocationRepository,
+      appDataRepository: appDataRepository,
+      authRepository: _FakeAuthRepository(false),
+    );
+
+    await controller.init();
+
+    expect(backend.requests, isEmpty);
+    expect(controller.myEventsFilteredStreamValue.value, isEmpty);
+
+    controller.onDispose();
+  });
+
+  test('home reloads my events after late authenticated identity hydration',
+      () async {
+    final tenantDefaultOrigin = _buildCoordinate(
+      latitude: -20.671339,
+      longitude: -40.495395,
+    );
+    final appData = _buildAppData(defaultOrigin: tenantDefaultOrigin);
+    final appDataRepository = _FakeAppDataRepository(appData);
+    final userLocationRepository = _FakeUserLocationRepository();
+    final backend = _CapturingScheduleBackend();
+    final authRepository = _FakeAuthRepository(false);
+
+    GetIt.I.registerSingleton<AppData>(appData);
+
+    final scheduleRepository = ScheduleRepository(backend: backend);
+    final userEventsRepository = UserEventsRepository(
+      scheduleRepository: scheduleRepository,
+      backend: _FakeUserEventsBackend(),
+      authRepository: authRepository,
+    );
+    await userEventsRepository.confirmEventAttendance(
+      userEventsRepoString(_CapturingScheduleBackend.eventId),
+      occurrenceId: userEventsRepoString(
+        _CapturingScheduleBackend.occurrenceId,
+      ),
+    );
+
+    final controller = _buildTenantHomeController(
+      userEventsRepository: userEventsRepository,
+      userLocationRepository: userLocationRepository,
+      appDataRepository: appDataRepository,
+      authRepository: authRepository,
+    );
+
+    await controller.init();
+
+    expect(backend.requests, isEmpty);
+    expect(controller.myEventsFilteredStreamValue.value, isEmpty);
+
+    authRepository.authenticate();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(backend.requests, isNotEmpty);
+    expect(backend.requests.first.confirmedOnly, isTrue);
+    expect(
+      controller.myEventsFilteredStreamValue.value.map((event) => event.id),
+      contains(_CapturingScheduleBackend.eventId),
+    );
+
+    controller.onDispose();
+  });
+}
+
+TenantHomeController _buildTenantHomeController({
+  required UserEventsRepositoryContract userEventsRepository,
+  required UserLocationRepositoryContract userLocationRepository,
+  required AppDataRepositoryContract appDataRepository,
+  AuthRepositoryContract? authRepository,
+}) {
+  return TenantHomeController(
+    userEventsRepository: userEventsRepository,
+    userLocationRepository: userLocationRepository,
+    appDataRepository: appDataRepository,
+    locationOriginService: LocationOriginService(
+      appDataRepository: appDataRepository,
+      userLocationRepository: userLocationRepository,
+    ),
+    authRepository: authRepository,
+  );
+}
+
+class _CapturingScheduleBackend implements ScheduleBackendContract {
+  _CapturingScheduleBackend({this.hasMoreFirstPage = false});
+
+  static const String eventId = '507f1f77bcf86cd799439011';
+  static const String occurrenceId = '507f1f77bcf86cd799439012';
+  final bool hasMoreFirstPage;
+
+  final List<_AgendaRequestSample> requests = <_AgendaRequestSample>[];
+
+  @override
+  Future<EventDTO?> fetchEventDetail({
+    required String eventIdOrSlug,
+    String? occurrenceId,
+  }) async => null;
+
+  @override
+  Future<EventPageDTO> fetchEventsPage({
+    required int page,
+    int? pageSize,
+    required bool showPastOnly,
+    bool liveNowOnly = false,
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+  }) async {
+    requests.add(
+      _AgendaRequestSample(
+        page: page,
+        confirmedOnly: confirmedOnly,
+        showPastOnly: showPastOnly,
+      ),
+    );
+    if (page > 1) {
+      if (hasMoreFirstPage && page == 2) {
+        return EventPageDTO(
+          events: [_buildEventDto(eventId: '507f1f77bcf86cd799439013')],
+          hasMore: false,
+        );
+      }
+      return EventPageDTO(events: const [], hasMore: false);
+    }
+    return EventPageDTO(events: [_buildEventDto()], hasMore: hasMoreFirstPage);
+  }
+
+  @override
+  Stream<EventDeltaDTO> watchEventsStream({
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+    String? lastEventId,
+    bool showPastOnly = false,
+  }) => const Stream<EventDeltaDTO>.empty();
+}
+
+class _FakeUserEventsBackend implements UserEventsBackendContract {
+  final Set<String> _confirmed = <String>{};
+
+  @override
+  Future<Map<String, dynamic>> fetchConfirmedOccurrenceIds() async {
+    return {'confirmed_occurrence_ids': _confirmed.toList(growable: false)};
+  }
+
+  @override
+  Future<Map<String, dynamic>> confirmAttendance({
+    required String eventId,
+    required String occurrenceId,
+  }) async {
+    _confirmed.add(occurrenceId);
+    return {
+      'event_id': eventId,
+      'occurrence_id': occurrenceId,
+      'status': 'active',
+      'kind': 'free_confirmation',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> unconfirmAttendance({
+    required String eventId,
+    required String occurrenceId,
+  }) async {
+    _confirmed.remove(occurrenceId);
+    return {
+      'event_id': eventId,
+      'occurrence_id': occurrenceId,
+      'status': 'canceled',
+      'kind': 'free_confirmation',
+    };
+  }
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract<UserContract> {
+  _FakeAuthRepository(this._authorized);
+
+  bool _authorized;
+
+  @override
+  Object get backend => throw UnimplementedError();
+
+  @override
+  String get userToken => _authorized ? 'token' : '';
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {}
+
+  @override
+  Future<String> getDeviceId() async => 'device-1';
+
+  @override
+  Future<String?> getUserId() async => _authorized ? 'user-1' : null;
+
+  @override
+  bool get isUserLoggedIn => _authorized;
+
+  @override
+  bool get isAuthorized => _authorized;
+
+  @override
+  Future<void> init() async {}
+
+  void authenticate() {
+    _authorized = true;
+    userStreamValue.addValue(_FakeUser(id: '507f1f77bcf86cd799439011'));
+  }
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  Future<void> logout() async {
+    _authorized = false;
+    userStreamValue.addValue(null);
+  }
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+class _FakeUser extends UserContract {
+  _FakeUser({required String id})
+      : super(
+          uuidValue: MongoIDValue()..parse(id),
+          profile: UserProfileContract(),
+        );
+}
+
+class _AgendaRequestSample {
+  const _AgendaRequestSample({
+    required this.page,
+    required this.confirmedOnly,
+    required this.showPastOnly,
+  });
+
+  final int page;
+  final bool confirmedOnly;
+  final bool showPastOnly;
+}
+
+class _FakeUserLocationRepository implements UserLocationRepositoryContract {
+  _FakeUserLocationRepository({
+    CityCoordinate? userCoordinate,
+    CityCoordinate? lastKnownCoordinate,
+  }) : userLocationStreamValue = StreamValue<CityCoordinate?>(
+         defaultValue: userCoordinate,
+       ),
+       lastKnownLocationStreamValue = StreamValue<CityCoordinate?>(
+         defaultValue: lastKnownCoordinate,
+       );
+
+  @override
+  final StreamValue<CityCoordinate?> userLocationStreamValue;
+
+  @override
+  final StreamValue<CityCoordinate?> lastKnownLocationStreamValue;
+
+  @override
+  final StreamValue<DateTime?> lastKnownCapturedAtStreamValue =
+      StreamValue<DateTime?>(defaultValue: null);
+
+  @override
+  final StreamValue<double?> lastKnownAccuracyStreamValue =
+      StreamValue<double?>(defaultValue: null);
+
+  @override
+  final StreamValue<String?> lastKnownAddressStreamValue = StreamValue<String?>(
+    defaultValue: null,
+  );
+
+  @override
+  @override
+  final StreamValue<LocationResolutionPhase>
+  locationResolutionPhaseStreamValue = StreamValue<LocationResolutionPhase>(
+    defaultValue: LocationResolutionPhase.unknown,
+  );
+
+  @override
+  Future<void> ensureLoaded() async {}
+
+  @override
+  Future<void> setLastKnownAddress(Object? address) async {
+    lastKnownAddressStreamValue.addValue(address as dynamic);
+  }
+
+  @override
+  Future<bool> warmUpIfPermitted() async {
+    return userLocationStreamValue.value != null ||
+        lastKnownLocationStreamValue.value != null;
+  }
+
+  @override
+  Future<bool> refreshIfPermitted({Object? minInterval}) async => false;
+
+  @override
+  Future<String?> resolveUserLocation({
+    Object? timeout,
+    UserLocationRepositoryContractBoolValue? requestPermissionIfNeededValue,
+  }) async => null;
+
+  @override
+  Future<bool> startTracking({
+    LocationTrackingMode mode = LocationTrackingMode.mapForeground,
+  }) async => false;
+
+  @override
+  Future<void> stopTracking() async {}
+}
+
+class _FakeAppDataRepository extends AppDataRepositoryContract {
+  _FakeAppDataRepository(this._appData)
+    : maxRadiusMetersStreamValue = StreamValue<DistanceInMetersValue>(
+        defaultValue: DistanceInMetersValue.fromRaw(
+          _appData.mapRadiusMaxMeters,
+          defaultValue: _appData.mapRadiusMaxMeters,
+        ),
+      );
+
+  final AppData _appData;
+
+  @override
+  AppData get appData => _appData;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  final StreamValue<ThemeMode?> themeModeStreamValue = StreamValue<ThemeMode?>(
+    defaultValue: ThemeMode.light,
+  );
+
+  @override
+  ThemeMode get themeMode => themeModeStreamValue.value ?? ThemeMode.light;
+
+  @override
+  Future<void> setThemeMode(AppThemeModeValue mode) async {
+    themeModeStreamValue.addValue(mode.value);
+  }
+
+  @override
+  final StreamValue<DistanceInMetersValue> maxRadiusMetersStreamValue;
+
+  @override
+  DistanceInMetersValue get maxRadiusMeters => maxRadiusMetersStreamValue.value;
+
+  @override
+  bool get hasPersistedMaxRadiusPreference => false;
+
+  @override
+  Future<void> setMaxRadiusMeters(DistanceInMetersValue meters) async {
+    maxRadiusMetersStreamValue.addValue(meters);
+  }
+}
+
+AppData _buildAppData({required CityCoordinate? defaultOrigin}) {
+  final mapUi = <String, dynamic>{
+    'radius': const {'min_km': 1, 'default_km': 5, 'max_km': 50},
+  };
+  if (defaultOrigin != null) {
+    mapUi['default_origin'] = {
+      'lat': defaultOrigin.latitude,
+      'lng': defaultOrigin.longitude,
+      'label': 'Tenant Default',
+    };
+  }
+
+  final remoteData = {
+    'name': 'Tenant Test',
+    'type': 'tenant',
+    'main_domain': 'https://tenant.test',
+    'profile_types': const [
+      {
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': [],
+        'capabilities': {'is_favoritable': true, 'is_poi_enabled': true},
+      },
+    ],
+    'domains': const ['https://tenant.test'],
+    'app_domains': const [],
+    'theme_data_settings': const {
+      'brightness_default': 'dark',
+      'primary_seed_color': '#112233',
+      'secondary_seed_color': '#445566',
+    },
+    'main_color': '#112233',
+    'tenant_id': 'tenant-1',
+    'telemetry': const {'trackers': []},
+    'telemetry_context': const {'location_freshness_minutes': 5},
+    'firebase': null,
+    'push': null,
+    'settings': {'map_ui': mapUi},
+  };
+
+  final localInfo = {
+    'platformType': PlatformTypeValue()..parse('mobile'),
+    'hostname': 'tenant.test',
+    'href': 'https://tenant.test',
+    'port': null,
+    'device': 'test-device',
+  };
+
+  return buildAppDataFromInitialization(
+    remoteData: remoteData,
+    localInfo: localInfo,
+  );
+}
+
+CityCoordinate _buildCoordinate({
+  required double latitude,
+  required double longitude,
+}) {
+  final lat = LatitudeValue()..parse(latitude.toString());
+  final lng = LongitudeValue()..parse(longitude.toString());
+  return CityCoordinate(latitudeValue: lat, longitudeValue: lng);
+}
+
+EventDTO _buildEventDto({String eventId = _CapturingScheduleBackend.eventId}) {
+  return EventDTO.fromJson({
+    'event_id': eventId,
+    'occurrence_id': _CapturingScheduleBackend.occurrenceId,
+    'slug': 'evento-teste',
+    'title': 'Evento Teste',
+    'content': 'Conteudo do evento completo',
+    'type': {
+      'id': 'type-1',
+      'name': 'Show',
+      'slug': 'show',
+      'description': 'Show type description',
+      'color': '#112233',
+    },
+    'location': {
+      'mode': 'physical',
+      'display_name': 'Praia do Morro',
+      'geo': {
+        'type': 'Point',
+        'coordinates': [-40.495395, -20.671339],
+      },
+    },
+    'date_time_start': '2099-01-01T20:00:00+00:00',
+    'artists': const [],
+    'tags': const ['music'],
+  });
+}

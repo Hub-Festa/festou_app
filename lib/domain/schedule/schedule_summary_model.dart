@@ -1,5 +1,4 @@
-import 'package:belluga_boilerplate/domain/schedule/schedule_summary_item_model.dart';
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_summary_dto.dart';
+import 'package:festou_app/domain/schedule/schedule_summary_item_model.dart';
 
 class ScheduleSummaryModel {
   final List<ScheduleSummaryItemModel> items;
@@ -7,6 +6,9 @@ class ScheduleSummaryModel {
   ScheduleSummaryModel({
     required this.items,
   });
+
+  static const int _daysBackwardLimit = 15;
+  static const int _monthsForwardLimit = 3;
 
   DateTime get today =>
       DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
@@ -21,22 +23,13 @@ class ScheduleSummaryModel {
   }
 
   DateTime get lastDayRange {
-    items.sort((a, b) => a.dateTimeStart.compareTo(b.dateTimeStart));
-
-    return DateTime(
-        items.last.dateTimeStart.year, items.last.dateTimeStart.month, 1);
+    final future =
+        DateTime(today.year, today.month + _monthsForwardLimit, today.day);
+    return DateTime(future.year, future.month, future.day);
   }
 
   DateTime get firstDayRange {
-    items.sort((a, b) => a.dateTimeStart.compareTo(b.dateTimeStart));
-
-    return DateTime(
-        items.first.dateTimeStart.year, items.first.dateTimeStart.month, 1);
-  }
-
-  factory ScheduleSummaryModel.fromDTO(EventSummaryDTO dto) {
-    return ScheduleSummaryModel(
-      items: dto.items.map((e) => ScheduleSummaryItemModel.fromDTO(e)).toList(),
-    );
+    final start = today.subtract(Duration(days: _daysBackwardLimit));
+    return DateTime(start.year, start.month, start.day);
   }
 }

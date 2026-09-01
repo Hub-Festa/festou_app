@@ -1,0 +1,228 @@
+import 'dart:async';
+
+import 'package:festou_app/application/router/support/tenant_admin_safe_back.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/controllers/tenant_admin_settings_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/models/tenant_admin_settings_integration_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/tenant_admin_settings_keys.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_app_links_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_firebase_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_outbound_integrations_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_phone_otp_review_access_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_push_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_remote_status_panel.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_resend_email_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_section.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/widgets/tenant_admin_settings_telemetry_section.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_scoped_section_app_bar.dart';
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart';
+
+class TenantAdminSettingsTechnicalIntegrationsScreen extends StatefulWidget {
+  const TenantAdminSettingsTechnicalIntegrationsScreen({
+    super.key,
+    this.initialSection = TenantAdminSettingsIntegrationSection.firebase,
+  });
+
+  final TenantAdminSettingsIntegrationSection initialSection;
+
+  @override
+  State<TenantAdminSettingsTechnicalIntegrationsScreen> createState() =>
+      _TenantAdminSettingsTechnicalIntegrationsScreenState();
+}
+
+class _TenantAdminSettingsTechnicalIntegrationsScreenState
+    extends State<TenantAdminSettingsTechnicalIntegrationsScreen> {
+  final TenantAdminSettingsController _controller = GetIt.I
+      .get<TenantAdminSettingsController>();
+  bool _initialTechnicalIntegrationsLoaded = false;
+  bool _initialSectionFocused = false;
+
+  final GlobalKey _firebaseSectionKey = GlobalKey();
+  final GlobalKey _resendSectionKey = GlobalKey();
+  final GlobalKey _outboundSectionKey = GlobalKey();
+  final GlobalKey _phoneOtpReviewAccessSectionKey = GlobalKey();
+  final GlobalKey _appLinksSectionKey = GlobalKey();
+  final GlobalKey _pushSectionKey = GlobalKey();
+  final GlobalKey _telemetrySectionKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.init();
+    unawaited(_loadInitialTechnicalIntegrationsSettings());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusInitialSection();
+    });
+  }
+
+  Future<void> _loadInitialTechnicalIntegrationsSettings() async {
+    await _controller.loadTechnicalIntegrationsSettings();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _initialTechnicalIntegrationsLoaded = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_focusInitialSection());
+    });
+  }
+
+  Future<void> _focusInitialSection() async {
+    if (!mounted || _initialSectionFocused) {
+      return;
+    }
+    final targetKey = switch (widget.initialSection) {
+      TenantAdminSettingsIntegrationSection.appLinks => _appLinksSectionKey,
+      TenantAdminSettingsIntegrationSection.firebase => _firebaseSectionKey,
+      TenantAdminSettingsIntegrationSection.phoneOtpReviewAccess =>
+        _phoneOtpReviewAccessSectionKey,
+      TenantAdminSettingsIntegrationSection.resend => _resendSectionKey,
+      TenantAdminSettingsIntegrationSection.outbound => _outboundSectionKey,
+      TenantAdminSettingsIntegrationSection.push => _pushSectionKey,
+      TenantAdminSettingsIntegrationSection.telemetry => _telemetrySectionKey,
+    };
+    final targetContext = targetKey.currentContext;
+    if (targetContext == null) {
+      return;
+    }
+    _initialSectionFocused = true;
+    await Scrollable.ensureVisible(
+      targetContext,
+      alignment: 0.08,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final backPolicy = buildTenantAdminCurrentRouteBackPolicy(context);
+    return SingleChildScrollView(
+      key: TenantAdminSettingsKeys.technicalIntegrationsScreen,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TenantAdminScopedSectionAppBar(
+              key: TenantAdminSettingsKeys.technicalIntegrationsScopedAppBar,
+              title: 'Integrações técnicas',
+              backButtonKey:
+                  TenantAdminSettingsKeys.technicalIntegrationsBackButton,
+              onBack: backPolicy.handleBack,
+            ),
+            const SizedBox(height: 12),
+            TenantAdminSettingsRemoteStatusPanel(
+              controller: _controller,
+              onReload: _controller.loadTechnicalIntegrationsSettings,
+            ),
+            const SizedBox(height: 12),
+            if (!_initialTechnicalIntegrationsLoaded)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else ...[
+              KeyedSubtree(
+                key: _resendSectionKey,
+                child: TenantAdminSettingsSection(
+                  key: TenantAdminSettingsKeys
+                      .technicalIntegrationsResendSection,
+                  title: 'Resend',
+                  description:
+                      'Envelope de disparo de e-mail transacional por tenant.',
+                  icon: Icons.mark_email_read_outlined,
+                  child: TenantAdminSettingsResendEmailSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _outboundSectionKey,
+                child: TenantAdminSettingsSection(
+                  key: TenantAdminSettingsKeys
+                      .technicalIntegrationsOutboundSection,
+                  title: 'Webhooks de saída',
+                  description: 'URLs de envio por fila para WhatsApp e OTP.',
+                  icon: Icons.webhook_outlined,
+                  child: TenantAdminSettingsOutboundIntegrationsSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _phoneOtpReviewAccessSectionKey,
+                child: TenantAdminSettingsSection(
+                  key: TenantAdminSettingsKeys
+                      .technicalIntegrationsPhoneOtpReviewAccessSection,
+                  title: 'Acesso de revisão OTP',
+                  description: 'Telefone dedicado e hash do código de revisão.',
+                  icon: Icons.lock_open_outlined,
+                  child: TenantAdminSettingsPhoneOtpReviewAccessSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _appLinksSectionKey,
+                child: TenantAdminSettingsSection(
+                  key: TenantAdminSettingsKeys
+                      .technicalIntegrationsAppLinksSection,
+                  title: 'App Links',
+                  description:
+                      'Android App Links e iOS Universal Links por tenant.',
+                  icon: Icons.link_outlined,
+                  child: TenantAdminSettingsAppLinksSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _firebaseSectionKey,
+                child: TenantAdminSettingsSection(
+                  title: 'Firebase',
+                  description: 'Banco de dados e autenticação.',
+                  icon: Icons.local_fire_department_outlined,
+                  child: TenantAdminSettingsFirebaseSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _pushSectionKey,
+                child: TenantAdminSettingsSection(
+                  key: TenantAdminSettingsKeys.technicalIntegrationsPushSection,
+                  title: 'Push',
+                  description:
+                      'TTL, limites, status operacional e credenciais FCM.',
+                  icon: Icons.notifications_active_outlined,
+                  child: TenantAdminSettingsPushSection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: _telemetrySectionKey,
+                child: TenantAdminSettingsSection(
+                  title: 'Telemetry',
+                  description: 'Trackers de métricas por integração.',
+                  icon: Icons.insights_outlined,
+                  child: TenantAdminSettingsTelemetrySection(
+                    controller: _controller,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}

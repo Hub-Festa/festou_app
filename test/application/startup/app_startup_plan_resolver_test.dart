@@ -1,0 +1,591 @@
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/startup/app_startup_plan_resolver.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/app_data/app_type.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/invite_runtime_settings.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_cooldowns_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_rate_limits_value.dart';
+import 'package:festou_app/domain/map/value_objects/distance_in_meters_value.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/deferred_link_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:festou_app/infrastructure/services/telemetry/telemetry_properties_codec.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/testing/invite_model_factory.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'resolvePlan keeps anonymous tenant home startup on the public surface when there is no deferred or pending invite override',
+    () async {
+      final authRepository = _FakeAuthRepository();
+      final resolver = AppStartupPlanResolver(
+        authRepository: authRepository,
+        invitesRepository: _FakeInvitesRepository(),
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: null,
+        telemetryRepository: null,
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.hasOverride, isFalse);
+      expect(plan.path, isNull);
+      expect(plan.routes, isEmpty);
+      expect(plan.toDeepLink(), isNull);
+      expect(authRepository.initCallCount, 1);
+    },
+  );
+
+  test(
+    'resolvePlan records iOS deferred capture platform in telemetry',
+    () async {
+      final telemetry = _FakeTelemetryRepository();
+      final resolver = AppStartupPlanResolver(
+        authRepository: _FakeAuthRepository(),
+        invitesRepository: _FakeInvitesRepository(),
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: _FakeDeferredLinkRepository(
+          DeferredLinkCaptureResult(
+            status: DeferredLinkCaptureStatus.captured,
+            platformValue: deferredLinkPlatform('ios'),
+            targetPathValue: DeferredLinkTargetPathValue(
+              defaultValue: '/profile',
+            ),
+            storeChannelValue: DeferredLinkStoreChannelValue(
+              defaultValue: 'web_gate',
+            ),
+          ),
+        ),
+        telemetryRepository: telemetry,
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.path, '/profile');
+      expect(telemetry.loggedEvents, hasLength(1));
+      expect(
+        telemetry.loggedEvents.single.eventName,
+        'app_deferred_deep_link_captured',
+      );
+      expect(telemetry.loggedEvents.single.properties?['platform'], 'ios');
+      expect(
+        telemetry.loggedEvents.single.properties?['store_channel'],
+        'web_gate',
+      );
+    },
+  );
+
+  test(
+    'resolvePlan ignores deferred capture exceptions and keeps tenant startup on the public surface',
+    () async {
+      final authRepository = _FakeAuthRepository();
+      final resolver = AppStartupPlanResolver(
+        authRepository: authRepository,
+        invitesRepository: _FakeInvitesRepository(),
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: const _ThrowingDeferredLinkRepository(),
+        telemetryRepository: null,
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.hasOverride, isFalse);
+      expect(plan.path, isNull);
+      expect(plan.routes, isEmpty);
+      expect(plan.toDeepLink(), isNull);
+      expect(authRepository.initCallCount, 1);
+    },
+  );
+
+  test(
+    'resolvePlan ignores startup telemetry failures after deferred capture',
+    () async {
+      final resolver = AppStartupPlanResolver(
+        authRepository: _FakeAuthRepository(),
+        invitesRepository: _FakeInvitesRepository(),
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: _FakeDeferredLinkRepository(
+          DeferredLinkCaptureResult(
+            status: DeferredLinkCaptureStatus.captured,
+            platformValue: deferredLinkPlatform('ios'),
+            targetPathValue: DeferredLinkTargetPathValue(
+              defaultValue: '/profile',
+            ),
+            storeChannelValue: DeferredLinkStoreChannelValue(
+              defaultValue: 'web_gate',
+            ),
+          ),
+        ),
+        telemetryRepository: _ThrowingTelemetryRepository(),
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.path, '/profile');
+      expect(plan.hasOverride, isTrue);
+    },
+  );
+
+  test(
+    'resolvePlan applies deferred override before any pending invite bootstrap',
+    () async {
+      final invitesRepository = _StartupRefreshInvitesRepository(
+        throwOnInit: true,
+      );
+      final resolver = AppStartupPlanResolver(
+        authRepository: _FakeAuthRepository(),
+        invitesRepository: invitesRepository,
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: _FakeDeferredLinkRepository(
+          DeferredLinkCaptureResult(
+            status: DeferredLinkCaptureStatus.captured,
+            platformValue: deferredLinkPlatform('ios'),
+            targetPathValue: DeferredLinkTargetPathValue(
+              defaultValue: '/profile',
+            ),
+            storeChannelValue: DeferredLinkStoreChannelValue(
+              defaultValue: 'web_gate',
+            ),
+          ),
+        ),
+        telemetryRepository: _FakeTelemetryRepository(),
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.path, '/profile');
+      expect(invitesRepository.initCallCount, 0);
+      expect(invitesRepository.refreshPendingInvitesCallCount, 0);
+    },
+  );
+
+  test(
+    'resolvePlan applies pending invite stack from startup refresh without full invite init',
+    () async {
+      final invitesRepository = _StartupRefreshInvitesRepository(
+        startupInvites: <InviteModel>[_buildInvite()],
+        throwOnInit: true,
+      );
+      final resolver = AppStartupPlanResolver(
+        authRepository: _FakeAuthRepository(),
+        invitesRepository: invitesRepository,
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: null,
+        telemetryRepository: null,
+      );
+
+      final plan = await resolver.resolvePlan();
+
+      expect(plan.routes.map((route) => route.routeName).toList(), <String>[
+        TenantHomeRoute.name,
+        InviteFlowRoute.name,
+      ]);
+      expect(invitesRepository.initCallCount, 0);
+      expect(invitesRepository.refreshPendingInvitesCallCount, 1);
+    },
+  );
+
+  test(
+    'resolvePlan rethrows pending invite refresh failures when no deferred override exists',
+    () async {
+      final authRepository = _FakeAuthRepository();
+      final invitesRepository = _StartupRefreshInvitesRepository(
+        throwOnRefresh: true,
+      );
+      final resolver = AppStartupPlanResolver(
+        authRepository: authRepository,
+        invitesRepository: invitesRepository,
+        appDataRepository: _FakeAppDataRepository(_buildTenantAppData()),
+        deferredLinkRepository: null,
+        telemetryRepository: null,
+      );
+
+      await expectLater(resolver.resolvePlan(), throwsA(isA<StateError>()));
+      expect(authRepository.initCallCount, 1);
+      expect(invitesRepository.initCallCount, 0);
+      expect(invitesRepository.refreshPendingInvitesCallCount, 1);
+    },
+  );
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract<UserContract> {
+  int initCallCount = 0;
+
+  @override
+  Object get backend => Object();
+
+  @override
+  String get userToken => '';
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {}
+
+  @override
+  Future<String> getDeviceId() async => 'device-1';
+
+  @override
+  Future<String?> getUserId() async => null;
+
+  @override
+  bool get isUserLoggedIn => false;
+
+  @override
+  bool get isAuthorized => false;
+
+  @override
+  Future<void> init() async {
+    initCallCount += 1;
+  }
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+class _FakeInvitesRepository extends InvitesRepositoryContract {
+  int initCallCount = 0;
+
+  @override
+  Future<void> init() async {
+    initCallCount += 1;
+    await super.init();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+
+  @override
+  Future<List<InviteModel>> fetchInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    return const <InviteModel>[];
+  }
+
+  @override
+  Future<InviteRuntimeSettings> fetchSettings() async {
+    return InviteRuntimeSettings(
+      limitValues: InviteRateLimitsValue(),
+      cooldownValues: InviteCooldownsValue(),
+    );
+  }
+}
+
+class _StartupRefreshInvitesRepository extends InvitesRepositoryContract {
+  _StartupRefreshInvitesRepository({
+    this.startupInvites = const <InviteModel>[],
+    this.throwOnInit = false,
+    this.throwOnRefresh = false,
+  });
+
+  final List<InviteModel> startupInvites;
+  final bool throwOnInit;
+  final bool throwOnRefresh;
+
+  int initCallCount = 0;
+  int refreshPendingInvitesCallCount = 0;
+
+  @override
+  Future<void> init() async {
+    initCallCount += 1;
+    if (throwOnInit) {
+      throw StateError('full invite init should not run during startup plan');
+    }
+    pendingInvitesStreamValue.addValue(
+      List<InviteModel>.unmodifiable(startupInvites),
+    );
+  }
+
+  @override
+  Future<void> refreshPendingInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    refreshPendingInvitesCallCount += 1;
+    if (throwOnRefresh) {
+      throw StateError('pending invite startup refresh unavailable');
+    }
+    pendingInvitesStreamValue.addValue(
+      List<InviteModel>.unmodifiable(startupInvites),
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+
+  @override
+  Future<List<InviteModel>> fetchInvites({
+    InvitesRepositoryContractPrimInt? page,
+    InvitesRepositoryContractPrimInt? pageSize,
+  }) async {
+    return List<InviteModel>.unmodifiable(startupInvites);
+  }
+
+  @override
+  Future<InviteRuntimeSettings> fetchSettings() async {
+    return InviteRuntimeSettings(
+      limitValues: InviteRateLimitsValue(),
+      cooldownValues: InviteCooldownsValue(),
+    );
+  }
+}
+
+class _FakeAppDataRepository extends AppDataRepositoryContract {
+  _FakeAppDataRepository(this._appData);
+
+  final AppData _appData;
+  final _themeMode = StreamValue<ThemeMode?>(defaultValue: ThemeMode.light);
+  final _maxRadius = StreamValue<DistanceInMetersValue>(
+    defaultValue: DistanceInMetersValue()..set(50000),
+  );
+
+  @override
+  AppData get appData => _appData;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  StreamValue<ThemeMode?> get themeModeStreamValue => _themeMode;
+
+  @override
+  ThemeMode get themeMode => _themeMode.value ?? ThemeMode.light;
+
+  @override
+  Future<void> setThemeMode(AppThemeModeValue mode) async {}
+
+  @override
+  StreamValue<DistanceInMetersValue> get maxRadiusMetersStreamValue =>
+      _maxRadius;
+
+  @override
+  DistanceInMetersValue get maxRadiusMeters => _maxRadius.value;
+
+  @override
+  Future<void> setMaxRadiusMeters(DistanceInMetersValue meters) async {
+    _maxRadius.addValue(meters);
+  }
+}
+
+class _LoggedTelemetryEvent {
+  const _LoggedTelemetryEvent({
+    required this.event,
+    required this.eventName,
+    required this.properties,
+  });
+
+  final EventTrackerEvents event;
+  final String? eventName;
+  final Map<String, dynamic>? properties;
+}
+
+class _FakeTelemetryRepository extends TelemetryRepositoryContract {
+  final loggedEvents = <_LoggedTelemetryEvent>[];
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> logEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    loggedEvents.add(
+      _LoggedTelemetryEvent(
+        event: event,
+        eventName: eventName?.value,
+        properties: properties == null
+            ? null
+            : TelemetryPropertiesCodec.toRawMap(properties),
+      ),
+    );
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+
+  @override
+  Future<EventTrackerTimedEventHandle?> startTimedEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    return null;
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> finishTimedEvent(
+    EventTrackerTimedEventHandle handle,
+  ) async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> flushTimedEvents() async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+
+  @override
+  void setScreenContext(TelemetryRepositoryContractPrimMap? screenContext) {}
+
+  @override
+  EventTrackerLifecycleObserver? buildLifecycleObserver() => null;
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> mergeIdentity({
+    required TelemetryRepositoryContractPrimString previousUserId,
+  }) async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+}
+
+class _ThrowingTelemetryRepository extends TelemetryRepositoryContract {
+  @override
+  Future<TelemetryRepositoryContractPrimBool> logEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    throw StateError('startup telemetry failed');
+  }
+
+  @override
+  Future<EventTrackerTimedEventHandle?> startTimedEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    return null;
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> finishTimedEvent(
+    EventTrackerTimedEventHandle handle,
+  ) async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> flushTimedEvents() async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+
+  @override
+  void setScreenContext(TelemetryRepositoryContractPrimMap? screenContext) {}
+
+  @override
+  EventTrackerLifecycleObserver? buildLifecycleObserver() => null;
+
+  @override
+  Future<TelemetryRepositoryContractPrimBool> mergeIdentity({
+    required TelemetryRepositoryContractPrimString previousUserId,
+  }) async {
+    return telemetryRepoBool(true, defaultValue: true, isRequired: true);
+  }
+}
+
+class _FakeDeferredLinkRepository implements DeferredLinkRepositoryContract {
+  const _FakeDeferredLinkRepository(this.result);
+
+  final DeferredLinkCaptureResult result;
+
+  @override
+  Future<DeferredLinkCaptureResult> captureFirstOpenInviteCode() async =>
+      result;
+}
+
+class _ThrowingDeferredLinkRepository
+    implements DeferredLinkRepositoryContract {
+  const _ThrowingDeferredLinkRepository();
+
+  @override
+  Future<DeferredLinkCaptureResult> captureFirstOpenInviteCode() async {
+    throw StateError('deferred link storage failed');
+  }
+}
+
+AppData _buildTenantAppData() {
+  final platform = PlatformTypeValue(defaultValue: AppType.mobile)
+    ..parse(AppType.mobile.name);
+  return buildAppDataFromInitialization(
+    remoteData: {
+      'name': 'Tenant',
+      'type': 'tenant',
+      'main_domain': 'https://tenant.festoudemo.site',
+      'profile_types': const <Map<String, dynamic>>[],
+      'domains': const <String>['https://tenant.festoudemo.site'],
+      'app_domains': const <String>[],
+      'theme_data_settings': {
+        'primary_seed_color': '#000000',
+        'secondary_seed_color': '#FFFFFF',
+        'brightness_default': 'light',
+      },
+    },
+    localInfo: {
+      'platformType': platform,
+      'port': '1.0.0',
+      'hostname': 'tenant.festoudemo.site',
+      'href': 'https://tenant.festoudemo.site',
+      'device': 'test-device',
+    },
+  );
+}
+
+InviteModel _buildInvite() {
+  return buildInviteModelFromPrimitives(
+    id: 'invite-1',
+    eventId: 'event-1',
+    eventSlug: 'show-rock',
+    eventName: 'Show Rock',
+    eventDateTime: DateTime.utc(2026, 7, 12, 20),
+    eventImageUrl: 'https://example.com/event.png',
+    location: 'Guarapari',
+    hostName: 'Belluga',
+    message: 'Você foi convidado.',
+    tags: const <String>['music'],
+    occurrenceId: 'occ-1',
+  );
+}

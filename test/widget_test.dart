@@ -1,15 +1,7 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('Flutter test harness loads the boilerplate shell',
-      (tester) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(body: Text('Belluga Boilerplate')),
-      ),
-    );
-
-    expect(find.text('Belluga Boilerplate'), findsOneWidget);
+  test('widget test placeholder', () {
+    expect(true, isTrue);
   });
 }

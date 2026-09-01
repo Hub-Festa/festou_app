@@ -27,12 +27,16 @@ migrate_working_dir/
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
+**/test/**/failures/
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
 /build/
+tool/belluga_custom_lint/build/
+/packages/*/build/
+/packages/*/pubspec.lock
 
 # Symbolication related
 app.*.symbols
@@ -45,14 +49,22 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Android/Kotlin build caches (local only)
+/android/.kotlin/
+
 # FVM Version Cache
 .fvm/
 
-/android/keystores/*.jks
-/android/keystores/*.properties
+/android/keystores/*
+!/android/keystores/README.recovery.txt
+!/android/keystores/tenant.signing.properties.example
+!/android/flavors/tenant.public.properties.example
 
-# Delphi-AI
+# DELPHI-AI
 AGENTS.md
+CLAUDE.md
+CLINE.md
+GEMINI.md
 scripts
 delphi-ai
 foundation_documentation
@@ -60,3 +72,26 @@ foundation_documentation
 .agent/
 .agents
 .agents/
+.codex
+.codex/
+.cline
+.cline/
+.clinerules
+.clinerules/
+.claude
+.claude/
+
+# Compile-time lane define overrides (local only)
+config/defines/local.override.json
+config/defines/integration.tenant.json
+
+# VS Code per-developer overrides (local only)
+.vscode/settings.json
+
+# Guardrail: backend code must never live inside flutter-app.
+laravel-app-root
+laravel-app/
+
+# Canonical .well-known association payloads are backend-owned.
+.well-known/assetlinks.json
+.well-known/apple-app-site-association

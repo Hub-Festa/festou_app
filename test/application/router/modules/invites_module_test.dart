@@ -1,0 +1,158 @@
+import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/router/guards/auth_route_guard.dart';
+import 'package:festou_app/application/router/guards/tenant_route_guard.dart';
+import 'package:festou_app/application/router/guards/web_anonymous_fallback_guard.dart';
+import 'package:festou_app/application/router/modular_app/modules/invites_module.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+
+void main() {
+  setUp(() async {
+    await GetIt.I.reset();
+    GetIt.I.registerSingleton<AuthRepositoryContract>(
+      _FakeAuthRepository(),
+    );
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test('invite routes keep anonymous entry and auth-protected groups flow', () {
+    final module = InvitesModule();
+    final routes = module.routes;
+
+    final flowRoute = routes.firstWhere((route) => route.path == '/convites');
+    final inviteAliasRoute =
+        routes.firstWhere((route) => route.path == '/invite');
+    final groupsRoute =
+        routes.firstWhere((route) => route.path == '/convites/grupos');
+
+    expect(
+      flowRoute.guards.map((guard) => guard.runtimeType).toList(),
+      [TenantRouteGuard, WebAnonymousFallbackGuard],
+    );
+    expect(
+      inviteAliasRoute.guards.map((guard) => guard.runtimeType).toList(),
+      [TenantRouteGuard, WebAnonymousFallbackGuard],
+    );
+    expect(
+      groupsRoute.guards.map((guard) => guard.runtimeType).toList(),
+      [TenantRouteGuard, AuthRouteGuard],
+    );
+    expect(
+      routes.where((route) => route.path == '/convites/compartilhar'),
+      isEmpty,
+    );
+  });
+
+  test('/invite is no longer implemented via RedirectRoute', () {
+    final module = InvitesModule();
+    final inviteRoute =
+        module.routes.firstWhere((route) => route.path == '/invite');
+
+    expect(inviteRoute, isNot(isA<RedirectRoute>()));
+  });
+
+  test('anonymous invite preview allowance requires a non-empty code', () {
+    expect(
+      InvitesModule.allowAnonymousInvitePreviewForTesting(
+        _FakeRouteMatch(
+          fullPath: '/convites',
+          queryParams: const {'code': 'ABC123'},
+        ),
+      ),
+      isTrue,
+    );
+    expect(
+      InvitesModule.allowAnonymousInvitePreviewForTesting(
+        _FakeRouteMatch(fullPath: '/convites'),
+      ),
+      isFalse,
+    );
+    expect(
+      InvitesModule.allowAnonymousInvitePreviewForTesting(
+        _FakeRouteMatch(
+          fullPath: '/invite',
+          queryParams: const {'code': '   '},
+        ),
+      ),
+      isFalse,
+    );
+  });
+}
+
+class _FakeRouteMatch extends Fake implements RouteMatch {
+  _FakeRouteMatch({
+    required this.fullPath,
+    Map<String, dynamic> queryParams = const {},
+  }) : _queryParams = Parameters(queryParams);
+
+  @override
+  final String fullPath;
+
+  final Parameters _queryParams;
+
+  @override
+  Parameters get queryParams => _queryParams;
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract {
+  @override
+  Object get backend => Object();
+
+  @override
+  String get userToken => '';
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {}
+
+  @override
+  bool get isUserLoggedIn => false;
+
+  @override
+  bool get isAuthorized => false;
+
+  @override
+  Future<String> getDeviceId() async => 'device-id';
+
+  @override
+  Future<String?> getUserId() async => null;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(AuthRepositoryContractParamString email,
+      AuthRepositoryContractParamString password) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+      AuthRepositoryContractParamString email,
+      AuthRepositoryContractParamString codigoEnviado) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> createNewPassword(AuthRepositoryContractParamString newPassword,
+      AuthRepositoryContractParamString confirmPassword) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+      AuthRepositoryContractParamString email) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}

@@ -1,0 +1,1580 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:belluga_discovery_filters/belluga_discovery_filters.dart';
+import 'package:festou_app/domain/app_data/discovery_filter_selection_snapshot.dart';
+import 'package:festou_app/domain/app_data/location_origin_settings.dart';
+import 'package:festou_app/domain/app_data/location_origin_resolution.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_discovery_filter_token_value.dart';
+import 'package:festou_app/domain/map/geo_distance.dart';
+import 'package:festou_app/domain/map/value_objects/distance_in_meters_value.dart';
+import 'package:festou_app/domain/proximity_preferences/proximity_preference.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/proximity_preferences_repository_contract.dart';
+import 'package:festou_app/domain/repositories/schedule_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_events_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:festou_app/domain/services/location_origin_service_contract.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/domain/upcoming_ocurrence/projections/upcoming_ocurrence_resume.dart';
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/latitude_value.dart';
+import 'package:festou_app/domain/map/value_objects/longitude_value.dart';
+import 'package:festou_app/infrastructure/services/location_origin_resolution_request_factory.dart';
+import 'package:festou_app/presentation/shared/discovery_filters/public_discovery_filter_controller_mixin.dart';
+import 'package:festou_app/presentation/tenant_public/schedule/screens/event_search_screen/models/agenda_app_bar_controller.dart';
+import 'package:festou_app/presentation/tenant_public/schedule/screens/event_search_screen/models/invite_filter.dart';
+import 'package:festou_app/presentation/tenant_public/home/screens/tenant_home_screen/widgets/agenda_section/models/tenant_home_agenda_display_state.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart' show Disposable, GetIt;
+import 'package:stream_value/core/stream_value.dart';
+
+class TenantHomeAgendaController extends Object
+    with PublicDiscoveryFilterControllerMixin
+    implements Disposable, AgendaAppBarController {
+  TenantHomeAgendaController({
+    ScheduleRepositoryContract? scheduleRepository,
+    UserEventsRepositoryContract? userEventsRepository,
+    InvitesRepositoryContract? invitesRepository,
+    AppDataRepositoryContract? appDataRepository,
+    AuthRepositoryContract? authRepository,
+    ProximityPreferencesRepositoryContract? proximityPreferencesRepository,
+    LocationOriginServiceContract? locationOriginService,
+    TelemetryRepositoryContract? telemetryRepository,
+    this._isWebRuntime = kIsWeb,
+    this._locationWarmUpTimeout = const Duration(seconds: 4),
+    this._locationPermissionTimeout = const Duration(seconds: 8),
+    this._radiusRefreshDebounce = const Duration(milliseconds: 250),
+  }) : _scheduleRepository =
+           scheduleRepository ?? GetIt.I.get<ScheduleRepositoryContract>(),
+       _userEventsRepository =
+           userEventsRepository ?? GetIt.I.get<UserEventsRepositoryContract>(),
+       _invitesRepository =
+           invitesRepository ?? GetIt.I.get<InvitesRepositoryContract>(),
+       _appDataRepository =
+           appDataRepository ?? GetIt.I.get<AppDataRepositoryContract>(),
+       _authRepository =
+           authRepository ??
+           (GetIt.I.isRegistered<AuthRepositoryContract>()
+               ? GetIt.I.get<AuthRepositoryContract>()
+               : null),
+       _proximityPreferencesRepository =
+           proximityPreferencesRepository ??
+           (GetIt.I.isRegistered<ProximityPreferencesRepositoryContract>()
+               ? GetIt.I.get<ProximityPreferencesRepositoryContract>()
+               : null),
+       _locationOriginService =
+           locationOriginService ??
+           GetIt.I.get<LocationOriginServiceContract>(),
+       _telemetryRepository =
+           telemetryRepository ??
+           (GetIt.I.isRegistered<TelemetryRepositoryContract>()
+               ? GetIt.I.get<TelemetryRepositoryContract>()
+               : null);
+
+  final ScheduleRepositoryContract _scheduleRepository;
+  final UserEventsRepositoryContract _userEventsRepository;
+  final InvitesRepositoryContract _invitesRepository;
+  final AppDataRepositoryContract _appDataRepository;
+  final AuthRepositoryContract? _authRepository;
+  final ProximityPreferencesRepositoryContract? _proximityPreferencesRepository;
+  final LocationOriginServiceContract _locationOriginService;
+  final TelemetryRepositoryContract? _telemetryRepository;
+  final bool _isWebRuntime;
+  final Duration _locationWarmUpTimeout;
+  final Duration _locationPermissionTimeout;
+  final Duration _radiusRefreshDebounce;
+
+  static const double _fallbackRadiusMeters = 50000.0;
+  static const double _radiusTelemetryChangeEpsilon = 0.001;
+  static const double _radiusCompactScrollEpsilon = 0.5;
+  static const double _locationRefreshMinJumpMeters = 1000.0;
+  static const Duration _firstPageRetryDelay = Duration(milliseconds: 350);
+  static const Duration _initialCanonicalOriginSettleTimeout = Duration(
+    milliseconds: 350,
+  );
+  static const Duration _preservedFirstPageEmptyRetryDelay = Duration(
+    milliseconds: 250,
+  );
+  static const String _homeEventsFilterSurface = 'home.events';
+  static const DiscoveryFilterPolicy _homeEventsFilterPolicy =
+      DiscoveryFilterPolicy(
+        primarySelectionMode: DiscoveryFilterSelectionMode.single,
+        taxonomySelectionMode: DiscoveryFilterSelectionMode.multiple,
+        primaryLayoutMode: DiscoveryFilterLayoutMode.row,
+        taxonomyLayoutMode: DiscoveryFilterLayoutMode.row,
+      );
+  static const String _loadingLocationLabel = 'Encontrando sua localização...';
+  static const String _loadingNearbyEventsLabel =
+      'Buscando eventos perto de você...';
+  static const String _radiusChangedEventName = 'agenda_radius_changed';
+  static const String _radiusChangedSurface = 'home';
+  static final Uri _localEventPlaceholderUri = Uri.parse(
+    'asset://event-placeholder',
+  );
+
+  @override
+  final searchController = TextEditingController();
+  @override
+  final focusNode = FocusNode();
+
+  final displayStateStreamValue = StreamValue<TenantHomeAgendaDisplayState?>(
+    defaultValue: null,
+  );
+  final isInitialLoadingStreamValue = StreamValue<bool>(defaultValue: true);
+  final initialLoadingLabelStreamValue = StreamValue<String>(
+    defaultValue: _loadingLocationLabel,
+  );
+  final isPageLoadingStreamValue = StreamValue<bool>(defaultValue: false);
+  final hasMoreStreamValue = StreamValue<bool>(defaultValue: true);
+  @override
+  final showHistoryStreamValue = StreamValue<bool>(defaultValue: false);
+  @override
+  final searchActiveStreamValue = StreamValue<bool>(defaultValue: false);
+  @override
+  final inviteFilterStreamValue = StreamValue<InviteFilter>(
+    defaultValue: InviteFilter.none,
+  );
+  @override
+  final radiusMetersStreamValue = StreamValue<double>(
+    defaultValue: _fallbackRadiusMeters,
+  );
+  @override
+  final isRadiusRefreshLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  @override
+  final isRadiusActionCompactStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final StreamValue<double> _maxRadiusMetersStreamValue = StreamValue<double>(
+    defaultValue: _fallbackRadiusMeters,
+  );
+  @override
+  final discoveryFilterCatalogStreamValue = StreamValue<DiscoveryFilterCatalog>(
+    defaultValue: const DiscoveryFilterCatalog(
+      surface: _homeEventsFilterSurface,
+    ),
+  );
+  @override
+  final discoveryFilterSelectionStreamValue =
+      StreamValue<DiscoveryFilterSelection>(
+        defaultValue: const DiscoveryFilterSelection(),
+      );
+  @override
+  final isDiscoveryFilterPanelVisibleStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  @override
+  final isDiscoveryFilterCatalogLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final hasCanonicalDiscoveryFilterCatalogStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+
+  @override
+  StreamValue<double> get maxRadiusMetersStreamValue =>
+      _maxRadiusMetersStreamValue;
+
+  @override
+  double get minRadiusMeters => _resolveMinRadiusMeters();
+
+  @override
+  DiscoveryFilterPolicy get discoveryFilterPolicy => _homeEventsFilterPolicy;
+
+  StreamSubscription? _confirmedEventsSubscription;
+  StreamSubscription? _pendingInvitesSubscription;
+  StreamSubscription<LocationOriginResolution?>? _effectiveOriginSubscription;
+  StreamSubscription? _radiusSubscription;
+  StreamSubscription<ProximityPreference?>? _proximityPreferenceSubscription;
+  Timer? _radiusRefreshDebounceTimer;
+  bool _outerScrollCompactHint = false;
+  bool _innerScrollCompactHint = false;
+  bool _isFetching = false;
+  bool _isRefreshing = false;
+  bool _hasStartedAgendaFetch = false;
+  bool _hasMore = true;
+  bool _isDisposed = false;
+  bool _hasQueuedRefresh = false;
+  bool _queuedRefreshPreserveCurrentResults = true;
+  bool _hasCanonicalOriginSubscription = false;
+  bool _requiresInitialOriginRevalidation = false;
+  bool _isRevealingDiscoveryFilterPanel = false;
+  int _radiusSelectionRevision = 0;
+  Future<void>? _initInFlight;
+  double? _effectiveOriginLat;
+  double? _effectiveOriginLng;
+  LocationOriginSettings? _effectiveOriginSettings;
+  double? _pendingPersistedRadiusEchoMeters;
+  bool _locationPermissionRequested = false;
+  AppDataDiscoveryFilterSelectionSnapshot?
+  _persistedDiscoveryFilterSelectionSnapshot;
+  Uri get defaultEventImageUri {
+    final configured = _appDataRepository.appData.mainLogoDarkUrl.value;
+    if (configured != null && configured.toString().trim().isNotEmpty) {
+      return configured;
+    }
+    return _localEventPlaceholderUri;
+  }
+
+  StreamValue<UserContract?>? get authUserStreamValue =>
+      _authRepository?.userStreamValue;
+
+  bool get isAuthorized => _authRepository?.isAuthorized ?? true;
+
+  bool get shouldShowInviteFilterAction => !_isWebRuntime || isAuthorized;
+
+  List<EventModel>? get displayedEvents =>
+      displayStateStreamValue.value?.events;
+
+  @override
+  AppDataRepositoryContract? get publicDiscoveryFilterAppDataRepository =>
+      _appDataRepository;
+
+  @override
+  String get publicDiscoveryFilterSurface => _homeEventsFilterSurface;
+
+  @override
+  bool get isPublicDiscoveryFilterDisposed => _isDisposed;
+
+  @override
+  String get publicDiscoveryFilterLogLabel => 'TenantHomeAgendaController';
+
+  bool get hasCanonicalDiscoveryFilterCatalog =>
+      hasCanonicalDiscoveryFilterCatalogStreamValue.value;
+
+  @override
+  void onPublicDiscoveryFilterSelectionChanged(
+    DiscoveryFilterSelection selection,
+  ) {
+    _persistedDiscoveryFilterSelectionSnapshot =
+        discoveryFilterSelectionSnapshot(selection);
+    unawaited(_refresh(preserveCurrentResults: true));
+  }
+
+  void _ifAlive(VoidCallback writer) {
+    if (_isDisposed) return;
+    writer();
+  }
+
+  void setRadiusActionCompactState(bool isCompact) {
+    _outerScrollCompactHint = isCompact;
+    _innerScrollCompactHint = isCompact;
+    _publishRadiusActionCompactState();
+  }
+
+  void updateRadiusActionCompactStateFromOuterScroll(double pixels) {
+    _outerScrollCompactHint = _resolveRadiusActionCompactHint(
+      current: _outerScrollCompactHint,
+      pixels: pixels,
+    );
+    _hideDiscoveryFilterPanelWhenScrolled(pixels);
+    _publishRadiusActionCompactState();
+  }
+
+  void updateRadiusActionCompactStateFromScroll(double pixels) {
+    _innerScrollCompactHint = _resolveRadiusActionCompactHint(
+      current: _innerScrollCompactHint,
+      pixels: pixels,
+    );
+    _hideDiscoveryFilterPanelWhenScrolled(pixels);
+    _publishRadiusActionCompactState();
+  }
+
+  void _hideDiscoveryFilterPanelWhenScrolled(double pixels) {
+    if (_isRevealingDiscoveryFilterPanel) {
+      return;
+    }
+    updateDiscoveryFilterPanelVisibilityFromScroll(
+      pixels,
+      epsilon: _radiusCompactScrollEpsilon,
+    );
+  }
+
+  void openDiscoveryFilterPanelForReveal() {
+    _isRevealingDiscoveryFilterPanel = true;
+    setDiscoveryFilterPanelVisible(true);
+  }
+
+  void closeDiscoveryFilterPanel() {
+    _isRevealingDiscoveryFilterPanel = false;
+    setDiscoveryFilterPanelVisible(false);
+  }
+
+  void completeDiscoveryFilterPanelReveal() {
+    _isRevealingDiscoveryFilterPanel = false;
+  }
+
+  bool _resolveRadiusActionCompactHint({
+    required bool current,
+    required double pixels,
+  }) {
+    return pixels > _radiusCompactScrollEpsilon;
+  }
+
+  void _publishRadiusActionCompactState() {
+    final shouldCompact = _outerScrollCompactHint || _innerScrollCompactHint;
+    if (isRadiusActionCompactStreamValue.value == shouldCompact) {
+      return;
+    }
+    _ifAlive(() => isRadiusActionCompactStreamValue.addValue(shouldCompact));
+  }
+
+  ScheduleRepoBool _toScheduleBool(bool value) {
+    return ScheduleRepoBool.fromRaw(value, defaultValue: value);
+  }
+
+  ScheduleRepoString _toScheduleText(String value) {
+    return ScheduleRepoString.fromRaw(value, defaultValue: value);
+  }
+
+  ScheduleRepoDouble _toScheduleDouble(double value) {
+    return ScheduleRepoDouble.fromRaw(value, defaultValue: value);
+  }
+
+  ScheduleRepoDouble? _toNullableScheduleDouble(double? value) {
+    if (value == null) {
+      return null;
+    }
+    return _toScheduleDouble(value);
+  }
+
+  Future<void> init({bool startWithHistory = false}) async {
+    final inFlight = _initInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final initFuture = _initInternal(startWithHistory: startWithHistory)
+        .whenComplete(() {
+          _initInFlight = null;
+        });
+    _initInFlight = initFuture;
+    return initFuture;
+  }
+
+  Future<void> _initInternal({required bool startWithHistory}) async {
+    _ifAlive(() => showHistoryStreamValue.addValue(startWithHistory));
+    _ifAlive(
+      () => radiusMetersStreamValue.addValue(_resolveDefaultRadiusMeters()),
+    );
+    _listenForStatusChanges();
+    _listenForRadiusChanges();
+    final restoredSelectionSnapshot =
+        await loadPersistedPublicDiscoveryFilterSelectionSnapshot();
+    _persistedDiscoveryFilterSelectionSnapshot = restoredSelectionSnapshot;
+    final restoredSelection = restoredSelectionSnapshot == null
+        ? null
+        : discoveryFilterSelectionFromSnapshot(restoredSelectionSnapshot);
+    if (restoredSelection != null &&
+        !samePublicDiscoveryFilterSelection(
+          discoveryFilterSelectionStreamValue.value,
+          restoredSelection,
+        )) {
+      _ifAlive(
+        () => discoveryFilterSelectionStreamValue.addValue(restoredSelection),
+      );
+    }
+
+    final restored = _restoreFromRepositoryCache();
+    if (restored) {
+      _listenForCanonicalOriginChanges();
+      _ifAlive(() => isInitialLoadingStreamValue.addValue(false));
+      _ifAlive(() => initialLoadingLabelStreamValue.addValue(''));
+      unawaited(_revalidateRestoredHomeAgendaCache());
+      return;
+    }
+
+    await _resolveEffectiveOrigin(warmUpIfPossible: false);
+    final hasCachedEffectiveOrigin =
+        _effectiveOriginLat != null && _effectiveOriginLng != null;
+    if (!hasCachedEffectiveOrigin) {
+      // A proximity query without an origin is invalid. This is the only
+      // initial path that may wait for permission or a live coordinate.
+      await _resolveEffectiveOrigin(warmUpIfPossible: true);
+      await _awaitPendingInitialEffectiveOriginIfNeeded();
+    }
+    _ifAlive(
+      () => initialLoadingLabelStreamValue.addValue(_loadingNearbyEventsLabel),
+    );
+    unawaited(_initializeInvitesInBackground());
+    if (hasCachedEffectiveOrigin) {
+      unawaited(_resolveInitialLiveOriginInBackground());
+    }
+    await _refresh(resolveOrigin: false);
+    _listenForCanonicalOriginChanges();
+    if (_requiresInitialOriginRevalidation) {
+      _requiresInitialOriginRevalidation = false;
+      unawaited(_refresh(preserveCurrentResults: true));
+    }
+  }
+
+  Future<void> _initializeInvitesInBackground() async {
+    try {
+      await _invitesRepository.init();
+    } catch (error) {
+      debugPrint('TenantHomeAgendaController.init invites failed: $error');
+    }
+  }
+
+  Future<void> _resolveInitialLiveOriginInBackground() async {
+    final initialOriginLat = _effectiveOriginLat;
+    final initialOriginLng = _effectiveOriginLng;
+    final initialRadiusMeters = radiusMetersStreamValue.value;
+    final initialRadiusSelectionRevision = _radiusSelectionRevision;
+    try {
+      await _resolveEffectiveOrigin(warmUpIfPossible: true);
+      final originChanged = _didAgendaOriginChange(
+        previousOriginLat: initialOriginLat,
+        previousOriginLng: initialOriginLng,
+        nextOriginLat: _effectiveOriginLat,
+        nextOriginLng: _effectiveOriginLng,
+      );
+      final radiusChangedByWarmUp =
+          (initialRadiusMeters - radiusMetersStreamValue.value).abs() >=
+              0.001 &&
+          initialRadiusSelectionRevision == _radiusSelectionRevision;
+      final agendaQueryChanged = originChanged || radiusChangedByWarmUp;
+      if (agendaQueryChanged && !_hasCanonicalOriginSubscription) {
+        _requiresInitialOriginRevalidation = true;
+      } else if (radiusChangedByWarmUp && !originChanged) {
+        // The stream is emitted before radius seeding completes, so an
+        // unchanged origin still needs one refresh for a new radius.
+        unawaited(_refresh(preserveCurrentResults: true));
+      }
+    } catch (error) {
+      debugPrint(
+        'TenantHomeAgendaController.init location resolution failed: $error',
+      );
+    }
+  }
+
+  Future<void> _awaitPendingInitialEffectiveOriginIfNeeded() async {
+    if (_effectiveOriginLat != null && _effectiveOriginLng != null) {
+      return;
+    }
+    if (!_locationPermissionRequested) {
+      return;
+    }
+
+    final cachedResolution =
+        _locationOriginService.effectiveOriginStreamValue.value;
+    if (cachedResolution?.effectiveCoordinate != null) {
+      _applyResolvedEffectiveOrigin(cachedResolution!);
+      return;
+    }
+
+    try {
+      final resolution = await _locationOriginService
+          .effectiveOriginStreamValue
+          .stream
+          .firstWhere((value) => value?.effectiveCoordinate != null)
+          .timeout(_initialCanonicalOriginSettleTimeout);
+      if (resolution != null) {
+        _applyResolvedEffectiveOrigin(resolution);
+      }
+    } on Object {
+      // Best-effort settle window for async stream publication after permission.
+    }
+  }
+
+  Future<void> _refresh({
+    bool preserveCurrentResults = false,
+    bool resolveOrigin = true,
+  }) async {
+    if (_isRefreshing) {
+      _queueRefreshRequest(preserveCurrentResults: preserveCurrentResults);
+      return;
+    }
+    _isRefreshing = true;
+    final shouldShowInitialLoading = !preserveCurrentResults;
+    final previousCanonicalEvents = preserveCurrentResults
+        ? List<EventModel>.unmodifiable(_currentCanonicalEvents())
+        : const <EventModel>[];
+    _hasMore = true;
+    _ifAlive(() => hasMoreStreamValue.addValue(true));
+    if (shouldShowInitialLoading) {
+      _ifAlive(() => isInitialLoadingStreamValue.addValue(true));
+      _ifAlive(
+        () => initialLoadingLabelStreamValue.addValue(
+          resolveOrigin ? _loadingLocationLabel : _loadingNearbyEventsLabel,
+        ),
+      );
+    }
+    try {
+      final stopwatch = Stopwatch()..start();
+      int locationElapsed = 0;
+      final shouldResolveOrigin =
+          resolveOrigin &&
+          (shouldShowInitialLoading ||
+              _effectiveOriginLat == null ||
+              _effectiveOriginLng == null);
+      if (shouldResolveOrigin) {
+        if (shouldShowInitialLoading) {
+          _ifAlive(
+            () => initialLoadingLabelStreamValue.addValue('Localizando...'),
+          );
+        }
+        await _resolveEffectiveOrigin(
+          warmUpIfPossible: shouldShowInitialLoading,
+        );
+        locationElapsed = stopwatch.elapsedMilliseconds;
+      }
+
+      if (_effectiveOriginLat == null || _effectiveOriginLng == null) {
+        _publishUnavailableOriginState(
+          preserveCurrentResults: preserveCurrentResults,
+        );
+        return;
+      }
+
+      if (shouldShowInitialLoading) {
+        _ifAlive(
+          () => initialLoadingLabelStreamValue.addValue(
+            _loadingNearbyEventsLabel,
+          ),
+        );
+      }
+      _hasMore = true;
+      _ifAlive(() => hasMoreStreamValue.addValue(true));
+      await _fetchAgenda(
+        append: false,
+        showPageLoadingForFirstPage: preserveCurrentResults,
+        previousCanonicalEvents: previousCanonicalEvents,
+      );
+      final totalElapsed = stopwatch.elapsedMilliseconds;
+      debugPrint(
+        'TenantHomeAgendaController._refresh: '
+        'Location resolution took ${locationElapsed}ms, '
+        'API fetch took ${totalElapsed - locationElapsed}ms. '
+        'Total: ${totalElapsed}ms.',
+      );
+    } catch (error) {
+      if (_isDisposed) {
+        return;
+      }
+      debugPrint('TenantHomeAgendaController._refresh failed: $error');
+      if (shouldShowInitialLoading) {
+        final recovered = await _retryFirstPageAfterFailure();
+        if (!recovered) {
+          _publishEmptyFirstPageStateIfNeeded();
+          debugPrint(
+            'TenantHomeAgendaController._refresh retry failed after first-page error.',
+          );
+        }
+      }
+    } finally {
+      if (shouldShowInitialLoading) {
+        _ifAlive(() => isInitialLoadingStreamValue.addValue(false));
+        _ifAlive(() => initialLoadingLabelStreamValue.addValue(''));
+      }
+      _isRefreshing = false;
+      _consumeQueuedRefreshRequestIfNeeded();
+      _maybeResolveRadiusRefreshLoading();
+    }
+  }
+
+  Future<bool> _retryFirstPageAfterFailure() async {
+    if (_isDisposed) {
+      return false;
+    }
+
+    await Future<void>.delayed(_firstPageRetryDelay);
+    if (_isDisposed) {
+      return false;
+    }
+
+    try {
+      await _resolveEffectiveOrigin(warmUpIfPossible: false);
+      if (_effectiveOriginLat == null || _effectiveOriginLng == null) {
+        return false;
+      }
+      _ifAlive(
+        () =>
+            initialLoadingLabelStreamValue.addValue(_loadingNearbyEventsLabel),
+      );
+      await _fetchAgenda(append: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _publishEmptyFirstPageStateIfNeeded() {
+    if (_isDisposed) {
+      return;
+    }
+    _hasMore = false;
+    _ifAlive(() => hasMoreStreamValue.addValue(false));
+    if (displayStateStreamValue.value != null) {
+      return;
+    }
+    _ifAlive(
+      () => displayStateStreamValue.addValue(
+        TenantHomeAgendaDisplayState(events: const <EventModel>[]),
+      ),
+    );
+  }
+
+  void _publishUnavailableOriginState({required bool preserveCurrentResults}) {
+    if (_isDisposed) {
+      return;
+    }
+    _hasMore = false;
+    _ifAlive(() => hasMoreStreamValue.addValue(false));
+    if (preserveCurrentResults && displayStateStreamValue.value != null) {
+      return;
+    }
+    _ifAlive(
+      () => displayStateStreamValue.addValue(
+        TenantHomeAgendaDisplayState(events: const <EventModel>[]),
+      ),
+    );
+  }
+
+  Future<void> loadNextPage() async {
+    if (!_hasMore || _isFetching || _isRefreshing) return;
+    await _fetchAgenda(append: true);
+  }
+
+  void _queueRefreshRequest({required bool preserveCurrentResults}) {
+    _hasQueuedRefresh = true;
+    _queuedRefreshPreserveCurrentResults =
+        _queuedRefreshPreserveCurrentResults && preserveCurrentResults;
+  }
+
+  void _consumeQueuedRefreshRequestIfNeeded() {
+    if (_isDisposed || !_hasQueuedRefresh) {
+      return;
+    }
+    final preserveCurrentResults = _queuedRefreshPreserveCurrentResults;
+    _hasQueuedRefresh = false;
+    _queuedRefreshPreserveCurrentResults = true;
+    unawaited(_refresh(preserveCurrentResults: preserveCurrentResults));
+  }
+
+  Future<void> _fetchAgenda({
+    required bool append,
+    bool showPageLoadingForFirstPage = false,
+    List<EventModel> previousCanonicalEvents = const <EventModel>[],
+  }) async {
+    if (_isFetching) return;
+    _isFetching = true;
+    _hasStartedAgendaFetch = true;
+    if (append || showPageLoadingForFirstPage) {
+      _ifAlive(() => isPageLoadingStreamValue.addValue(true));
+    }
+
+    try {
+      final showPastOnly = _toScheduleBool(showHistoryStreamValue.value);
+      final searchQuery = _toScheduleText(searchController.text);
+      final confirmedOnly = _toScheduleBool(
+        inviteFilterStreamValue.value == InviteFilter.confirmedOnly,
+      );
+      final originLat = _toNullableScheduleDouble(_effectiveOriginLat);
+      final originLng = _toNullableScheduleDouble(_effectiveOriginLng);
+      final maxDistanceMeters = _toScheduleDouble(
+        radiusMetersStreamValue.value,
+      );
+      final categories = _selectedEventCategories();
+      final taxonomy = _selectedEventTaxonomyEntries();
+      final previousCanonicalEventCount = previousCanonicalEvents.isNotEmpty
+          ? previousCanonicalEvents.length
+          : _currentCanonicalEvents().length;
+
+      List<EventModel> resolvedEvents;
+      if (!append) {
+        resolvedEvents = await _scheduleRepository.loadHomeAgenda(
+          showPastOnly: showPastOnly,
+          searchQuery: searchQuery,
+          confirmedOnly: confirmedOnly,
+          originLat: originLat,
+          originLng: originLng,
+          maxDistanceMeters: maxDistanceMeters,
+          categories: categories,
+          taxonomy: taxonomy,
+        );
+      } else {
+        resolvedEvents = await _scheduleRepository.loadMoreHomeAgenda(
+          showPastOnly: showPastOnly,
+          searchQuery: searchQuery,
+          confirmedOnly: confirmedOnly,
+          originLat: originLat,
+          originLng: originLng,
+          maxDistanceMeters: maxDistanceMeters,
+          categories: categories,
+          taxonomy: taxonomy,
+        );
+      }
+
+      final selectionAdjusted = _reconcileRuntimeDiscoveryFilterCatalog();
+      if (selectionAdjusted) {
+        return;
+      }
+
+      if (!append &&
+          showPageLoadingForFirstPage &&
+          previousCanonicalEvents.isNotEmpty &&
+          resolvedEvents.isEmpty) {
+        await Future<void>.delayed(_preservedFirstPageEmptyRetryDelay);
+        if (_isDisposed) {
+          return;
+        }
+        resolvedEvents = await _scheduleRepository.loadHomeAgenda(
+          showPastOnly: showPastOnly,
+          searchQuery: searchQuery,
+          confirmedOnly: confirmedOnly,
+          originLat: originLat,
+          originLng: originLng,
+          maxDistanceMeters: maxDistanceMeters,
+          categories: categories,
+          taxonomy: taxonomy,
+        );
+      }
+
+      _hasMore = !append
+          ? resolvedEvents.isNotEmpty
+          : resolvedEvents.length > previousCanonicalEventCount;
+      _ifAlive(() => hasMoreStreamValue.addValue(_hasMore));
+      _applyFiltersAndPublish();
+    } finally {
+      _isFetching = false;
+      _ifAlive(() => isPageLoadingStreamValue.addValue(false));
+    }
+  }
+
+  @override
+  void toggleHistory() {
+    final currentValue = showHistoryStreamValue.value;
+    _ifAlive(() => showHistoryStreamValue.addValue(!currentValue));
+    _refresh();
+  }
+
+  void setInviteFilter(InviteFilter filter) {
+    _ifAlive(() => inviteFilterStreamValue.addValue(filter));
+    _applyFiltersAndPublish();
+  }
+
+  @override
+  void cycleInviteFilter() {
+    setInviteFilter(inviteFilterStreamValue.value.next);
+  }
+
+  void setSearchActive(bool active) {
+    _ifAlive(() => searchActiveStreamValue.addValue(active));
+    if (active) {
+      focusNode.requestFocus();
+    } else {
+      focusNode.unfocus();
+    }
+  }
+
+  @override
+  void toggleSearchMode() {
+    setSearchActive(!searchActiveStreamValue.value);
+  }
+
+  @override
+  void setRadiusMeters(double meters) {
+    if (meters <= 0) return;
+    final clamped = _clampRadiusMeters(meters);
+    final previousRadius = radiusMetersStreamValue.value;
+    _radiusSelectionRevision += 1;
+    _pendingPersistedRadiusEchoMeters = clamped;
+    _ifAlive(() => radiusMetersStreamValue.addValue(clamped));
+    if (_didRadiusChangeEffectively(
+      previousRadius: previousRadius,
+      nextRadius: clamped,
+    )) {
+      unawaited(
+        _logRadiusChangedTelemetry(
+          previousRadiusMeters: previousRadius,
+          selectedRadiusMeters: clamped,
+        ),
+      );
+    }
+    unawaited(_persistSelectedRadiusPreference(clamped));
+    _scheduleRadiusRefresh();
+  }
+
+  bool _didRadiusChangeEffectively({
+    required double previousRadius,
+    required double nextRadius,
+  }) {
+    return (nextRadius - previousRadius).abs() > _radiusTelemetryChangeEpsilon;
+  }
+
+  Future<void> _logRadiusChangedTelemetry({
+    required double previousRadiusMeters,
+    required double selectedRadiusMeters,
+  }) async {
+    final telemetryRepository = _telemetryRepository;
+    if (telemetryRepository == null) {
+      return;
+    }
+    await telemetryRepository.logEvent(
+      EventTrackerEvents.selectItem,
+      eventName: telemetryRepoString(_radiusChangedEventName),
+      properties: telemetryRepoMap(<String, dynamic>{
+        'surface': _radiusChangedSurface,
+        'previous_radius_meters': previousRadiusMeters.round(),
+        'selected_radius_meters': selectedRadiusMeters.round(),
+      }),
+    );
+  }
+
+  void setInitialSearchQuery(String? query) {
+    final normalized = query?.trim() ?? '';
+    if (normalized.isEmpty) return;
+    searchController.text = normalized;
+    searchController.selection = TextSelection.fromPosition(
+      TextPosition(offset: normalized.length),
+    );
+    _refresh();
+  }
+
+  @override
+  Future<void> searchEvents(String query) async {
+    await _refresh();
+  }
+
+  List<EventModel> _applyInviteFilter(List<EventModel> events) {
+    final filter = inviteFilterStreamValue.value;
+    if (filter == InviteFilter.none) return events;
+
+    final confirmedIds =
+        _userEventsRepository.confirmedOccurrenceIdsStream.value;
+    final pendingIds = _invitesRepository.pendingInvitesStreamValue.value
+        .map((invite) => invite.occurrenceId?.trim() ?? '')
+        .where((occurrenceId) => occurrenceId.isNotEmpty)
+        .toSet();
+
+    bool isConfirmed(String id) =>
+        confirmedIds.any((confirmed) => confirmed.value == id);
+    bool hasPending(String id) => pendingIds.contains(id);
+
+    return events.where((event) {
+      final id = _eventOccurrenceIdentity(event);
+      switch (filter) {
+        case InviteFilter.none:
+          return true;
+        case InviteFilter.pendingOnly:
+          return hasPending(id);
+        case InviteFilter.confirmedOnly:
+          return isConfirmed(id);
+      }
+    }).toList();
+  }
+
+  void _applyFiltersAndPublish() {
+    if (_scheduleRepository.homeAgendaStreamValue.value == null &&
+        displayStateStreamValue.value == null) {
+      return;
+    }
+    final inviteFiltered = _applyInviteFilter(_currentCanonicalEvents());
+    _ifAlive(
+      () => displayStateStreamValue.addValue(
+        TenantHomeAgendaDisplayState(events: inviteFiltered),
+      ),
+    );
+  }
+
+  List<EventModel> _currentCanonicalEvents() {
+    return _scheduleRepository.homeAgendaStreamValue.value ??
+        const <EventModel>[];
+  }
+
+  bool _restoreFromRepositoryCache() {
+    final cacheOrigin = _currentCacheReferenceOrigin();
+    final showPastOnly = showHistoryStreamValue.value;
+    final searchQuery = searchController.text.trim();
+    final confirmedOnly =
+        inviteFilterStreamValue.value == InviteFilter.confirmedOnly;
+    final cache = _scheduleRepository.readHomeAgenda(
+      showPastOnly: _toScheduleBool(showPastOnly),
+      searchQuery: _toScheduleText(searchQuery),
+      confirmedOnly: _toScheduleBool(confirmedOnly),
+      originLat: _toNullableScheduleDouble(cacheOrigin?.latitude),
+      originLng: _toNullableScheduleDouble(cacheOrigin?.longitude),
+      maxDistanceMeters: _toScheduleDouble(radiusMetersStreamValue.value),
+      categories: _selectedEventCategories(),
+      taxonomy: _selectedEventTaxonomyEntries(),
+    );
+    if (cache == null) {
+      return false;
+    }
+
+    _hasMore = cache.isNotEmpty;
+    _effectiveOriginLat = cacheOrigin?.latitude;
+    _effectiveOriginLng = cacheOrigin?.longitude;
+    _ifAlive(() => hasMoreStreamValue.addValue(_hasMore));
+    _reconcileRuntimeDiscoveryFilterCatalog();
+    _applyFiltersAndPublish();
+    return true;
+  }
+
+  bool isOccurrenceConfirmed(String occurrenceId) => _userEventsRepository
+      .isOccurrenceConfirmed(
+        userEventsRepoString(occurrenceId, defaultValue: '', isRequired: true),
+      )
+      .value;
+
+  int pendingInviteCount(String occurrenceId) => _invitesRepository
+      .pendingInvitesStreamValue
+      .value
+      .where((invite) => invite.occurrenceId == occurrenceId)
+      .length;
+
+  String _eventOccurrenceIdentity(EventModel event) =>
+      event.selectedOccurrenceId?.trim() ?? '';
+
+  String? distanceLabelFor(UpcomingOcurrenceResume event) {
+    final userCoordinate = _currentCacheReferenceOrigin();
+    final eventCoordinate = event.coordinate;
+    if (userCoordinate == null || eventCoordinate == null) {
+      return null;
+    }
+    final distanceMeters = haversineDistanceMeters(
+      coordinateA: userCoordinate,
+      coordinateB: eventCoordinate,
+    );
+    return _formatDistanceLabel(distanceMeters.value);
+  }
+
+  CityCoordinate? _currentCacheReferenceOrigin() {
+    if (_effectiveOriginLat != null && _effectiveOriginLng != null) {
+      return CityCoordinate(
+        latitudeValue: _parseLatitude(_effectiveOriginLat!),
+        longitudeValue: _parseLongitude(_effectiveOriginLng!),
+      );
+    }
+    return _locationOriginService.resolveCached().effectiveCoordinate;
+  }
+
+  String _formatDistanceLabel(double meters) {
+    if (meters < 1000) {
+      return '${meters.round()} m';
+    }
+    return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+
+  List<ScheduleRepoString>? _selectedEventCategories() {
+    return _selectedEventCategoriesForSelection(
+      discoveryFilterSelectionStreamValue.value,
+    );
+  }
+
+  List<ScheduleRepoString>? _selectedEventCategoriesForSelection(
+    DiscoveryFilterSelection selection, {
+    DiscoveryFilterCatalog? catalogOverride,
+    bool allowPersistedFallback = true,
+  }) {
+    final payload = DiscoveryFilterQueryPayload.compile(
+      catalog: catalogOverride ?? discoveryFilterCatalogStreamValue.value,
+      selection: selection,
+    );
+    final categories = <String>{...payload.typesForEntity('event')};
+    if (categories.isEmpty &&
+        allowPersistedFallback &&
+        _canUsePersistedDiscoveryFilterSelectionSnapshot(selection)) {
+      categories.addAll(
+        _persistedDiscoveryFilterSelectionSnapshot!
+            .typeFiltersForEntity(
+              AppDataDiscoveryFilterTokenValue.fromRaw('event'),
+            )
+            .map((value) => value.value),
+      );
+    }
+    if (categories.isEmpty) {
+      return null;
+    }
+    return categories
+        .map(_toScheduleText)
+        .where((value) => value.value.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  ScheduleRepoTaxonomyEntries? _selectedEventTaxonomyEntries() {
+    return _selectedEventTaxonomyEntriesForSelection(
+      discoveryFilterSelectionStreamValue.value,
+    );
+  }
+
+  ScheduleRepoTaxonomyEntries? _selectedEventTaxonomyEntriesForSelection(
+    DiscoveryFilterSelection selection, {
+    DiscoveryFilterCatalog? catalogOverride,
+    bool allowPersistedFallback = true,
+  }) {
+    final payload = DiscoveryFilterQueryPayload.compile(
+      catalog: catalogOverride ?? discoveryFilterCatalogStreamValue.value,
+      selection: selection,
+    );
+    final payloadEntries = payload.taxonomyEntries
+        .map((entry) => (type: entry.type, value: entry.value))
+        .toList(growable: false);
+    final entries =
+        payloadEntries.isNotEmpty ||
+            !allowPersistedFallback ||
+            !_canUsePersistedDiscoveryFilterSelectionSnapshot(selection)
+        ? payloadEntries
+        : selection.taxonomyTermKeys.entries
+              .expand(
+                (entry) =>
+                    entry.value.map((value) => (type: entry.key, value: value)),
+              )
+              .toList(growable: false);
+    if (entries.isEmpty) {
+      return null;
+    }
+    final taxonomy = ScheduleRepoTaxonomyEntries();
+    for (final entry in entries) {
+      taxonomy.add(
+        ScheduleRepoTaxonomyEntry(
+          type: _toScheduleText(entry.type),
+          term: _toScheduleText(entry.value),
+        ),
+      );
+    }
+    return taxonomy.isEmpty ? null : taxonomy;
+  }
+
+  bool _reconcileRuntimeDiscoveryFilterCatalog() {
+    return _consumeCanonicalRuntimeDiscoveryFilterCatalog();
+  }
+
+  bool _consumeCanonicalRuntimeDiscoveryFilterCatalog() {
+    final runtimeCatalog =
+        _scheduleRepository.homeAgendaDiscoveryFilterCatalogStreamValue.value;
+    if (runtimeCatalog == null) {
+      if (hasCanonicalDiscoveryFilterCatalogStreamValue.value) {
+        _ifAlive(
+          () => hasCanonicalDiscoveryFilterCatalogStreamValue.addValue(false),
+        );
+      }
+      return false;
+    }
+
+    final selection = discoveryFilterSelectionStreamValue.value;
+    final currentCategories = _selectedEventCategoriesForSelection(selection);
+    final currentTaxonomy = _selectedEventTaxonomyEntriesForSelection(
+      selection,
+    );
+
+    if (!_sameDiscoveryFilterCatalog(
+      discoveryFilterCatalogStreamValue.value,
+      runtimeCatalog,
+    )) {
+      _ifAlive(
+        () => discoveryFilterCatalogStreamValue.addValue(runtimeCatalog),
+      );
+    }
+
+    final repairedSelection = repairPublicDiscoveryFilterSelection(
+      selection,
+      catalogOverride: runtimeCatalog,
+    );
+    final selectionChanged = !samePublicDiscoveryFilterSelection(
+      selection,
+      repairedSelection,
+    );
+    if (selectionChanged) {
+      _ifAlive(
+        () => discoveryFilterSelectionStreamValue.addValue(repairedSelection),
+      );
+    }
+    if (!hasCanonicalDiscoveryFilterCatalogStreamValue.value) {
+      _ifAlive(
+        () => hasCanonicalDiscoveryFilterCatalogStreamValue.addValue(true),
+      );
+    }
+    final repairedCategories = _selectedEventCategoriesForSelection(
+      repairedSelection,
+      catalogOverride: runtimeCatalog,
+      allowPersistedFallback: false,
+    );
+    final repairedTaxonomy = _selectedEventTaxonomyEntriesForSelection(
+      repairedSelection,
+      catalogOverride: runtimeCatalog,
+      allowPersistedFallback: false,
+    );
+    final queryChanged =
+        !_sameEventCategories(currentCategories, repairedCategories) ||
+        !_sameEventTaxonomy(currentTaxonomy, repairedTaxonomy);
+    if (selectionChanged || queryChanged) {
+      _persistedDiscoveryFilterSelectionSnapshot =
+          discoveryFilterSelectionSnapshot(repairedSelection);
+      unawaited(persistPublicDiscoveryFilterSelection(repairedSelection));
+    }
+    if (!queryChanged) {
+      return false;
+    }
+
+    return false;
+  }
+
+  bool _sameDiscoveryFilterCatalog(
+    DiscoveryFilterCatalog left,
+    DiscoveryFilterCatalog right,
+  ) {
+    return jsonEncode(left.toJson()) == jsonEncode(right.toJson());
+  }
+
+  bool _sameEventCategories(
+    List<ScheduleRepoString>? left,
+    List<ScheduleRepoString>? right,
+  ) {
+    final leftValues = (left ?? const <ScheduleRepoString>[])
+        .map((value) => value.value)
+        .toSet();
+    final rightValues = (right ?? const <ScheduleRepoString>[])
+        .map((value) => value.value)
+        .toSet();
+    return leftValues.length == rightValues.length &&
+        leftValues.containsAll(rightValues);
+  }
+
+  bool _sameEventTaxonomy(
+    ScheduleRepoTaxonomyEntries? left,
+    ScheduleRepoTaxonomyEntries? right,
+  ) {
+    final leftValues = (left ?? const ScheduleRepoTaxonomyEntries.empty())
+        .map((value) => '${value.type.value}:${value.term.value}')
+        .toSet();
+    final rightValues = (right ?? const ScheduleRepoTaxonomyEntries.empty())
+        .map((value) => '${value.type.value}:${value.term.value}')
+        .toSet();
+    return leftValues.length == rightValues.length &&
+        leftValues.containsAll(rightValues);
+  }
+
+  bool _canUsePersistedDiscoveryFilterSelectionSnapshot(
+    DiscoveryFilterSelection selection,
+  ) {
+    final snapshot = _persistedDiscoveryFilterSelectionSnapshot;
+    if (snapshot == null || !snapshot.hasTypeFilterSelections) {
+      return false;
+    }
+    return samePublicDiscoveryFilterSelection(
+      selection,
+      discoveryFilterSelectionFromSnapshot(snapshot),
+    );
+  }
+
+  void _listenForStatusChanges() {
+    _confirmedEventsSubscription?.cancel();
+    _pendingInvitesSubscription?.cancel();
+
+    _confirmedEventsSubscription = _userEventsRepository
+        .confirmedOccurrenceIdsStream
+        .stream
+        .listen((_) {
+          _applyFiltersAndPublish();
+        });
+    _pendingInvitesSubscription = _invitesRepository
+        .pendingInvitesStreamValue
+        .stream
+        .listen((_) {
+          _applyFiltersAndPublish();
+        });
+  }
+
+  void _listenForCanonicalOriginChanges() {
+    _effectiveOriginSubscription?.cancel();
+    _hasCanonicalOriginSubscription = true;
+    _effectiveOriginSubscription = _locationOriginService
+        .effectiveOriginStreamValue
+        .stream
+        .listen((resolution) {
+          unawaited(_handleEffectiveOriginUpdate(resolution));
+        });
+  }
+
+  void _listenForRadiusChanges() {
+    _radiusSubscription?.cancel();
+    _proximityPreferenceSubscription?.cancel();
+    _ifAlive(
+      () => _maxRadiusMetersStreamValue.addValue(_configuredMaxRadiusMeters()),
+    );
+    final proximityRepository = _proximityPreferencesRepository;
+    if (proximityRepository != null) {
+      _applyExternalRadiusPreference(
+        proximityRepository.proximityPreference?.maxDistanceMetersValue.value,
+      );
+      _proximityPreferenceSubscription = proximityRepository
+          .proximityPreferenceStreamValue
+          .stream
+          .listen((preference) {
+            _ifAlive(
+              () => _maxRadiusMetersStreamValue.addValue(
+                _configuredMaxRadiusMeters(),
+              ),
+            );
+            _applyExternalRadiusPreference(
+              preference?.maxDistanceMetersValue.value,
+            );
+          });
+      return;
+    }
+
+    _radiusSubscription = _appDataRepository.maxRadiusMetersStreamValue.stream
+        .listen((value) {
+          _ifAlive(
+            () => _maxRadiusMetersStreamValue.addValue(
+              _configuredMaxRadiusMeters(),
+            ),
+          );
+          _applyExternalRadiusPreference(value.value);
+        });
+  }
+
+  void _applyExternalRadiusPreference(double? meters) {
+    if (meters == null || meters <= 0) {
+      return;
+    }
+    final clamped = _clampRadiusMeters(meters);
+    final pendingEcho = _pendingPersistedRadiusEchoMeters;
+    if (pendingEcho != null) {
+      if ((pendingEcho - clamped).abs() < 0.001) {
+        _pendingPersistedRadiusEchoMeters = null;
+      }
+      return;
+    }
+    final current = radiusMetersStreamValue.value;
+    if ((current - clamped).abs() < 0.001) {
+      return;
+    }
+    _radiusSelectionRevision += 1;
+    _ifAlive(() => radiusMetersStreamValue.addValue(clamped));
+    if (!_hasStartedAgendaFetch) {
+      return;
+    }
+    _scheduleRadiusRefresh();
+  }
+
+  Future<void> _persistSelectedRadiusPreference(double meters) async {
+    final value = DistanceInMetersValue(defaultValue: meters)
+      ..parse(meters.toString());
+    try {
+      final repository = _proximityPreferencesRepository;
+      if (repository != null) {
+        await repository.updateMaxDistanceMeters(value);
+      } else {
+        await _appDataRepository.setMaxRadiusMeters(value);
+      }
+    } catch (_) {
+      if ((_pendingPersistedRadiusEchoMeters ?? -1) == meters) {
+        _pendingPersistedRadiusEchoMeters = null;
+      }
+      rethrow;
+    }
+  }
+
+  void _scheduleRadiusRefresh() {
+    _radiusRefreshDebounceTimer?.cancel();
+    _ifAlive(() => isRadiusRefreshLoadingStreamValue.addValue(true));
+    _radiusRefreshDebounceTimer = Timer(_radiusRefreshDebounce, () {
+      _radiusRefreshDebounceTimer = null;
+      if (_isDisposed) {
+        return;
+      }
+      unawaited(_refresh(preserveCurrentResults: true));
+    });
+  }
+
+  void _maybeResolveRadiusRefreshLoading() {
+    final hasPendingDebounce = _radiusRefreshDebounceTimer?.isActive ?? false;
+    if (hasPendingDebounce || _isRefreshing || _hasQueuedRefresh) {
+      return;
+    }
+    _ifAlive(() => isRadiusRefreshLoadingStreamValue.addValue(false));
+  }
+
+  Future<void> _handleEffectiveOriginUpdate(
+    LocationOriginResolution? resolution,
+  ) async {
+    if (resolution == null) {
+      return;
+    }
+    final previousOriginLat = _effectiveOriginLat;
+    final previousOriginLng = _effectiveOriginLng;
+    final previousOriginSettings = _effectiveOriginSettings;
+    final changed = _applyResolvedEffectiveOrigin(resolution);
+    if (!changed) {
+      return;
+    }
+    final shouldRefresh = _shouldRefreshForOriginChange(
+      previousOriginSettings: previousOriginSettings,
+      nextOriginSettings: _effectiveOriginSettings,
+      previousOriginLat: previousOriginLat,
+      previousOriginLng: previousOriginLng,
+      nextOriginLat: _effectiveOriginLat,
+      nextOriginLng: _effectiveOriginLng,
+    );
+    if (!shouldRefresh) {
+      return;
+    }
+    await _refresh(preserveCurrentResults: true);
+  }
+
+  Future<void> _revalidateRestoredHomeAgendaCache() async {
+    if (_isDisposed) {
+      return;
+    }
+    final shouldBootstrapOrigin =
+        _effectiveOriginLat == null || _effectiveOriginLng == null;
+    try {
+      await _resolveEffectiveOrigin(warmUpIfPossible: shouldBootstrapOrigin);
+      if (shouldBootstrapOrigin) {
+        await _awaitPendingInitialEffectiveOriginIfNeeded();
+      }
+    } catch (error) {
+      debugPrint(
+        'TenantHomeAgendaController._revalidateRestoredHomeAgendaCache '
+        'origin resolution failed: $error',
+      );
+    }
+    if (_isDisposed) {
+      return;
+    }
+    await _refresh(preserveCurrentResults: true, resolveOrigin: false);
+  }
+
+  bool _shouldRefreshForOriginChange({
+    required LocationOriginSettings? previousOriginSettings,
+    required LocationOriginSettings? nextOriginSettings,
+    required double? previousOriginLat,
+    required double? previousOriginLng,
+    required double? nextOriginLat,
+    required double? nextOriginLng,
+  }) {
+    if (previousOriginLat == nextOriginLat &&
+        previousOriginLng == nextOriginLng) {
+      return false;
+    }
+    if (!(previousOriginSettings?.sameAs(nextOriginSettings) ??
+        nextOriginSettings == null)) {
+      return true;
+    }
+
+    if (previousOriginLat == null ||
+        previousOriginLng == null ||
+        nextOriginLat == null ||
+        nextOriginLng == null) {
+      return true;
+    }
+
+    return haversineDistanceMeters(
+          coordinateA: CityCoordinate(
+            latitudeValue: _parseLatitude(previousOriginLat),
+            longitudeValue: _parseLongitude(previousOriginLng),
+          ),
+          coordinateB: CityCoordinate(
+            latitudeValue: _parseLatitude(nextOriginLat),
+            longitudeValue: _parseLongitude(nextOriginLng),
+          ),
+        ).value >=
+        _locationRefreshMinJumpMeters;
+  }
+
+  bool _didAgendaOriginChange({
+    required double? previousOriginLat,
+    required double? previousOriginLng,
+    required double? nextOriginLat,
+    required double? nextOriginLng,
+  }) {
+    if (previousOriginLat == null ||
+        previousOriginLng == null ||
+        nextOriginLat == null ||
+        nextOriginLng == null) {
+      return previousOriginLat != nextOriginLat ||
+          previousOriginLng != nextOriginLng;
+    }
+
+    return haversineDistanceMeters(
+          coordinateA: CityCoordinate(
+            latitudeValue: _parseLatitude(previousOriginLat),
+            longitudeValue: _parseLongitude(previousOriginLng),
+          ),
+          coordinateB: CityCoordinate(
+            latitudeValue: _parseLatitude(nextOriginLat),
+            longitudeValue: _parseLongitude(nextOriginLng),
+          ),
+        ).value >=
+        _locationRefreshMinJumpMeters;
+  }
+
+  LatitudeValue _parseLatitude(double raw) =>
+      LatitudeValue()..parse(raw.toString());
+
+  LongitudeValue _parseLongitude(double raw) =>
+      LongitudeValue()..parse(raw.toString());
+
+  Future<bool> _resolveEffectiveOrigin({required bool warmUpIfPossible}) async {
+    final shouldRequestPermission =
+        warmUpIfPossible && !_locationPermissionRequested;
+    if (shouldRequestPermission) {
+      _locationPermissionRequested = true;
+    }
+    final resolution = await _locationOriginService.resolveAndPersist(
+      LocationOriginResolutionRequestFactory.create(
+        warmUpIfPossible: warmUpIfPossible,
+        requestPermissionIfNeeded: shouldRequestPermission,
+        warmUpTimeout: _locationWarmUpTimeout,
+        permissionTimeout: _locationPermissionTimeout,
+      ),
+    );
+    await _seedInitialRadiusPreferenceIfNeeded(resolution);
+    return _applyResolvedEffectiveOrigin(resolution);
+  }
+
+  bool _applyResolvedEffectiveOrigin(LocationOriginResolution resolution) {
+    if (_isDisposed) {
+      return false;
+    }
+
+    final currentLat = _effectiveOriginLat;
+    final currentLng = _effectiveOriginLng;
+    final currentSettings = _effectiveOriginSettings;
+    final effectiveOrigin = resolution.effectiveCoordinate;
+
+    _effectiveOriginSettings = resolution.settings;
+    if (effectiveOrigin != null) {
+      _effectiveOriginLat = effectiveOrigin.latitude;
+      _effectiveOriginLng = effectiveOrigin.longitude;
+      return _effectiveOriginLat != currentLat ||
+          _effectiveOriginLng != currentLng ||
+          !(currentSettings?.sameAs(_effectiveOriginSettings) ??
+              _effectiveOriginSettings == null);
+    }
+
+    _effectiveOriginLat = null;
+    _effectiveOriginLng = null;
+    return currentLat != null ||
+        currentLng != null ||
+        !(currentSettings?.sameAs(_effectiveOriginSettings) ??
+            _effectiveOriginSettings == null);
+  }
+
+  Future<void> _seedInitialRadiusPreferenceIfNeeded(
+    LocationOriginResolution resolution,
+  ) async {
+    if (_appDataRepository.hasPersistedMaxRadiusPreference ||
+        resolution.liveUserCoordinate == null ||
+        resolution.tenantDefaultCoordinate == null ||
+        resolution.distanceFromTenantDefaultOriginMeters == null) {
+      return;
+    }
+
+    final suggestedRadiusMeters = _clampRadiusMeters(
+      resolution.distanceFromTenantDefaultOriginMeters! < 10000
+          ? 10000
+          : resolution.distanceFromTenantDefaultOriginMeters!,
+    );
+
+    if ((radiusMetersStreamValue.value - suggestedRadiusMeters).abs() >=
+        0.001) {
+      _ifAlive(() => radiusMetersStreamValue.addValue(suggestedRadiusMeters));
+    }
+
+    _pendingPersistedRadiusEchoMeters = suggestedRadiusMeters;
+    try {
+      await _persistSelectedRadiusPreference(suggestedRadiusMeters);
+    } on Object {
+      if ((_pendingPersistedRadiusEchoMeters ?? -1) == suggestedRadiusMeters) {
+        _pendingPersistedRadiusEchoMeters = null;
+      }
+      debugPrint(
+        'TenantHomeAgendaController._seedInitialRadiusPreferenceIfNeeded failed',
+      );
+    }
+  }
+
+  double _resolveMinRadiusMeters() {
+    final configured = _configuredMinRadiusMeters();
+    return configured > 0 ? configured : 1000;
+  }
+
+  double _resolveDefaultRadiusMeters() {
+    if (_appDataRepository.hasPersistedMaxRadiusPreference) {
+      final preferred = _appDataRepository.maxRadiusMeters;
+      if (preferred.value > 0) {
+        return _clampRadiusMeters(preferred.value);
+      }
+    }
+
+    final configured = _configuredDefaultRadiusMeters();
+    if (configured > 0) {
+      return _clampRadiusMeters(configured);
+    }
+    return _clampRadiusMeters(_configuredMaxRadiusMeters());
+  }
+
+  double _configuredMinRadiusMeters() {
+    try {
+      return _appDataRepository.appData.mapRadiusMinMeters;
+    } on Object {
+      return 1000;
+    }
+  }
+
+  double _configuredDefaultRadiusMeters() {
+    try {
+      return _appDataRepository.appData.mapRadiusDefaultMeters;
+    } on Object {
+      return _configuredMaxRadiusMeters();
+    }
+  }
+
+  double _configuredMaxRadiusMeters() {
+    try {
+      return _appDataRepository.appData.mapRadiusMaxMeters;
+    } on Object {
+      return _appDataRepository.maxRadiusMeters.value;
+    }
+  }
+
+  double _clampRadiusMeters(double meters) {
+    final min = _resolveMinRadiusMeters();
+    final max = _configuredMaxRadiusMeters();
+    final effectiveMax = max < min ? min : max;
+    return meters.clamp(min, effectiveMax).toDouble();
+  }
+
+  @override
+  void onDispose() {
+    _isDisposed = true;
+    _confirmedEventsSubscription?.cancel();
+    _pendingInvitesSubscription?.cancel();
+    _effectiveOriginSubscription?.cancel();
+    _radiusSubscription?.cancel();
+    _proximityPreferenceSubscription?.cancel();
+    _radiusRefreshDebounceTimer?.cancel();
+    displayStateStreamValue.dispose();
+    isInitialLoadingStreamValue.dispose();
+    initialLoadingLabelStreamValue.dispose();
+    isPageLoadingStreamValue.dispose();
+    hasMoreStreamValue.dispose();
+    showHistoryStreamValue.dispose();
+    searchActiveStreamValue.dispose();
+    inviteFilterStreamValue.dispose();
+    discoveryFilterCatalogStreamValue.dispose();
+    discoveryFilterSelectionStreamValue.dispose();
+    isDiscoveryFilterPanelVisibleStreamValue.dispose();
+    isDiscoveryFilterCatalogLoadingStreamValue.dispose();
+    hasCanonicalDiscoveryFilterCatalogStreamValue.dispose();
+    radiusMetersStreamValue.dispose();
+    isRadiusRefreshLoadingStreamValue.dispose();
+    isRadiusActionCompactStreamValue.dispose();
+    _maxRadiusMetersStreamValue.dispose();
+    focusNode.dispose();
+    searchController.dispose();
+  }
+}

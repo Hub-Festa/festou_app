@@ -1,36 +1,37 @@
 import 'dart:async';
 
 import 'package:auto_route/auto_route.dart';
-import 'package:belluga_boilerplate/application/router/app_router.gr.dart';
-import 'package:belluga_boilerplate/application/router/guards/auth_route_guard.dart';
-import 'package:belluga_boilerplate/application/router/guards/tenant_route_guard.dart';
-import 'package:belluga_boilerplate/presentation/screens/tenants/profile/controller/profile_screen_controller.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/guards/auth_route_guard.dart';
+import 'package:festou_app/application/router/guards/account_deletion_resolution_route_guard.dart';
+import 'package:festou_app/application/router/support/canonical_route_family.dart';
+import 'package:festou_app/application/router/support/canonical_route_meta.dart';
+import 'package:festou_app/presentation/tenant_public/profile/screens/profile_screen/controllers/profile_screen_controller.dart';
+import 'package:festou_app/presentation/tenant_public/profile/screens/account_deletion_resolution_screen/controllers/account_deletion_resolution_controller.dart';
 import 'package:get_it_modular_with_auto_route/get_it_modular_with_auto_route.dart';
 
 class ProfileModule extends ModuleContract {
   @override
   FutureOr<void> registerDependencies() {
-    _registerRepositories();
-    _registerControllers();
+    registerLazySingleton(() => ProfileScreenController());
+    registerLazySingleton(() => AccountDeletionResolutionController());
   }
 
   @override
   List<AutoRoute> get routes => [
-        AutoRoute(
-          path: "/profile",
-          page: ProfileRoute.page,
-          guards: [
-            AuthRouteGuard(),
-            TenantRouteGuard(),
-          ],
-        ),
-      ];
-
-  void _registerRepositories() {
-    //
-  }
-
-  void _registerControllers() {
-    registerLazySingleton(() => ProfileScreenController());
-  }
+    AutoRoute(
+      path: '/profile',
+      page: ProfileRoute.page,
+      guards: [AuthRouteGuard()],
+      meta: canonicalRouteMeta(family: CanonicalRouteFamily.profileRoot),
+    ),
+    AutoRoute(
+      path: '/profile/account-deletion-resolution',
+      page: AccountDeletionResolutionRoute.page,
+      guards: [AccountDeletionResolutionRouteGuard()],
+      meta: canonicalRouteMeta(
+        family: CanonicalRouteFamily.accountDeletionResolution,
+      ),
+    ),
+  ];
 }

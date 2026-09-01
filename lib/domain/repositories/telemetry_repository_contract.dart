@@ -1,12 +1,37 @@
 import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract_properties.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+
+typedef TelemetryRepositoryContractPrimString
+    = TelemetryRepositoryContractTextValue;
+typedef TelemetryRepositoryContractPrimBool
+    = TelemetryRepositoryContractBoolValue;
+typedef TelemetryRepositoryContractPrimMap
+    = TelemetryRepositoryContractProperties;
 
 abstract class TelemetryRepositoryContract {
-  Future<bool> logEvent(
-    EventTrackerEvents type, {
-    String? eventName,
-    Map<String, dynamic>? properties,
-    String? idempotencyKey,
+  Future<TelemetryRepositoryContractPrimBool> logEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
   });
 
-  Future<bool> mergeIdentity({required String previousUserId});
+  Future<EventTrackerTimedEventHandle?> startTimedEvent(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  });
+
+  Future<TelemetryRepositoryContractPrimBool> finishTimedEvent(
+      EventTrackerTimedEventHandle handle);
+
+  Future<TelemetryRepositoryContractPrimBool> flushTimedEvents();
+
+  void setScreenContext(TelemetryRepositoryContractPrimMap? screenContext);
+
+  EventTrackerLifecycleObserver? buildLifecycleObserver();
+
+  Future<TelemetryRepositoryContractPrimBool> mergeIdentity({
+    required TelemetryRepositoryContractPrimString previousUserId,
+  });
 }

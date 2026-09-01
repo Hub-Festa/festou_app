@@ -1,0 +1,154 @@
+import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/startup/app_startup_navigation_plan.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/app_data/environment_type.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/deferred_link_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:flutter/foundation.dart';
+import 'package:get_it/get_it.dart';
+
+final class AppStartupPlanResolver {
+  AppStartupPlanResolver({
+    InvitesRepositoryContract? invitesRepository,
+    AppDataRepositoryContract? appDataRepository,
+    AuthRepositoryContract? authRepository,
+    DeferredLinkRepositoryContract? deferredLinkRepository,
+    TelemetryRepositoryContract? telemetryRepository,
+  }) : _invitesRepository =
+           invitesRepository ?? GetIt.I.get<InvitesRepositoryContract>(),
+       _appDataRepository =
+           appDataRepository ?? GetIt.I.get<AppDataRepositoryContract>(),
+       _authRepository =
+           authRepository ??
+           (GetIt.I.isRegistered<AuthRepositoryContract>()
+               ? GetIt.I.get<AuthRepositoryContract>()
+               : null),
+       _deferredLinkRepository =
+           deferredLinkRepository ??
+           (GetIt.I.isRegistered<DeferredLinkRepositoryContract>()
+               ? GetIt.I.get<DeferredLinkRepositoryContract>()
+               : null),
+       _telemetryRepository =
+           telemetryRepository ??
+           (GetIt.I.isRegistered<TelemetryRepositoryContract>()
+               ? GetIt.I.get<TelemetryRepositoryContract>()
+               : null);
+
+  final InvitesRepositoryContract _invitesRepository;
+  final AppDataRepositoryContract _appDataRepository;
+  final AuthRepositoryContract? _authRepository;
+  final DeferredLinkRepositoryContract? _deferredLinkRepository;
+  final TelemetryRepositoryContract? _telemetryRepository;
+
+  AppData get appData => _appDataRepository.appData;
+
+  Future<AppStartupNavigationPlan> resolvePlan() async {
+    final authRepository = _authRepository;
+    if (authRepository != null) {
+      await authRepository.init();
+    }
+
+    final deferredInvitePath = await _resolveDeferredInviteFirstOpenPath();
+    if (deferredInvitePath != null && deferredInvitePath.isNotEmpty) {
+      return AppStartupNavigationPlan.path(deferredInvitePath);
+    }
+
+    if (appData.typeValue.value == EnvironmentType.landlord) {
+      return const AppStartupNavigationPlan.none();
+    }
+
+    await _refreshPendingInvitesForStartup();
+
+    if (_invitesRepository.hasPendingInvites.value) {
+      return AppStartupNavigationPlan.routes(const <PageRouteInfo<dynamic>>[
+        TenantHomeRoute(),
+        InviteFlowRoute(),
+      ]);
+    }
+
+    return const AppStartupNavigationPlan.none();
+  }
+
+  Future<void> _refreshPendingInvitesForStartup() async {
+    await _invitesRepository.refreshPendingInvites();
+  }
+
+  Future<String?> _resolveDeferredInviteFirstOpenPath() async {
+    if (appData.typeValue.value == EnvironmentType.landlord) {
+      return null;
+    }
+
+    final deferred = _deferredLinkRepository;
+    if (deferred == null) {
+      return null;
+    }
+
+    DeferredLinkCaptureResult result;
+    try {
+      result = await deferred.captureFirstOpenInviteCode();
+    } catch (error, stackTrace) {
+      debugPrint(
+        'AppStartupPlanResolver deferred invite capture failed; '
+        'continuing without deferred override: $error\n$stackTrace',
+      );
+      return null;
+    }
+    final platform = result.platform ?? 'unknown';
+    if (result.isCaptured) {
+      final storeChannel = result.storeChannel ?? 'unknown';
+      final path = result.targetPath!;
+      await _logStartupTelemetryBestEffort(
+        EventTrackerEvents.buttonClick,
+        eventName: telemetryRepoString('app_deferred_deep_link_captured'),
+        properties: telemetryRepoMap(<String, dynamic>{
+          if (result.code != null) 'code': result.code,
+          'target_path': path,
+          'platform': platform,
+          'store_channel': storeChannel,
+        }),
+      );
+      return path;
+    }
+
+    if (!result.shouldTrackFailure) {
+      return null;
+    }
+
+    final storeChannel = result.storeChannel ?? 'unknown';
+    await _logStartupTelemetryBestEffort(
+      EventTrackerEvents.buttonClick,
+      eventName: telemetryRepoString('app_deferred_deep_link_capture_failed'),
+      properties: telemetryRepoMap(<String, dynamic>{
+        'platform': platform,
+        'failure_reason': result.failureReason,
+        'store_channel': storeChannel,
+      }),
+    );
+    return null;
+  }
+
+  Future<void> _logStartupTelemetryBestEffort(
+    EventTrackerEvents event, {
+    TelemetryRepositoryContractPrimString? eventName,
+    TelemetryRepositoryContractPrimMap? properties,
+  }) async {
+    try {
+      await _telemetryRepository?.logEvent(
+        event,
+        eventName: eventName,
+        properties: properties,
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        'AppStartupPlanResolver startup telemetry failed; '
+        'continuing bootstrap: $error\n$stackTrace',
+      );
+    }
+  }
+}

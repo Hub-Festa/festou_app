@@ -1,0 +1,471 @@
+import 'dart:io';
+
+import 'package:festou_app/domain/services/tenant_admin_external_image_proxy_contract.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_url_value.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_image_ingestion_service.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_public_web_image_spec.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  const expectedLegacyCoverAspectRatio = 560 / 512;
+  const expectedEventHeroCoverAspectRatio = 5 / 7;
+  const expectedAccountProfileHeroCoverAspectRatio = 15 / 16;
+
+  const pathProviderChannel = MethodChannel('plugins.flutter.io/path_provider');
+  final fallbackTempDir =
+      Directory.systemTemp.createTempSync('tenant-admin-test');
+
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProviderChannel, (call) async {
+      if (call.method == 'getTemporaryDirectory') {
+        return fallbackTempDir.path;
+      }
+      return null;
+    });
+  });
+
+  tearDownAll(() async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProviderChannel, null);
+    if (fallbackTempDir.existsSync()) {
+      fallbackTempDir.deleteSync(recursive: true);
+    }
+  });
+
+  test('prepareXFile normalizes avatar to 1:1 and max 1024', () async {
+    final service = TenantAdminImageIngestionService();
+    final source =
+        await _writeImage(width: 1600, height: 900, name: 'avatar_source.png');
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.avatar,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    expect(decoded!.width, decoded.height);
+    expect(decoded.width, lessThanOrEqualTo(1024));
+    expect(decoded.height, lessThanOrEqualTo(1024));
+  });
+
+  test('prepareXFile keeps legacy cover at 560:512 ratio and existing bounds',
+      () async {
+    final service = TenantAdminImageIngestionService();
+    final source =
+        await _writeImage(width: 1200, height: 1800, name: 'cover_source.png');
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.cover,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect((ratio - expectedLegacyCoverAspectRatio).abs(), lessThan(0.02));
+    expect(decoded.width, lessThanOrEqualTo(1920));
+    expect(decoded.height, lessThanOrEqualTo(1080));
+  });
+
+  test('prepareXFile normalizes event hero cover to 5:7 ratio and bounds',
+      () async {
+    final service = TenantAdminImageIngestionService();
+    final source = await _writeImage(
+      width: 2400,
+      height: 1800,
+      name: 'event_hero_cover_source.png',
+    );
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.eventHeroCover,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect((ratio - expectedEventHeroCoverAspectRatio).abs(), lessThan(0.02));
+    expect(decoded.width, lessThanOrEqualTo(1800));
+    expect(decoded.height, lessThanOrEqualTo(2520));
+    expect(output.mimeType, 'image/jpeg');
+  });
+
+  test(
+      'prepareXFile normalizes account profile hero cover to 15:16 ratio and bounds',
+      () async {
+    final service = TenantAdminImageIngestionService();
+    final source = await _writeImage(
+      width: 2400,
+      height: 1800,
+      name: 'account_profile_hero_cover_source.png',
+    );
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.accountProfileHeroCover,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect(
+      (ratio - expectedAccountProfileHeroCoverAspectRatio).abs(),
+      lessThan(0.02),
+    );
+    expect(decoded.width, lessThanOrEqualTo(1800));
+    expect(decoded.height, lessThanOrEqualTo(1920));
+    expect(output.mimeType, 'image/jpeg');
+  });
+
+  for (final scenario in _nonCoverSlotRatioCases) {
+    test(
+      'prepareXFile preserves ${scenario.slot.name} aspect ratio',
+      () async {
+        final service = TenantAdminImageIngestionService();
+        final source = await _writeImage(
+          width: _nonCoverSourceWidth,
+          height: _nonCoverSourceHeight,
+          name: 'non_cover_${scenario.slot.name}.png',
+        );
+
+        final output = await service.prepareXFile(
+          source,
+          slot: scenario.slot,
+        );
+
+        final decoded = img.decodeImage(await output.readAsBytes());
+        expect(decoded, isNotNull, reason: scenario.slot.name);
+        final ratio = decoded!.width / decoded.height;
+        expect(
+          (ratio - scenario.expectedAspectRatio).abs(),
+          lessThan(0.03),
+          reason: scenario.slot.name,
+        );
+        expect(
+          output.mimeType,
+          scenario.expectedMimeType,
+          reason: scenario.slot.name,
+        );
+      },
+    );
+  }
+
+  test(
+      'prepareXFile normalizes public web default image to canonical OG dimensions',
+      () async {
+    final service = TenantAdminImageIngestionService();
+    final source = await _writeImage(
+      width: 1200,
+      height: 1800,
+      name: 'public_web_default_source.png',
+    );
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.publicWebDefaultImage,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect(
+      (ratio - tenantAdminPublicWebDefaultImageAspectRatio).abs(),
+      lessThan(0.02),
+    );
+    expect(
+      decoded.width,
+      lessThanOrEqualTo(tenantAdminPublicWebDefaultImageWidth),
+    );
+    expect(
+      decoded.height,
+      lessThanOrEqualTo(tenantAdminPublicWebDefaultImageHeight),
+    );
+    expect(output.mimeType, 'image/jpeg');
+  });
+
+  test('prepareXFile rejects source larger than 15MB before decode', () async {
+    final service = TenantAdminImageIngestionService();
+    final oversize = await _writeBytes(
+      Uint8List(16 * 1024 * 1024),
+      name: 'oversize.bin',
+    );
+
+    expect(
+      () => service.prepareXFile(oversize, slot: TenantAdminImageSlot.cover),
+      throwsA(
+        isA<TenantAdminImageIngestionException>().having(
+          (error) => error.message,
+          'message',
+          contains('Maximo 15MB'),
+        ),
+      ),
+    );
+  });
+
+  test('fetchFromUrlForCrop returns fallback guidance when proxy fails',
+      () async {
+    final service = TenantAdminImageIngestionService(
+      externalImageProxy: _FailingExternalImageProxy(),
+    );
+
+    expect(
+      () => service.fetchFromUrlForCrop(
+          imageUrl: 'https://example.com/image.jpg'),
+      throwsA(
+        isA<TenantAdminImageIngestionException>().having(
+          (error) => error.message,
+          'message',
+          contains('site nao permite importacao direta'),
+        ),
+      ),
+    );
+  });
+
+  test('fetchFromUrlForCrop returns XFile from proxy bytes', () async {
+    final image = img.Image(width: 120, height: 80);
+    img.fill(image, color: img.ColorRgb8(90, 160, 40));
+    final bytes = Uint8List.fromList(img.encodePng(image));
+
+    final service = TenantAdminImageIngestionService(
+      externalImageProxy: _FakeExternalImageProxy(bytes),
+    );
+
+    final file = await service.fetchFromUrlForCrop(
+      imageUrl: 'https://example.com/image.png',
+    );
+
+    final roundtrip = await file.readAsBytes();
+    expect(roundtrip, bytes);
+  });
+
+  test('buildUpload returns jpeg payload', () async {
+    final service = TenantAdminImageIngestionService();
+    final source =
+        await _writeImage(width: 900, height: 1200, name: 'upload.png');
+
+    final upload = await service.buildUpload(
+      source,
+      slot: TenantAdminImageSlot.avatar,
+    );
+
+    expect(upload, isNotNull);
+    expect(upload!.mimeType, 'image/jpeg');
+    expect(upload.fileName, endsWith('.jpg'));
+    expect(upload.bytes, isNotEmpty);
+  });
+
+  test('buildUpload for branding logo keeps png mime and extension', () async {
+    final service = TenantAdminImageIngestionService();
+    final source =
+        await _writeImage(width: 1800, height: 500, name: 'logo_upload.png');
+
+    final upload = await service.buildUpload(
+      source,
+      slot: TenantAdminImageSlot.lightLogo,
+    );
+
+    expect(upload, isNotNull);
+    expect(upload!.mimeType, 'image/png');
+    expect(upload.fileName, endsWith('.png'));
+    expect(upload.bytes, isNotEmpty);
+  });
+
+  test('prepareXFile normalizes branding logo to 18:5 and png output',
+      () async {
+    final service = TenantAdminImageIngestionService();
+    final source =
+        await _writeImage(width: 1200, height: 1200, name: 'logo_source.png');
+
+    final output = await service.prepareXFile(
+      source,
+      slot: TenantAdminImageSlot.darkLogo,
+    );
+
+    final bytes = await output.readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect((ratio - (18 / 5)).abs(), lessThan(0.03));
+    expect(output.mimeType, 'image/png');
+  });
+
+  test('pickFromDevice applies avatar 1:1 crop pipeline', () async {
+    final source =
+        await _writeImage(width: 1600, height: 900, name: 'pick_avatar.png');
+    final service = TenantAdminImageIngestionService(
+      imagePicker: _FakeImagePicker(source),
+    );
+
+    final picked = await service.pickFromDevice(
+      slot: TenantAdminImageSlot.avatar,
+    );
+
+    expect(picked, isNotNull);
+    final output = await service.prepareXFile(
+      picked!,
+      slot: TenantAdminImageSlot.avatar,
+    );
+
+    final decoded = img.decodeImage(await output.readAsBytes());
+    expect(decoded, isNotNull);
+    expect(decoded!.width, decoded.height);
+    expect(decoded.width, lessThanOrEqualTo(1024));
+  });
+
+  test('pickFromDevice applies cover 560:512 crop pipeline', () async {
+    final source =
+        await _writeImage(width: 1200, height: 1800, name: 'pick_cover.png');
+    final service = TenantAdminImageIngestionService(
+      imagePicker: _FakeImagePicker(source),
+    );
+
+    final picked = await service.pickFromDevice(
+      slot: TenantAdminImageSlot.cover,
+    );
+
+    expect(picked, isNotNull);
+    final output = await service.prepareXFile(
+      picked!,
+      slot: TenantAdminImageSlot.cover,
+    );
+
+    final decoded = img.decodeImage(await output.readAsBytes());
+    expect(decoded, isNotNull);
+    final ratio = decoded!.width / decoded.height;
+    expect((ratio - expectedLegacyCoverAspectRatio).abs(), lessThan(0.02));
+    expect(decoded.width, lessThanOrEqualTo(1920));
+    expect(decoded.height, lessThanOrEqualTo(1080));
+  });
+}
+
+Future<XFile> _writeImage({
+  required int width,
+  required int height,
+  required String name,
+}) async {
+  final image = img.Image(width: width, height: height);
+  img.fill(image, color: img.ColorRgb8(120, 45, 180));
+  final bytes = Uint8List.fromList(img.encodePng(image));
+  return _writeBytes(bytes, name: name);
+}
+
+Future<XFile> _writeBytes(Uint8List bytes, {required String name}) async {
+  final dir = await Directory.systemTemp.createTemp('tenant-admin-ingestion');
+  final file = File('${dir.path}/$name');
+  await file.writeAsBytes(bytes, flush: true);
+  return XFile(file.path, name: name);
+}
+
+class _SlotRatioCase {
+  const _SlotRatioCase({
+    required this.slot,
+    required this.expectedAspectRatio,
+    this.expectedMimeType = 'image/jpeg',
+  });
+
+  final TenantAdminImageSlot slot;
+  final double expectedAspectRatio;
+  final String expectedMimeType;
+}
+
+const _nonCoverSourceWidth = 480;
+const _nonCoverSourceHeight = 720;
+
+const _nonCoverSlotRatioCases = <_SlotRatioCase>[
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.avatar,
+    expectedAspectRatio: 1.0,
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.lightLogo,
+    expectedAspectRatio: 18 / 5,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.darkLogo,
+    expectedAspectRatio: 18 / 5,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.lightIcon,
+    expectedAspectRatio: 1.0,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.darkIcon,
+    expectedAspectRatio: 1.0,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.pwaIcon,
+    expectedAspectRatio: 1.0,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.publicWebDefaultImage,
+    expectedAspectRatio: tenantAdminPublicWebDefaultImageAspectRatio,
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.mapFilter,
+    expectedAspectRatio: 1.0,
+    expectedMimeType: 'image/png',
+  ),
+  _SlotRatioCase(
+    slot: TenantAdminImageSlot.typeVisual,
+    expectedAspectRatio: 1.0,
+    expectedMimeType: 'image/png',
+  ),
+];
+
+class _FailingExternalImageProxy
+    implements TenantAdminExternalImageProxyContract {
+  @override
+  Future<Uint8List> fetchExternalImageBytes({
+    required TenantAdminOptionalUrlValue imageUrl,
+  }) async {
+    throw StateError('blocked');
+  }
+}
+
+class _FakeExternalImageProxy implements TenantAdminExternalImageProxyContract {
+  _FakeExternalImageProxy(this._bytes);
+
+  final Uint8List _bytes;
+
+  @override
+  Future<Uint8List> fetchExternalImageBytes({
+    required TenantAdminOptionalUrlValue imageUrl,
+  }) async {
+    return _bytes;
+  }
+}
+
+class _FakeImagePicker extends ImagePicker {
+  _FakeImagePicker(this._nextFile);
+
+  final XFile? _nextFile;
+
+  @override
+  Future<XFile?> pickImage({
+    required ImageSource source,
+    double? maxWidth,
+    double? maxHeight,
+    int? imageQuality,
+    CameraDevice preferredCameraDevice = CameraDevice.rear,
+    bool requestFullMetadata = true,
+  }) async {
+    return _nextFile;
+  }
+}

@@ -1,59 +1,26 @@
+import 'package:festou_app/domain/app_data/app_data.dart';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
+import 'package:get_it/get_it.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_routing_policy.dart';
 
 class BellugaConstants {
+  static const landlordDomain =
+      String.fromEnvironment('LANDLORD_DOMAIN', defaultValue: '');
+  static const bootstrapBaseUrlOverride =
+      String.fromEnvironment('BOOTSTRAP_BASE_URL', defaultValue: '');
+  static const backendRoutingPolicy = BackendRoutingPolicy();
   static final settings = _SettingsConstants();
   static final api = _ApiConstants();
   static final sentry = _SentryConstants();
-  static final env = _EnvironmentConstants();
 }
 
 class _ApiConstants {
+  AppData get _appData => GetIt.I.get<AppData>();
 
-  String get adminUrl {
-    final String _mainApi = '${Uri.base.scheme}://${Uri.base.host}/admin/api';
+  String get adminUrl => '${_appData.mainDomainValue.value.origin}/admin/api';
 
-    final _environment = BellugaConstants.env.environment;
-
-    if (kIsWeb) {
-      return _mainApi;
-    } else if (Platform.isAndroid) {
-      return _environment == "local"
-          ? "http://nginx/api"
-          : _mainApi;
-    } else {
-      return _mainApi;
-    }
-  }
-
-  String get baseUrl {
-    final String _mainApi = '${Uri.base.scheme}://${Uri.base.host}/api';
-
-    final _environment = BellugaConstants.env.environment;
-
-    if (kIsWeb) {
-      return _mainApi;
-    } else if (Platform.isAndroid) {
-      return _environment == "local"
-          ? "http://nginx/api"
-          : _mainApi;
-    } else {
-      return _mainApi;
-    }
-  }
-}
-
-class _EnvironmentConstants {
-  String get environment =>
-      const String.fromEnvironment('APP_ENVIRONMENT', defaultValue: 'local');
-  String get landlordDomain =>
-      const String.fromEnvironment('LANDLORD_DOMAIN', defaultValue: 'localhost');
-  String get schema =>
-      const String.fromEnvironment('LANDLORD_SCHEMA', defaultValue: 'http');
-  String get bootstrapBaseUrl => const String.fromEnvironment(
-    'BOOTSTRAP_BASE_URL',
-    defaultValue: '',
-  );
+  String get baseUrl => '${_appData.mainDomainValue.value.origin}/api';
 }
 
 class _SettingsConstants {
@@ -77,14 +44,9 @@ class _SettingsConstants {
 }
 
 class _SentryConstants {
-  String get url => const String.fromEnvironment('SENTRY_DSN', defaultValue: '');
-  double get tracesSampleRate {
-    const raw = String.fromEnvironment(
-      'SENTRY_TRACES_SAMPLE_RATE',
-      defaultValue: '0.0',
-    );
-    return double.tryParse(raw) ?? 0.0;
-  }
+  String get url =>
+      "https://1acd2d544ea17269485f5a38c663d0e0@o4504503783784448.ingest.sentry.io/4506716088500224";
+  double get tracesSampleRate => 1.0;
 }
 
 // class AssetsPath {

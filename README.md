@@ -1,137 +1,239 @@
 # Como Adicionar um Novo Tenant (Flavor)
 
-Este guia é o passo a passo definitivo para adicionar um novo tenant ao projeto. Ele reflete a arquitetura atual, que automatiza a maior parte da configuração do Android a partir de arquivos de propriedades e utiliza um backend para o branding dinâmico na web.
+Este guia é um passo a passo objetivo para adicionar um novo tenant ao projeto, garantindo que ele tenha sua própria identidade (ID, nome, ícone), configuração e assinatura digital para as lojas.
 
-**Placeholders Usados:**
-* `<novo_tenant>`: O nome do novo flavor em minúsculas (ex: `tenantalpha`).
-* `<NomeDoApp>`: O nome de exibição do aplicativo (ex: `Tenant Alpha App`).
-* `<com.empresa.novoapp>`: O ID único do aplicativo para a loja (ex: `com.example.tenantalpha.app`).
+Usaremos os seguintes placeholders:
+* `<novo_tenant>`: O nome do novo flavor em minúsculas (ex: `aracruz`).
+* `<NomeDoApp>`: O nome de exibição do aplicativo (ex: `Aracruz App`).
+* `<com.empresa.novoapp>`: O ID único do aplicativo para a loja (ex: `com.aracruz.app`).
 
-## Telemetry e Push
+## Diagnósticos Flutter (Obrigatório)
 
-O bootstrap Flutter usa a origem de `main_domain` retornada pelo endpoint de ambiente e monta o transporte em `/api/v1/`. `APP_URL` não deve ser transformada em subdomínio do tenant para esse fluxo.
+Antes de usar este projeto Flutter, trate a análise local assim:
 
-## Ambiente dev da Festou
-
-O app usa defines de compilacao para resolver o bootstrap publico de dev:
-
-```bash
-fvm flutter run --dart-define-from-file=config/defines/dev.json
-```
-
-`config/defines/dev.json` aponta para `https://festoudemo.site`. Neste codigo, `LANDLORD_DOMAIN` e apenas o host (`festoudemo.site`) e `LANDLORD_SCHEMA` define o protocolo; `BOOTSTRAP_BASE_URL` guarda a origem completa para evitar ambiguidade em execucoes mobile/dev.
-
-O backend pode fornecer configurações opcionais em `telemetry_settings.trackers` e `firebase_settings`. Sem essas configurações, o app mantém o startup funcional, não usa credenciais hardcoded e deixa a entrega externa desabilitada. A integração usa `event_tracker_handler` e `push_handler` na linha `0.2.x`, com `$insert_id`, outcomes, bearer token, fetch de dados e action reporting fornecidos pelos pacotes.
-
-O boilerplate possui rota própria para detalhe de evento (`/agenda/:event_id`), mas não possui domínio ou rota de convites. Payloads de convite são ignorados com segurança até existir um TODO específico para essa superfície. Chrome/web é um alvo aceito para testes; configuração real Android/iOS, Firebase files e credenciais não fazem parte do baseline genérico.
+* Não use `dart analyze`, `flutter analyze` ou `custom_lint` para descobrir os `Problems` atuais do workspace.
+* Em workspace editor-managed, a fonte local de verdade para `Problems` é a extensão/bridge read-only em `../delphi-ai/tools/vscode_diagnostics_bridge/README.md`.
+* Consulte primeiro `GET http://127.0.0.1:40361/health` e depois `GET /diagnostics?scope=<caminho-absoluto-do-flutter-app>`.
+* `Error` ou `Warning` no snapshot do bridge bloqueia o checkpoint local; `Information` exige classificação explícita.
+* Se o bridge estiver indisponível, instável, ou apontando para o workspace errado, a análise local está bloqueada. Não faça fallback para analyzer CLI.
+* Jobs de CI/promoção podem continuar rodando o analyzer do pipeline como evidência separada. Isso não substitui o snapshot local do bridge.
+* Se o estado local do analyzer/editor driftar, rode `bash ./scripts/reset_analyzer_state.sh`, use `Dart: Restart Analysis Server`, e só então recapture o snapshot do bridge.
 
 ### Pré-requisitos
-* Acesso ao `keytool` (parte do JDK).
+* Acesso ao `keytool` (parte do Java Development Kit).
 * Acesso a um ambiente macOS com Xcode para a configuração do iOS.
-* Dependências `flutter_launcher_icons` e `flutter_native_splash` configuradas.
 
----
+## Passo 1: Configuração da Assinatura Digital (Android)
 
-### Passo 1: Configuração do Backend
-1.  **Cadastrar o Tenant:** Adicione o novo tenant ao seu banco de dados, incluindo seu `applicationId` para mobile e os domínios/subdomínios para web.
-2.  **Upload do Logo:** Use o endpoint de upload para enviar o logo principal do tenant. O backend se encarregará de gerar todos os tamanhos necessários (`favicon`, PWA, splash) e armazenar suas URLs públicas.
+Cada app precisa de uma chave única para a Google Play.
 
----
+Contrato Android aprovado para este repositório:
+- Arquivo público versionado: `android/flavors/<flavor>.public.properties`
+- Arquivo secreto ignorado: `android/keystores/<flavor>.signing.properties`
+- Keystore fixo ignorado: `android/keystores/<flavor>.jks`
+- Fallback oficial de CI suportado: `CM_KEYSTORE_PATH`, `CM_KEYSTORE_PASSWORD`, `CM_KEY_ALIAS`, `CM_KEY_PASSWORD`
+- The build must fail closed if the public file is missing, if required public properties are missing, or if the required secret signing file is absent.
 
-### Passo 2: Configuração da Assinatura (Android)
-
-1.  **Gerar Keystore:** Gere o arquivo `.jks` para o novo tenant e coloque-o na pasta `android/keystores/`.
+1.  **Gerar Keystore:** No terminal, gere o arquivo de chave para o novo tenant.
     ```bash
-    keytool -genkey -v -keystore <novo_tenant>-release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias <novo_tenant>-alias
+    keytool -genkey -v -keystore <novo_tenant>.jks -keyalg RSA -keysize 2048 -validity 10000 -alias <novo_tenant>-alias
     ```
 
-2.  **Criar Arquivo de Propriedades:**
-    * Na pasta `android/keystores/`, copie o arquivo `tenant.properties.example` e renomeie-o para `<novo_tenant>.properties`. Exemplos neutros:
-        * `tenantalpha.properties` → `applicationId=com.example.tenantalpha.app`, alias `tenantalpha-alias`, campos de assinatura definidos pelo seu time.
-        * `tenantbeta.properties` → `applicationId=com.example.tenantbeta.app`, alias `tenantbeta-alias`, campos de assinatura definidos pelo seu time.
-    * Abra o novo arquivo e preencha todos os placeholders com os valores reais do tenant, além de definir o nome do arquivo `.jks` (ex.: `tenantalpha-release-key.jks`) que deve estar dentro desta mesma pasta.
+2.  **Mover Arquivo:** Mova o arquivo `<novo_tenant>.jks` gerado para `android/keystores/<novo_tenant>.jks`.
 
----
+3.  **Criar Configuração Pública:** Crie o arquivo versionado `android/flavors/<novo_tenant>.public.properties` com os dados não secretos do flavor.
+    ```properties
+    # android/flavors/<novo_tenant>.public.properties
+    applicationId=<com.empresa.novoapp>
+    appLinkHosts=tenant.example.com,tenant-app.example.com
+    ```
+    * Para referência/base de novos tenants, use o template genérico `android/flavors/tenant.public.properties.example`.
 
-### Passo 3: Geração de Ícones e Splash Screen (Mobile)
+4.  **Criar Configuração Secreta:** Crie o arquivo ignorado `android/keystores/<novo_tenant>.signing.properties` com os segredos de assinatura.
+    ```properties
+    # android/keystores/<novo_tenant>.signing.properties
+    storePassword=[SENHA_DO_KEYSTORE]
+    keyPassword=[SENHA_DA_CHAVE]
+    keyAlias=<novo_tenant>-alias
+    ```
+    * Para referência/base, use o template genérico `android/keystores/tenant.signing.properties.example`.
 
-1.  **Preparar Imagens:** Adicione os arquivos de imagem de alta resolução nas pastas de assets do tenant:
-    * `assets/tenants/<novo_tenant>/launcher_icons/adaptive_icon_foreground.png`
-    * `assets/tenants/<novo_tenant>/splash_screen/splash_logo.png`
+5.  **Validação esperada:** Não mova `applicationId` ou `appLinkHosts` para segredos/variáveis opacas de CI. The build must fail closed when `android/flavors/<flavor>.public.properties` is missing, when `applicationId` or `appLinkHosts` is missing from that public file, and when neither a local signing pair (`android/keystores/<flavor>.signing.properties` + `android/keystores/<flavor>.jks`) nor the official Codemagic signing environment (`CM_KEYSTORE_PATH`, `CM_KEYSTORE_PASSWORD`, `CM_KEY_ALIAS`, `CM_KEY_PASSWORD`) is available.
 
-2.  **Criar Arquivos de Configuração YAML:** Crie os dois arquivos de configuração **dentro** da pasta do tenant.
-    * Crie `assets/tenants/<novo_tenant>/flutter_icons.yaml` para o **ícone do app**.
-        ```yaml
-        flutter_launcher_icons:
-          android: true
-          ios: true
-          image_path: "assets/tenants/<novo_tenant>/launcher_icons/adaptive_icon_foreground.png"
-          # ... outras configs de ícone adaptativo ...
+## Passo 2: Configuração do Projeto Android
+
+1.  **Configurar `build.gradle.kts`:** Abra o arquivo `android/app/build.gradle.kts`.
+    * **Adicionar Flavor:** O Gradle descobre cada flavor Android a partir dos arquivos `android/flavors/*.public.properties`. Não adicione blocos manuais `create("<novo_tenant>")` no `productFlavors`; o nome do novo flavor nasce do arquivo `android/flavors/<novo_tenant>.public.properties` e da pasta Android correspondente em `android/app/src/<novo_tenant>/`.
+    * **Configurar Assinatura (IMPORTANTE):** Mantenha o Gradle alinhado ao contrato de dois arquivos. Os dados públicos do flavor devem vir de `android/flavors/<novo_tenant>.public.properties`, enquanto os segredos devem vir de `android/keystores/<novo_tenant>.signing.properties`, usando `android/keystores/<novo_tenant>.jks` como caminho fixo do keystore para o fluxo local. Em Codemagic, o mesmo release também pode consumir o Android code signing nativo via `CM_KEYSTORE_PATH`, `CM_KEYSTORE_PASSWORD`, `CM_KEY_ALIAS` e `CM_KEY_PASSWORD`. The build must fail closed if the public file is missing, if `applicationId` or `appLinkHosts` is missing from that file, or if no valid local/Codemagic signing surface is available.
+        ```kotlin
+        android {
+            // ...
+
+            productFlavors {
+                // Os flavors são descobertos a partir de android/flavors/*.public.properties
+                // e das pastas android/app/src/<flavor>/.
+            }
+        }
         ```
-    * Crie `assets/tenants/<novo_tenant>/splash.yaml` para a **splash screen**.
-        ```yaml
-        flutter_native_splash:
-          web: false # Importante para não interferir com a solução web
-          color: "#FFFFFF"
-          image: "assets/tenants/<novo_tenant>/splash_screen/splash_logo.png"
-          android_12:
-            color: "#FFFFFF"
-            image: "assets/tenants/<novo_tenant>/splash_screen/splash_logo.png"
+
+2.  **Definir Nome do App:**
+    * Crie a pasta: `android/app/src/<novo_tenant>/res/values/`.
+    * Crie o arquivo `strings.xml` dentro dela com o conteúdo:
+        ```xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <resources>
+            <string name="app_name"> <NomeDoApp> </string>
+        </resources>
         ```
 
-3.  **Executar os Geradores:** Os comandos agora devem apontar para os caminhos corretos dos arquivos de configuração.
-    ```bash
-    # Gerar o ícone do app
-    dart run flutter_launcher_icons -f assets/tenants/<novo_tenant>/flutter_icons.yaml
+3.  **Definir Ícone do App:**
+    * Crie a estrutura de pastas: `android/app/src/<novo_tenant>/res/`.
+    * Dentro dela, crie as pastas `mipmap-hdpi`, `mipmap-mdpi`, etc., e coloque os arquivos `ic_launcher.png` correspondentes.
 
-    # Gerar a splash screen
-    dart run flutter_native_splash:create --path=assets/tenants/<novo_tenant>/splash.yaml
+4.  **Executar a verificação do contrato Android:**
+    * Rode `./tool/verify_android_flavor_contract.sh --flavor <novo_tenant>` para validar:
+      * os arquivos públicos versionados do flavor;
+      * os arquivos secretos ignorados;
+      * as falhas fechadas para arquivo público ausente, propriedades públicas ausentes, signing file ausente e keystore ausente.
+
+## Passo 3: Configuração do Projeto iOS (Xcode)
+
+Abra o projeto `ios/Runner.workspace` no Xcode e siga os passos:
+
+1.  **Duplicar Configurações de Build:**
+    * Selecione o projeto `Runner` > aba **Info** > **Configurations**.
+    * Clique no `+` e duplique as configurações `Debug` e `Release`, nomeando-as `Debug-<novo_tenant>` e `Release-<novo_tenant>`.
+
+2.  **Criar Novo "Scheme":**
+    * No menu de schemes (topo da janela), selecione **New Scheme...**.
+    * Nomeie o novo scheme como `<novo_tenant>`.
+
+3.  **Configurar o Scheme:**
+    * No menu de schemes, selecione **Edit Scheme...**.
+    * Para as ações `Run`, `Test`, `Profile`, `Analyze`, e `Archive`, ajuste o **Build Configuration** para usar as novas configurações (`Debug-<novo_tenant>` ou `Release-<novo_tenant>`).
+
+4.  **Definir Identidade do App:**
+    * Selecione o **TARGET** `Runner` > aba **Build Settings**.
+    * Procure e defina o valor de **Product Bundle Identifier** para `<com.empresa.novoapp>` nas configurações do `<novo_tenant>`.
+    * Procure e defina o valor da configuração **APP_DISPLAY_NAME** para `<NomeDoApp>` nas configurações do `<novo_tenant>`.
+
+5.  **Definir Assinatura Apple:**
+    * Vá para a aba **Signing & Capabilities**.
+    * Para as configurações `Debug-<novo_tenant>` e `Release-<novo_tenant>`, selecione o **Team** de desenvolvimento Apple correto (geralmente o do cliente).
+
+## Passo 4: Configuração do Código Dart
+
+1.  **Abra o `TenantRepository.dart`**:
+    * Localize o método `init()`. Este método é o responsável por carregar as informações do tenant com base no flavor que está rodando (lendo a variável de ambiente `FLAVOR`).
+    * Adicione a lógica necessária para reconhecer o `"<novo_tenant>"` e carregar os dados corretos para ele (seja de um mapa local, de uma API, etc.).
+
+## Passo 5: Configuração do VS Code
+
+1.  **Abra `.vscode/launch.json`:**
+2.  Adicione um novo objeto de configuração para o novo tenant, copiando e editando um existente:
+    ```json
+    {
+        "name": "<NomeDoApp> (Debug)",
+        "request": "launch",
+        "type": "dart",
+        "flutterMode": "debug",
+        "args": [
+            "--flavor",
+            "<novo_tenant>",
+            "--dart-define=FLAVOR=<novo_tenant>"
+        ]
+    }
     ```
 
-4.  **Organizar Ícones Gerados (Passo Manual):**
-    * **Android:** Mova as pastas `mipmap-*`/`drawable-*` geradas em `android/app/src/main/res/` para a pasta `android/app/src/`**`<novo_tenant>`**`/res/`.
-    * **iOS:** No Finder, renomeie `ios/Runner/Assets.xcassets/AppIcon.appiconset` para `AppIcon-<novo_tenant>.appiconset`. Arraste o novo asset para o Xcode e, nas **Build Settings**, configure o **Asset Catalog App Icon Set Name** para `AppIcon-<novo_tenant>`.
+## Passo 6: Verificação Final
 
----
-
-### Passo 4: Configuração Nativa (Android & iOS)
-
-* **Android:**
-    1.  Crie a pasta `android/app/src/<novo_tenant>/res/values/`.
-    2.  Crie um arquivo `strings.xml` dentro dela para definir o `<string name="app_name">`.
-
-* **iOS (via Xcode):**
-    1.  Duplique as Configurações de Build para `Debug-<novo_tenant>` e `Release-<novo_tenant>`.
-    2.  Crie e configure um novo "Scheme" chamado `<novo_tenant>`.
-    3.  Nas Build Settings, defina o **Product Bundle Identifier** e **APP_DISPLAY_NAME**.
-    4.  Configure a equipe de assinatura (Signing Team) correta.
-
----
-
-### Passo 5: Configuração do Código Dart
-
-O `TenantRepository` identifica o tenant comparando o **ID do aplicativo** com a lista `AppDomains` de cada tenant. Garanta que o `<com.empresa.novoapp>` esteja incluído na fonte de dados que o `TenantRepository` consulta (seja um JSON local ou uma resposta de API).
-
----
-
-### Passo 6: Configuração do VS Code
-
-Abra `.vscode/launch.json` e adicione uma nova configuração de execução para o `<novo_tenant>`, incluindo os `args` para `--flavor` e `--dart-define`.
-
----
-
-### Passo 7: Verificação e Build Final
+Após completar os passos, faça uma limpeza e execute o novo flavor para testar.
 
 1.  **Limpe o projeto:**
     ```bash
     fvm flutter clean
     ```
-2.  **Teste em Debug (Mobile):**
+2.  **Execute via terminal:**
     ```bash
     fvm flutter run --flavor <novo_tenant> --dart-define=FLAVOR=<novo_tenant>
     ```
-3.  **Gere o App Bundle para a Google Play:**
-    ```bash
-    fvm flutter build appbundle --flavor <novo_tenant>
-    ```
-4.  **Teste a Web:** Acesse o domínio/subdomínio correspondente. O branding deve ser carregado dinamicamente do backend.
+3.  **Execute via VS Code:**
+    * Vá para a aba "Run and Debug" (🐞).
+    * Selecione a nova configuração (`<NomeDoApp> (Debug)`) no menu dropdown.
+    * Clique no botão de "play".
+
+## Defines por Ambiente (Compile Time)
+
+Este projeto usa `--dart-define-from-file` para definir ambiente em tempo de compilação (não em runtime).
+
+Arquivos versionados:
+- `config/defines/dev.json`
+- `config/defines/stage.json`
+- `config/defines/main.json`
+- `config/defines/dev.example.json`
+- `config/defines/stage.example.json`
+- `config/defines/main.example.json`
+
+Override local (não versionado):
+- `config/defines/local.override.json` (baseado em `config/defines/local.override.example.json`)
+- O override local só deve ser aplicado na lane `dev`. Ele não deve contaminar builds `stage`/`main`.
+
+Regras importantes:
+- `LANDLORD_DOMAIN` deve ser uma origem completa (`http://` ou `https://`), sem path/query.
+- Em ambiente local com tenant por subdomínio, não use host IP puro (`http://192.168.x.x:8081`), pois subdomínios não resolvem. Use um host wildcard DNS, por exemplo `http://192.168.0.10.nip.io:8081`.
+- Em fluxo web/browser, `LANDLORD_DOMAIN` deve refletir a origem que o navegador realmente abre. Se o acesso local estiver passando por hosts públicos/tunelados do projeto, mantenha essas URLs apenas nos arquivos concretos do downstream (`*.json` reais ou `local.override.json`), não nos `.example`.
+- Os arquivos `*.example.json` existem para Boilerplate/downstreams novos: preservam a estrutura e podem carregar notas de referência, mas não devem servir defaults ativos do projeto atual.
+
+Execução local recomendada (override local, desenvolvimento):
+
+```bash
+fvm flutter run --flavor <novo_tenant> \
+  --dart-define-from-file=config/defines/local.override.json
+```
+
+Build local com helper Delphi:
+
+```bash
+./script/build_lane.sh dev apk --debug --flavor <novo_tenant>
+```
+
+Build local com lane derivada da branch atual:
+
+```bash
+./script/build_lane.sh apk --debug --flavor <novo_tenant>
+./script/build_lane.sh appbundle --release --flavor <novo_tenant>
+```
+
+Run local com helper Delphi (workspace com `delphi-ai` atualizado):
+
+```bash
+./script/run_lane.sh --flavor <novo_tenant>
+./script/run_lane.sh stage --debug --flavor <novo_tenant>
+./script/run_lane.sh main --release --flavor <novo_tenant> -d <device-id>
+```
+
+Regra do helper:
+- branch `main` -> `config/defines/main.json`
+- branch `stage` -> `config/defines/stage.json`
+- qualquer outra branch (`dev`, feature, orchestration, etc.) -> `config/defines/dev.json`
+- `config/defines/local.override.json` só é aplicado quando a lane resolvida é `dev`
+- o helper valida a origem efetiva (`BOOTSTRAP_BASE_URL` ou `LANDLORD_DOMAIN`) antes do build
+- o helper valida a existência do artifact gerado ao final do build (`apk`, `appbundle`, `web`)
+- `./script/run_lane.sh` usa o mesmo resolver de lane/defines e delega a seleção de device ao `flutter run`
+
+Execução de integração (WSL + device), com define tenant por padrão:
+
+```bash
+./tool/run_integration_test_wsl.sh integration_test/feature_shell_navigation_smoke_test.dart
+```
+
+Notas:
+- O script usa `config/defines/integration.tenant.json` por padrão para evitar rodar integração em domínio landlord raiz.
+- Overrides opcionais por ambiente:
+  - `ADB_DEVICE=<ip:porta>`
+  - `FLUTTER_INTEGRATION_FLAVOR=<flavor>`
+  - `INTEGRATION_DEFINE_FILE=<arquivo-json>`
+
+Nota de operação CI/CD: este commit inclui um ajuste documental mínimo para disparar a simulação ponta a ponta do fluxo de promoção de lanes.
+
+Nota de simulação CI/CD (flutter): alteração documental mínima para validar o fluxo integrado com backend no mesmo ciclo.

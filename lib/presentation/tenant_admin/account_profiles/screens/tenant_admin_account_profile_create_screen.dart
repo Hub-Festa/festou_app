@@ -1,0 +1,1214 @@
+import 'dart:async';
+
+import 'package:auto_route/auto_route.dart';
+import 'package:belluga_contact_channels/belluga_contact_channels.dart';
+import 'package:festou_app/application/rich_text/account_profile_rich_text_limits.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/support/tenant_admin_safe_back.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_profile_group.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_definition.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_term.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_terms.dart';
+import 'package:festou_app/presentation/shared/widgets/belluga_network_image.dart';
+import 'package:festou_app/presentation/tenant_admin/account_profiles/controllers/tenant_admin_account_profiles_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_form_value_utils.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_image_ingestion_service.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_canonical_image_upload_field.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_account_profile_picker.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_contact_channels_editor.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_error_banner.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_form_layout.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_image_upload_field.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_rich_text_editor.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/widgets/tenant_admin_xfile_preview.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value_builder.dart';
+
+class TenantAdminAccountProfileCreateScreen extends StatefulWidget {
+  const TenantAdminAccountProfileCreateScreen({
+    super.key,
+    required this.accountSlug,
+  });
+
+  final String accountSlug;
+
+  @override
+  State<TenantAdminAccountProfileCreateScreen> createState() =>
+      _TenantAdminAccountProfileCreateScreenState();
+}
+
+class _TenantAdminAccountProfileCreateScreenState
+    extends State<TenantAdminAccountProfileCreateScreen> {
+  final TenantAdminAccountProfilesController _controller = GetIt.I
+      .get<TenantAdminAccountProfilesController>();
+  bool _routeParamNormalized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.bindCreateFlow();
+    _controller.resetCreateState();
+    _controller.resetFormControllers();
+    unawaited(
+      _controller.loadProfileTypes().whenComplete(
+        () => _controller.loadContactSourceCandidates(),
+      ),
+    );
+    _controller.loadTaxonomies();
+    _controller.loadAccountForCreate(_currentAccountSlugForRequests());
+  }
+
+  bool _isResolvedSlug(String? value) {
+    if (value == null) {
+      return false;
+    }
+    final trimmed = value.trim();
+    return trimmed.isNotEmpty && !trimmed.startsWith(':');
+  }
+
+  String _currentAccountSlugForRequests() {
+    final routeSlug = widget.accountSlug;
+    if (_isResolvedSlug(routeSlug)) {
+      return routeSlug.trim();
+    }
+
+    final cached = _controller.accountStreamValue.value?.slug;
+    if (_isResolvedSlug(cached)) {
+      return cached!.trim();
+    }
+
+    return routeSlug;
+  }
+
+  bool _requiresPathNormalization() {
+    return kIsWeb && context.router.currentPath.contains('/:');
+  }
+
+  void _normalizeRouteParamIfNeeded() {
+    if (_routeParamNormalized || !mounted) {
+      return;
+    }
+    final needsPathNormalization = _requiresPathNormalization();
+    if (!needsPathNormalization && _isResolvedSlug(widget.accountSlug)) {
+      _routeParamNormalized = true;
+      return;
+    }
+    final resolved = _isResolvedSlug(widget.accountSlug)
+        ? widget.accountSlug
+        : _controller.accountStreamValue.value?.slug;
+    if (!_isResolvedSlug(resolved)) {
+      return;
+    }
+    _routeParamNormalized = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      context.router.replace(
+        TenantAdminAccountProfileCreateRoute(accountSlug: resolved!.trim()),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.resetFormControllers();
+    _controller.resetCreateState();
+    super.dispose();
+  }
+
+  TenantAdminProfileTypeDefinition? _profileTypeDefinition(
+    String? selectedType,
+  ) {
+    if (selectedType == null || selectedType.isEmpty) {
+      return null;
+    }
+    for (final definition in _controller.profileTypesStreamValue.value) {
+      if (definition.type == selectedType) {
+        return definition;
+      }
+    }
+    return null;
+  }
+
+  bool _requiresLocation(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.isPoiEnabled ?? false;
+  }
+
+  bool _hasBio(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasBio ?? false;
+  }
+
+  bool _hasContent(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasContent ?? false;
+  }
+
+  bool _hasTaxonomies(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasTaxonomies ?? false;
+  }
+
+  bool _hasAvatar(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasAvatar ?? false;
+  }
+
+  bool _hasCover(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasCover ?? false;
+  }
+
+  bool _hasNestedProfileGroups(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasNestedProfileGroups ?? false;
+  }
+
+  bool _hasContactChannels(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.capabilities.hasContactChannels ?? false;
+  }
+
+  List<String> _allowedTaxonomies(String? selectedType) {
+    final definition = _profileTypeDefinition(selectedType);
+    return definition?.allowedTaxonomies ?? const [];
+  }
+
+  List<TenantAdminTaxonomyDefinition> _allowedTaxonomyDefinitions(
+    String? selectedType,
+  ) {
+    final allowed = _allowedTaxonomies(selectedType).toSet();
+    return _controller.taxonomiesStreamValue.value
+        .where(
+          (taxonomy) =>
+              taxonomy.appliesToAccountProfile() &&
+              allowed.contains(taxonomy.slug),
+        )
+        .toList(growable: false);
+  }
+
+  void _syncTaxonomySelection(List<TenantAdminTaxonomyDefinition> allowed) {
+    final slugs = allowed.map((taxonomy) => taxonomy.slug).toList();
+    _controller.ensureTaxonomySelectionKeys(slugs);
+    _controller.loadTermsForTaxonomies(slugs);
+  }
+
+  void _clearCapabilityFields(String? selectedType) {
+    if (!_hasBio(selectedType)) {
+      _controller.bioController.clear();
+    }
+    if (!_hasContent(selectedType)) {
+      _controller.contentController.clear();
+    }
+    if (!_hasTaxonomies(selectedType)) {
+      _controller.resetTaxonomySelection();
+    }
+    if (!_hasAvatar(selectedType)) {
+      _controller.updateCreateAvatarFile(null);
+    }
+    if (!_hasCover(selectedType)) {
+      _controller.updateCreateCoverFile(null);
+    }
+    if (!_requiresLocation(selectedType)) {
+      _controller.latitudeController.clear();
+      _controller.longitudeController.clear();
+    }
+  }
+
+  TenantAdminTaxonomyTerms _buildTaxonomyTerms(String? selectedType) {
+    if (!_hasTaxonomies(selectedType)) {
+      return const TenantAdminTaxonomyTerms.empty();
+    }
+    final terms = <TenantAdminTaxonomyTerm>[];
+    final selections = _controller.taxonomySelectionStreamValue.value;
+    for (final entry in selections.entries) {
+      for (final value in entry.value) {
+        terms.add(
+          tenantAdminTaxonomyTermFromRaw(type: entry.key, value: value),
+        );
+      }
+    }
+    final taxonomyTerms = TenantAdminTaxonomyTerms();
+    for (final term in terms) {
+      taxonomyTerms.add(term);
+    }
+    return taxonomyTerms;
+  }
+
+  String? _validateLatitude(String? value) {
+    final trimmed = value?.trim() ?? '';
+    final other = _controller.longitudeController.text.trim();
+    final requires = _requiresLocation(
+      _controller.createStateStreamValue.value.selectedProfileType,
+    );
+    if (requires && trimmed.isEmpty && other.isEmpty) {
+      return 'Localização é obrigatória para este perfil.';
+    }
+    if (trimmed.isNotEmpty && tenantAdminParseLatitude(trimmed) == null) {
+      return 'Latitude inválida.';
+    }
+    if (requires && trimmed.isEmpty && other.isNotEmpty) {
+      return 'Latitude é obrigatória.';
+    }
+    return null;
+  }
+
+  String? _validateLongitude(String? value) {
+    final trimmed = value?.trim() ?? '';
+    final other = _controller.latitudeController.text.trim();
+    final requires = _requiresLocation(
+      _controller.createStateStreamValue.value.selectedProfileType,
+    );
+    if (trimmed.isNotEmpty && tenantAdminParseLongitude(trimmed) == null) {
+      return 'Longitude inválida.';
+    }
+    if (requires && trimmed.isEmpty && other.isNotEmpty) {
+      return 'Longitude é obrigatória.';
+    }
+    return null;
+  }
+
+  Future<void> _openMapPicker() async {
+    final currentLocation = _currentLocation();
+    context.router.push<TenantAdminLocation?>(
+      TenantAdminLocationPickerRoute(
+        initialLocation: currentLocation,
+        backFallbackRoute: TenantAdminAccountProfileCreateRoute(
+          accountSlug: _currentAccountSlugForRequests(),
+        ),
+      ),
+    );
+  }
+
+  TenantAdminLocation? _currentLocation() {
+    final latText = _controller.latitudeController.text.trim();
+    final lngText = _controller.longitudeController.text.trim();
+    if (latText.isEmpty || lngText.isEmpty) {
+      return null;
+    }
+    final lat = tenantAdminParseLatitude(latText);
+    final lng = tenantAdminParseLongitude(lngText);
+    if (lat == null || lng == null) {
+      return null;
+    }
+    return tenantAdminLocationFromRaw(latitude: lat, longitude: lng);
+  }
+
+  void _clearImage({required bool isAvatar}) {
+    if (isAvatar) {
+      _controller.updateCreateAvatarFile(null);
+      _controller.updateCreateAvatarWebUrl(null);
+    } else {
+      _controller.updateCreateCoverFile(null);
+      _controller.updateCreateCoverWebUrl(null);
+    }
+  }
+
+  Future<void> _submit() async {
+    final form = _controller.createFormKey.currentState;
+    if (form == null || !form.validate()) {
+      return;
+    }
+    final accountId = _controller.createAccountIdStreamValue.value;
+    if (accountId == null) {
+      _controller.reportCreateErrorMessage('Conta inválida.');
+      return;
+    }
+    final state = _controller.createStateStreamValue.value;
+    final selectedType = state.selectedProfileType ?? '';
+    final hasContactChannels = _hasContactChannels(state.selectedProfileType);
+    final contactDraftError = _controller.validateCreateContactDraft(
+      capabilityEnabled: hasContactChannels,
+    );
+    if (contactDraftError != null) {
+      _controller.reportCreateErrorMessage(contactDraftError);
+      return;
+    }
+    final selectedContactSource = _selectedCreateContactSourceCandidate(state);
+    if (hasContactChannels &&
+        state.contactMode == BellugaContactSourceMode.mirroredAccountProfile &&
+        selectedContactSource == null) {
+      _controller.reportCreateErrorMessage(
+        'Selecione um perfil válido para espelhar o contato.',
+      );
+      return;
+    }
+    final contactBubbleValidationError = _validateCreateBubbleSelection(
+      state,
+      selectedContactSource,
+      capabilityEnabled: hasContactChannels,
+    );
+    if (contactBubbleValidationError != null) {
+      _controller.reportCreateErrorMessage(contactBubbleValidationError);
+      return;
+    }
+    final contactChannelDrafts = _controller.buildCreateContactChannelDrafts(
+      capabilityEnabled: hasContactChannels,
+    );
+    final location = _requiresLocation(state.selectedProfileType)
+        ? _currentLocation()
+        : null;
+    final avatarUpload = _hasAvatar(state.selectedProfileType)
+        ? await _controller.buildImageUpload(
+            state.avatarFile,
+            slot: TenantAdminImageSlot.avatar,
+          )
+        : null;
+    final coverUpload = _hasCover(state.selectedProfileType)
+        ? await _controller.buildImageUpload(
+            state.coverFile,
+            slot: TenantAdminImageSlot.accountProfileHeroCover,
+          )
+        : null;
+    _controller.submitCreateProfile(
+      accountId: accountId,
+      profileType: selectedType,
+      displayName: _controller.displayNameController.text.trim(),
+      location: location,
+      bio: _hasBio(state.selectedProfileType)
+          ? _controller.bioController.text.trim()
+          : null,
+      content: _hasContent(state.selectedProfileType)
+          ? _controller.contentController.text.trim()
+          : null,
+      taxonomyTerms: _buildTaxonomyTerms(state.selectedProfileType),
+      avatarUpload: avatarUpload,
+      coverUpload: coverUpload,
+      avatarUrl: null,
+      coverUrl: null,
+      nestedProfileGroups: _hasNestedProfileGroups(state.selectedProfileType)
+          ? state.nestedProfileGroups
+          : const <TenantAdminNestedProfileGroup>[],
+      contactMode: hasContactChannels
+          ? state.contactMode
+          : BellugaContactSourceMode.own,
+      contactSourceAccountProfileId:
+          hasContactChannels &&
+              state.contactMode ==
+                  BellugaContactSourceMode.mirroredAccountProfile
+          ? selectedContactSource?.id
+          : null,
+      contactChannelDrafts: contactChannelDrafts,
+      bubbleSelection: _controller.createBubbleSelection(
+        capabilityEnabled: hasContactChannels,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamValueBuilder<String?>(
+      streamValue: _controller.createSuccessMessageStreamValue,
+      builder: (context, successMessage) {
+        _handleCreateSuccessMessage(successMessage);
+        return StreamValueBuilder<String?>(
+          streamValue: _controller.createErrorMessageStreamValue,
+          builder: (context, errorMessage) {
+            _handleCreateErrorMessage(errorMessage);
+            return StreamValueBuilder<TenantAdminAccountProfileCreateDraft>(
+              streamValue: _controller.createStateStreamValue,
+              builder: (context, state) {
+                _normalizeRouteParamIfNeeded();
+                final requiresLocation = _requiresLocation(
+                  state.selectedProfileType,
+                );
+                final hasMedia =
+                    _hasAvatar(state.selectedProfileType) ||
+                    _hasCover(state.selectedProfileType);
+                final hasContent =
+                    _hasBio(state.selectedProfileType) ||
+                    _hasContent(state.selectedProfileType) ||
+                    _hasTaxonomies(state.selectedProfileType);
+                final hasContactChannels = _hasContactChannels(
+                  state.selectedProfileType,
+                );
+                final hasNestedProfileGroups = _hasNestedProfileGroups(
+                  state.selectedProfileType,
+                );
+                final accountSlugForUi = _currentAccountSlugForRequests();
+                return TenantAdminFormScaffold(
+                  closePolicy: buildTenantAdminCurrentRouteBackPolicy(context),
+                  title: 'Criar Perfil - $accountSlugForUi',
+                  child: SingleChildScrollView(
+                    child: Form(
+                      key: _controller.createFormKey,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildProfileSection(context, state),
+                          if (hasMedia) ...[
+                            const SizedBox(height: 16),
+                            _buildMediaSection(context, state),
+                          ],
+                          if (hasContent) ...[
+                            const SizedBox(height: 16),
+                            _buildContentSection(context, state),
+                          ],
+                          if (hasContactChannels) ...[
+                            const SizedBox(height: 16),
+                            _buildContactSourceSection(context, state),
+                            const SizedBox(height: 16),
+                            _buildContactChannelsSection(context, state),
+                          ],
+                          if (requiresLocation) ...[
+                            const SizedBox(height: 16),
+                            _buildLocationSection(context),
+                          ],
+                          if (hasNestedProfileGroups) ...[
+                            const SizedBox(height: 16),
+                            TenantAdminFormSectionCard(
+                              title: 'Abas de contas vinculadas',
+                              child: const Text(
+                                'Salve o perfil primeiro. Depois disso, a edição de grupos acontece de forma independente, com criação e exclusão persistidas imediatamente.',
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          TenantAdminPrimaryFormAction(
+                            label: 'Salvar perfil',
+                            icon: Icons.save_outlined,
+                            onPressed: _submit,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _handleCreateSuccessMessage(String? message) {
+    if (message == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _controller.clearCreateSuccessMessage();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+      performTenantAdminCurrentRouteBack(context);
+    });
+  }
+
+  void _handleCreateErrorMessage(String? message) {
+    if (message == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _controller.clearCreateErrorMessage();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
+
+  Widget _buildProfileSection(
+    BuildContext context,
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    return TenantAdminFormSectionCard(
+      title: 'Dados do perfil',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          StreamValueBuilder<bool>(
+            streamValue: _controller.isLoadingStreamValue,
+            builder: (context, isLoading) {
+              return StreamValueBuilder<String?>(
+                streamValue: _controller.errorStreamValue,
+                builder: (context, error) {
+                  return StreamValueBuilder(
+                    streamValue: _controller.profileTypesStreamValue,
+                    builder: (context, types) {
+                      final hasTypes = types.isNotEmpty;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (isLoading) const LinearProgressIndicator(),
+                          if (error?.isNotEmpty ?? false)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: TenantAdminErrorBanner(
+                                rawError: error ?? '',
+                                fallbackMessage:
+                                    'Não foi possível carregar os tipos de perfil.',
+                                onRetry: _controller.loadProfileTypes,
+                              ),
+                            ),
+                          const SizedBox(height: 8),
+                          DropdownButtonFormField<String>(
+                            key: ValueKey(state.selectedProfileType),
+                            initialValue: state.selectedProfileType,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Tipo de perfil',
+                            ),
+                            items: types
+                                .map(
+                                  (type) => DropdownMenuItem<String>(
+                                    value: type.type,
+                                    child: Text(type.label),
+                                  ),
+                                )
+                                .toList(growable: false),
+                            onChanged: hasTypes
+                                ? (value) {
+                                    _controller.updateCreateSelectedProfileType(
+                                      value,
+                                    );
+                                    _syncTaxonomySelection(
+                                      _allowedTaxonomyDefinitions(value),
+                                    );
+                                    _clearCapabilityFields(value);
+                                  }
+                                : null,
+                            validator: (value) {
+                              if (value == null || value.trim().isEmpty) {
+                                return 'Tipo de perfil e obrigatorio.';
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                context.router
+                                    .push(
+                                      const TenantAdminProfileTypeCreateRoute(),
+                                    )
+                                    .then((_) {
+                                      if (!mounted) {
+                                        return;
+                                      }
+                                      _controller.loadProfileTypes();
+                                    });
+                              },
+                              icon: const Icon(Icons.add),
+                              label: const Text('Criar tipo de perfil'),
+                            ),
+                          ),
+                          if (!isLoading &&
+                              !(error?.isNotEmpty ?? false) &&
+                              !hasTypes)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 8),
+                              child: Text(
+                                'Nenhum tipo disponivel para este tenant.',
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  );
+                },
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: _controller.displayNameController,
+            decoration: const InputDecoration(labelText: 'Nome de exibicao'),
+            textInputAction: TextInputAction.next,
+            validator: _controller.validateDisplayName,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContentSection(
+    BuildContext context,
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    final hasBio = _hasBio(state.selectedProfileType);
+    final hasContent = _hasContent(state.selectedProfileType);
+    final allowedDefinitions = _allowedTaxonomyDefinitions(
+      state.selectedProfileType,
+    );
+    return TenantAdminFormSectionCard(
+      title: 'Conteudo do perfil',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (hasBio) ...[
+            TenantAdminRichTextEditor(
+              controller: _controller.bioController,
+              label: 'Bio',
+              placeholder: 'Escreva a bio do perfil',
+              minHeight: 160,
+              maxContentBytes: accountProfileRichTextMaxBytes,
+              warningThreshold: accountProfileRichTextWarningThreshold,
+              allowExplicitHttpsLinks: true,
+            ),
+          ],
+          if (hasContent) ...[
+            if (hasBio) const SizedBox(height: 12),
+            TenantAdminRichTextEditor(
+              controller: _controller.contentController,
+              label: 'Conteudo',
+              placeholder: 'Escreva o conteudo estendido do perfil',
+              minHeight: 220,
+              maxContentBytes: accountProfileRichTextMaxBytes,
+              warningThreshold: accountProfileRichTextWarningThreshold,
+              allowExplicitHttpsLinks: true,
+            ),
+          ],
+          if (_hasTaxonomies(state.selectedProfileType)) ...[
+            if (hasBio || hasContent) const SizedBox(height: 12),
+            Text('Taxonomias', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            StreamValueBuilder(
+              streamValue: _controller.taxonomySelectionStreamValue,
+              builder: (context, selections) {
+                return StreamValueBuilder(
+                  streamValue: _controller.taxonomyTermsStreamValue,
+                  builder: (context, termsByTaxonomy) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final taxonomy in allowedDefinitions)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(taxonomy.name),
+                                const SizedBox(height: 8),
+                                if ((termsByTaxonomy[taxonomy.slug] ?? const [])
+                                    .isEmpty)
+                                  const Text('Sem termos cadastrados.')
+                                else
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children:
+                                        (termsByTaxonomy[taxonomy.slug] ??
+                                                const [])
+                                            .map(
+                                              (term) => FilterChip(
+                                                label: Text(term.name),
+                                                selected:
+                                                    selections[taxonomy.slug]
+                                                        ?.contains(term.slug) ??
+                                                    false,
+                                                onSelected: (selected) {
+                                                  _controller
+                                                      .updateTaxonomySelection(
+                                                        taxonomySlug:
+                                                            taxonomy.slug,
+                                                        termSlug: term.slug,
+                                                        selected: selected,
+                                                      );
+                                                },
+                                              ),
+                                            )
+                                            .toList(growable: false),
+                                  ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  TenantAdminAccountProfile? _selectedCreateContactSourceCandidate(
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    final selectedId = state.contactSourceAccountProfileId?.trim();
+    if (selectedId == null || selectedId.isEmpty) {
+      return null;
+    }
+    for (final profile
+        in _controller.contactSourceCandidatesStreamValue.value) {
+      if (profile.id == selectedId) {
+        return profile;
+      }
+    }
+    return null;
+  }
+
+  String? _validateCreateBubbleSelection(
+    TenantAdminAccountProfileCreateDraft state,
+    TenantAdminAccountProfile? selectedSource, {
+    required bool capabilityEnabled,
+  }) {
+    if (!capabilityEnabled ||
+        state.contactMode != BellugaContactSourceMode.mirroredAccountProfile) {
+      return null;
+    }
+    final selectedId = _persistedBubbleChannelId(state.contactBubbleSelection);
+    if (selectedId == null || selectedId.isEmpty) {
+      return null;
+    }
+    return selectedSource?.effectiveContactChannels.any(
+              (channel) => channel.id == selectedId && channel.isBubbleEligible,
+            ) !=
+            true
+        ? 'Selecione um canal de WhatsApp válido para o balão.'
+        : null;
+  }
+
+  String? _persistedBubbleChannelId(
+    BellugaContactBubbleSelectionMutation selection,
+  ) => selection is BellugaContactBubbleSelectionPersisted
+      ? selection.channelId
+      : null;
+
+  IconData _contactIconFor(BellugaContactIconToken token) {
+    return switch (token) {
+      BellugaContactIconToken.emailOutlined => Icons.email_outlined,
+      BellugaContactIconToken.whatsapp => Icons.chat,
+    };
+  }
+
+  String _formatContactChannelType(BellugaContactChannelType type) {
+    return switch (type) {
+      BellugaContactChannelType.email => 'E-mail',
+      BellugaContactChannelType.whatsapp => 'WhatsApp',
+    };
+  }
+
+  String _formatContactChannelOption(BellugaContactChannel channel) {
+    final title = channel.title?.trim();
+    if (title == null || title.isEmpty) {
+      return channel.value;
+    }
+    return '${channel.value} • $title';
+  }
+
+  Widget _buildContactSourceSection(
+    BuildContext context,
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    final isMirrored =
+        state.contactMode == BellugaContactSourceMode.mirroredAccountProfile;
+    return TenantAdminFormSectionCard(
+      title: 'Origem do Contato',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          RadioGroup<BellugaContactSourceMode>(
+            groupValue: state.contactMode,
+            onChanged: (value) {
+              if (value == null) {
+                return;
+              }
+              _controller.updateCreateContactMode(value);
+              _controller.updateCreateContactBubbleChannelId(null);
+            },
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                RadioListTile<BellugaContactSourceMode>(
+                  key: Key('tenantAdminCreateContactModeOwn'),
+                  value: BellugaContactSourceMode.own,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('Usar canais deste perfil'),
+                  subtitle: Text(
+                    'E-mail e WhatsApp serão configurados diretamente aqui.',
+                  ),
+                ),
+                RadioListTile<BellugaContactSourceMode>(
+                  key: Key('tenantAdminCreateContactModeMirrored'),
+                  value: BellugaContactSourceMode.mirroredAccountProfile,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('Espelhar outro perfil'),
+                  subtitle: Text(
+                    'Este perfil publicará os canais efetivos do perfil selecionado.',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (isMirrored) ...[
+            const SizedBox(height: 12),
+            StreamValueBuilder<List<TenantAdminAccountProfile>>(
+              streamValue: _controller.contactSourceCandidatesStreamValue,
+              builder: (context, candidates) {
+                final selectedSource = _selectedCreateContactSourceCandidate(
+                  state,
+                );
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    OutlinedButton.icon(
+                      key: const Key('tenantAdminCreateContactSourcePicker'),
+                      icon: const Icon(Icons.person_search_outlined),
+                      label: Text(
+                        selectedSource == null
+                            ? 'Selecionar perfil de origem'
+                            : selectedSource.displayName,
+                      ),
+                      onPressed: () async {
+                        final selected = await showTenantAdminAccountProfilePicker(
+                          context: context,
+                          candidatesStreamValue:
+                              _controller.contactSourceCandidatesStreamValue,
+                          isLoadingStreamValue: _controller
+                              .contactSourceCandidatesLoadingStreamValue,
+                          isPageLoadingStreamValue: _controller
+                              .contactSourceCandidatesPageLoadingStreamValue,
+                          hasMoreStreamValue: _controller
+                              .contactSourceCandidatesHasMoreStreamValue,
+                          errorStreamValue: _controller
+                              .contactSourceCandidatesErrorStreamValue,
+                          onSearchChanged:
+                              _controller.searchContactSourceCandidates,
+                          onProfileTypeChanged: _controller
+                              .filterContactSourceCandidatesByProfileType,
+                          profileTypes: _controller
+                              .profileTypesStreamValue
+                              .value
+                              .where(
+                                (profileType) =>
+                                    profileType.capabilities.hasContactChannels,
+                              )
+                              .toList(growable: false),
+                          loadNextPage:
+                              _controller.loadNextContactSourceCandidatesPage,
+                          title: 'Perfil de origem',
+                          emptyMessage:
+                              'Nenhum perfil elegível para espelhar contatos.',
+                          selectedProfileId: selectedSource?.id,
+                        );
+                        if (!context.mounted || selected == null) return;
+                        _controller.updateCreateContactSourceAccountProfileId(
+                          selected.id,
+                        );
+                        _controller.updateCreateContactBubbleChannelId(null);
+                      },
+                    ),
+                    if (candidates.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Nenhum perfil elegível para espelhar contatos está disponível.',
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    if (selectedSource == null)
+                      const Text(
+                        'Selecione um perfil para visualizar os canais efetivos que serão espelhados.',
+                      )
+                    else
+                      _buildContactPreview(
+                        context,
+                        channels: selectedSource.effectiveContactChannels,
+                        emptyMessage:
+                            'O perfil selecionado ainda não possui canais de contato válidos.',
+                        selectedBubbleChannelId:
+                            selectedSource.effectiveContactBubbleChannel?.id,
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContactChannelsSection(
+    BuildContext context,
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    if (state.contactMode == BellugaContactSourceMode.mirroredAccountProfile) {
+      return TenantAdminFormSectionCard(
+        title: 'Canais de Contato',
+        child: StreamValueBuilder<List<TenantAdminAccountProfile>>(
+          streamValue: _controller.contactSourceCandidatesStreamValue,
+          builder: (context, _) {
+            final selectedSource = _selectedCreateContactSourceCandidate(state);
+            if (selectedSource == null) {
+              return const Text(
+                'Selecione um perfil de origem para visualizar os canais efetivos.',
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'A edição local de canais fica desativada no modo espelhado. Edite o perfil de origem para alterar os canais exibidos aqui.',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 12),
+                _buildContactPreview(
+                  context,
+                  channels: selectedSource.effectiveContactChannels,
+                  emptyMessage:
+                      'O perfil de origem ainda não possui canais de contato válidos.',
+                  selectedBubbleChannelId:
+                      selectedSource.effectiveContactBubbleChannel?.id,
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    }
+
+    return TenantAdminFormSectionCard(
+      title: 'Canais de Contato',
+      child: TenantAdminContactChannelsEditor(
+        drafts: state.contactChannelDrafts,
+        bubbleSelection: state.contactBubbleSelection,
+        expandedCtaDraftKey: state.expandedContactCtaDraftKey,
+        onAddChannel: _controller.addCreateContactChannel,
+        onUpdateChannel: _controller.updateCreateContactChannel,
+        onRemoveChannel: _controller.removeCreateContactChannel,
+        onSelectBubble: _controller.selectCreateContactBubble,
+        onToggleCtaEditor: _controller.toggleCreateContactCtaEditor,
+        onAddInitialMessage: _controller.addCreateContactInitialMessage,
+        onUpdateInitialMessage: _controller.updateCreateContactInitialMessage,
+        onRemoveInitialMessage:
+            _controller.removeCreateContactInitialMessageFromChannel,
+      ),
+    );
+  }
+
+  Widget _buildContactPreview(
+    BuildContext context, {
+    required List<BellugaContactChannel> channels,
+    required String emptyMessage,
+    String? selectedBubbleChannelId,
+  }) {
+    if (channels.isEmpty) {
+      return Text(emptyMessage);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: channels
+          .map(
+            (channel) => Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Column(
+                children: [
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(_contactIconFor(channel.iconToken)),
+                    title: Text(_formatContactChannelType(channel.type)),
+                    subtitle: Text(_formatContactChannelOption(channel)),
+                  ),
+                  if (channel.isBubbleEligible)
+                    SwitchListTile(
+                      key: Key(
+                        'tenantAdminCreateMirroredBubbleToggle_${channel.id}',
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Ativar balão flutuante'),
+                      value: selectedBubbleChannelId == channel.id,
+                      onChanged: null,
+                    ),
+                ],
+              ),
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  Widget _buildMediaSection(
+    BuildContext context,
+    TenantAdminAccountProfileCreateDraft state,
+  ) {
+    final hasAvatar = _hasAvatar(state.selectedProfileType);
+    final hasCover = _hasCover(state.selectedProfileType);
+    final avatarUrl = state.avatarWebUrl;
+    final hasAvatarUrl = avatarUrl != null && avatarUrl.isNotEmpty;
+    final coverUrl = state.coverWebUrl;
+    final hasCoverUrl = coverUrl != null && coverUrl.isNotEmpty;
+    return TenantAdminFormSectionCard(
+      title: 'Imagens do perfil',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (hasAvatar) ...[
+            TenantAdminCanonicalImageUploadField(
+              variant: TenantAdminImageUploadVariant.avatar,
+              preview: state.avatarFile != null
+                  ? ClipRRect(
+                      borderRadius: BorderRadius.circular(36),
+                      child: TenantAdminXFilePreview(
+                        file: state.avatarFile!,
+                        width: 72,
+                        height: 72,
+                        fit: BoxFit.cover,
+                      ),
+                    )
+                  : hasAvatarUrl
+                  ? BellugaNetworkImage(
+                      avatarUrl,
+                      width: 72,
+                      height: 72,
+                      fit: BoxFit.cover,
+                      clipBorderRadius: BorderRadius.circular(36),
+                      placeholder: Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(36),
+                        ),
+                        child: const Icon(Icons.person_outline),
+                      ),
+                    )
+                  : Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(36),
+                      ),
+                      child: const Icon(Icons.person_outline),
+                    ),
+              selectedLabel:
+                  state.avatarFile?.name ??
+                  avatarUrl ??
+                  'Nenhuma imagem selecionada',
+              addLabel: 'Adicionar avatar',
+              sourceSheetTitle: 'Adicionar avatar',
+              urlPromptTitle: 'URL do avatar',
+              busy: state.avatarBusy,
+              canRemove: state.avatarFile != null || hasAvatarUrl,
+              onRemove: () => _clearImage(isAvatar: true),
+              initialWebUrl: avatarUrl,
+              slot: TenantAdminImageSlot.avatar,
+              pickFromDevice: () => _controller.pickImageFromDevice(
+                slot: TenantAdminImageSlot.avatar,
+              ),
+              fetchImageFromUrlForCrop: _controller.fetchImageFromUrlForCrop,
+              readBytesForCrop: _controller.readImageBytesForCrop,
+              prepareCroppedFile: _controller.prepareCroppedImage,
+              onBusyChanged: _controller.updateCreateAvatarBusy,
+              onImageSelected: (cropped) async {
+                _controller.updateCreateAvatarFile(cropped);
+              },
+              onIngestionError: _controller.reportCreateErrorMessage,
+            ),
+          ],
+          if (hasAvatar && hasCover) const SizedBox(height: 16),
+          if (hasCover) ...[
+            TenantAdminCanonicalImageUploadField(
+              variant: TenantAdminImageUploadVariant.cover,
+              preview: state.coverFile != null
+                  ? ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: TenantAdminXFilePreview(
+                        file: state.coverFile!,
+                        width: double.infinity,
+                        height: 140,
+                        fit: BoxFit.cover,
+                      ),
+                    )
+                  : hasCoverUrl
+                  ? BellugaNetworkImage(
+                      coverUrl,
+                      width: double.infinity,
+                      height: 140,
+                      fit: BoxFit.cover,
+                      clipBorderRadius: BorderRadius.circular(12),
+                    )
+                  : Container(
+                      width: double.infinity,
+                      height: 140,
+                      decoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Center(child: Icon(Icons.image_outlined)),
+                    ),
+              selectedLabel:
+                  state.coverFile?.name ??
+                  coverUrl ??
+                  'Nenhuma imagem selecionada',
+              addLabel: 'Adicionar capa',
+              sourceSheetTitle: 'Adicionar capa',
+              urlPromptTitle: 'URL da capa',
+              busy: state.coverBusy,
+              canRemove: state.coverFile != null || hasCoverUrl,
+              onRemove: () => _clearImage(isAvatar: false),
+              initialWebUrl: coverUrl,
+              slot: TenantAdminImageSlot.accountProfileHeroCover,
+              pickFromDevice: () => _controller.pickImageFromDevice(
+                slot: TenantAdminImageSlot.accountProfileHeroCover,
+              ),
+              fetchImageFromUrlForCrop: _controller.fetchImageFromUrlForCrop,
+              readBytesForCrop: _controller.readImageBytesForCrop,
+              prepareCroppedFile: _controller.prepareCroppedImage,
+              onBusyChanged: _controller.updateCreateCoverBusy,
+              onImageSelected: (cropped) async {
+                _controller.updateCreateCoverFile(cropped);
+              },
+              onIngestionError: _controller.reportCreateErrorMessage,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLocationSection(BuildContext context) {
+    return TenantAdminFormSectionCard(
+      title: 'Localizacao',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextFormField(
+            controller: _controller.latitudeController,
+            decoration: const InputDecoration(labelText: 'Latitude'),
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+              signed: true,
+            ),
+            inputFormatters: tenantAdminCoordinateInputFormatters,
+            textInputAction: TextInputAction.next,
+            validator: _validateLatitude,
+          ),
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: _controller.longitudeController,
+            decoration: const InputDecoration(labelText: 'Longitude'),
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+              signed: true,
+            ),
+            inputFormatters: tenantAdminCoordinateInputFormatters,
+            textInputAction: TextInputAction.done,
+            validator: _validateLongitude,
+          ),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: _openMapPicker,
+            icon: const Icon(Icons.map_outlined),
+            label: const Text('Selecionar no mapa'),
+          ),
+        ],
+      ),
+    );
+  }
+}

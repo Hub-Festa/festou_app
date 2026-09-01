@@ -1,0 +1,563 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/latitude_value.dart';
+import 'package:festou_app/domain/map/value_objects/longitude_value.dart';
+import 'package:festou_app/domain/repositories/user_location_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_location_repository_contract_bool_value.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_location_repository_contract_duration_value.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_location_repository_contract_text_value.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+class UserLocationRepository implements UserLocationRepositoryContract {
+  UserLocationRepository({
+    bool? isWebOverride,
+  }) : _isWeb = isWebOverride ?? kIsWeb {
+    _loadFuture = _loadLastKnownSnapshot();
+    unawaited(_loadFuture);
+  }
+
+  static const _trackingMinUpdateInterval = Duration(seconds: 2);
+  static const _trackingPersistMinInterval = Duration(seconds: 60);
+  static const _defaultWebLocationResolutionTimeout = Duration(seconds: 8);
+
+  static const _keyLat = 'last_location_lat';
+  static const _keyLng = 'last_location_lng';
+  static const _keyCapturedAt = 'last_location_captured_at';
+  static const _keyAccuracy = 'last_location_accuracy';
+  static const _keyAddress = 'last_location_address';
+
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  late final Future<void> _loadFuture;
+  final bool _isWeb;
+
+  StreamSubscription<Position>? _trackingSubscription;
+  DateTime? _lastTrackingUpdateAt;
+  bool _hasLiveFix = false;
+
+  DateTime? _lastPersistedAt;
+  CityCoordinate? _lastPersistedCoordinate;
+
+  @override
+  final userLocationStreamValue = StreamValue<CityCoordinate?>();
+
+  @override
+  final lastKnownLocationStreamValue = StreamValue<CityCoordinate?>();
+
+  @override
+  final lastKnownCapturedAtStreamValue = StreamValue<DateTime?>();
+
+  @override
+  final lastKnownAccuracyStreamValue = StreamValue<double?>();
+
+  @override
+  final lastKnownAddressStreamValue = StreamValue<String?>();
+
+  @override
+  final StreamValue<LocationResolutionPhase>
+      locationResolutionPhaseStreamValue = StreamValue<LocationResolutionPhase>(
+    defaultValue: LocationResolutionPhase.unknown,
+  );
+
+  @override
+  Future<void> ensureLoaded() => _loadFuture;
+
+  @override
+  Future<bool> warmUpIfPermitted() async {
+    await ensureLoaded();
+    return refreshIfPermitted(
+      minInterval: UserLocationRepositoryContractDurationValue.fromRaw(
+        Duration.zero,
+        defaultValue: Duration.zero,
+      ),
+    );
+  }
+
+  @override
+  Future<bool> refreshIfPermitted({
+    UserLocationRepositoryContractDurationValue? minInterval,
+  }) async {
+    await ensureLoaded();
+    final effectiveMinInterval =
+        minInterval?.value ?? const Duration(seconds: 30);
+    locationResolutionPhaseStreamValue
+        .addValue(LocationResolutionPhase.resolving);
+
+    final hasAnyCoordinate = userLocationStreamValue.value != null ||
+        lastKnownLocationStreamValue.value != null;
+
+    if (_hasLiveFix &&
+        effectiveMinInterval > Duration.zero &&
+        _lastTrackingUpdateAt != null &&
+        DateTime.now().difference(_lastTrackingUpdateAt!) <
+            effectiveMinInterval) {
+      return true;
+    }
+
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      locationResolutionPhaseStreamValue.addValue(
+        hasAnyCoordinate
+            ? LocationResolutionPhase.resolved
+            : LocationResolutionPhase.unavailable,
+      );
+      return hasAnyCoordinate;
+    }
+
+    final permission = await Geolocator.checkPermission();
+    final granted = permission == LocationPermission.always ||
+        permission == LocationPermission.whileInUse;
+    if (!granted) {
+      locationResolutionPhaseStreamValue.addValue(
+        hasAnyCoordinate
+            ? LocationResolutionPhase.resolved
+            : LocationResolutionPhase.permissionDenied,
+      );
+      return hasAnyCoordinate;
+    }
+
+    Position? position = await _getLastKnownPositionIfSupported();
+
+    // If we have a very recent (within 5 min) position, use it.
+    // Otherwise, request a new one with medium accuracy (faster).
+    if (position == null ||
+        DateTime.now().difference(position.timestamp) >
+            const Duration(minutes: 5)) {
+      try {
+        position = await _getCurrentPositionWithDeterministicTimeout(
+          accuracy: LocationAccuracy.medium,
+          timeout: const Duration(seconds: 5),
+        );
+      } catch (e) {
+        debugPrint('UserLocationRepository.refreshIfPermitted: $e');
+      }
+    }
+
+    if (position != null) {
+      await _applyLiveFix(
+        position,
+        shouldPersist: true,
+      );
+    }
+
+    locationResolutionPhaseStreamValue.addValue(
+      userLocationStreamValue.value != null
+          ? LocationResolutionPhase.resolved
+          : LocationResolutionPhase.unavailable,
+    );
+    return userLocationStreamValue.value != null ||
+        lastKnownLocationStreamValue.value != null;
+  }
+
+  Future<Position?> _getLastKnownPositionIfSupported() async {
+    Position? position;
+    try {
+      position = await Geolocator.getLastKnownPosition();
+    } on UnsupportedError catch (error) {
+      debugPrint(
+        'UserLocationRepository.refreshIfPermitted.lastKnownUnsupported: '
+        '$error',
+      );
+    }
+    return position;
+  }
+
+  @override
+  Future<void> setLastKnownAddress(
+    UserLocationRepositoryContractTextValue? address,
+  ) async {
+    final normalizedAddress = address?.value.trim();
+    if (normalizedAddress == null || normalizedAddress.isEmpty) {
+      lastKnownAddressStreamValue.addValue(null);
+      await _storage.delete(key: _keyAddress);
+      return;
+    }
+    lastKnownAddressStreamValue.addValue(normalizedAddress);
+    await _storage.write(key: _keyAddress, value: normalizedAddress);
+  }
+
+  @override
+  Future<String?> resolveUserLocation({
+    UserLocationRepositoryContractDurationValue? timeout,
+    UserLocationRepositoryContractBoolValue? requestPermissionIfNeededValue,
+  }) async {
+    await ensureLoaded();
+    locationResolutionPhaseStreamValue
+        .addValue(LocationResolutionPhase.resolving);
+
+    final _currentLocation = userLocationStreamValue.value;
+
+    if (_currentLocation != null && _hasLiveFix) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.resolved);
+      return null;
+    }
+
+    return await _getCurrentUserLocation(
+      timeout: timeout?.value,
+      requestPermissionIfNeeded: requestPermissionIfNeededValue?.value ?? true,
+    );
+  }
+
+  Future<String?> _getCurrentUserLocation({
+    Duration? timeout,
+    required bool requestPermissionIfNeeded,
+  }) async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
+    if (!serviceEnabled) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.unavailable);
+      return Future.value(
+          'Ative os servicos de localizacao para ver sua posicao. Exibindo pontos padrao da cidade.');
+    }
+
+    var permission = await Geolocator.checkPermission();
+    if (_isWeb) {
+      return _resolveWebCurrentUserLocation(
+        permission: permission,
+        timeout: timeout,
+        requestPermissionIfNeeded: requestPermissionIfNeeded,
+      );
+    }
+
+    if (permission == LocationPermission.denied && requestPermissionIfNeeded) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.deniedForever ||
+        permission == LocationPermission.denied) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.permissionDenied);
+      return Future.value(
+        'Permita o acesso a localizacao para localizar pontos proximos.',
+      );
+    }
+
+    String? errorMessage;
+    try {
+      final position = await _getCurrentPositionWithDeterministicTimeout(
+        accuracy: LocationAccuracy.best,
+        timeout: timeout,
+      );
+
+      await _applyLiveFix(
+        position,
+        shouldPersist: true,
+      );
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.resolved);
+
+      return null;
+    } on TimeoutException {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.unavailable);
+      errorMessage =
+          'Nao foi possivel obter sua localizacao agora. Tente novamente.';
+    } on PermissionDeniedException {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.permissionDenied);
+      errorMessage =
+          'Permita o acesso a localizacao para localizar pontos proximos.';
+    }
+
+    return Future.value(errorMessage);
+  }
+
+  Future<String?> _resolveWebCurrentUserLocation({
+    required LocationPermission permission,
+    required Duration? timeout,
+    required bool requestPermissionIfNeeded,
+  }) async {
+    final canRetryAfterPromptTimeout =
+        permission == LocationPermission.denied && requestPermissionIfNeeded;
+    LocationPermission? retryPermissionAfterPromptTimeout;
+    var shouldEmitUnavailable = false;
+    if (permission == LocationPermission.deniedForever ||
+        (permission == LocationPermission.denied &&
+            !requestPermissionIfNeeded)) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.permissionDenied);
+      return Future.value(
+        'Permita o acesso a localizacao para localizar pontos proximos.',
+      );
+    }
+
+    String? errorMessage;
+    try {
+      final position = await _getCurrentPositionWithDeterministicTimeout(
+        accuracy: LocationAccuracy.best,
+        timeout: timeout,
+      );
+
+      await _applyLiveFix(
+        position,
+        shouldPersist: true,
+      );
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.resolved);
+
+      return null;
+    } on TimeoutException {
+      if (canRetryAfterPromptTimeout) {
+        final permissionAfterTimeout = await Geolocator.checkPermission();
+        if (permissionAfterTimeout == LocationPermission.always ||
+            permissionAfterTimeout == LocationPermission.whileInUse) {
+          retryPermissionAfterPromptTimeout = permissionAfterTimeout;
+        }
+      }
+      shouldEmitUnavailable = retryPermissionAfterPromptTimeout == null;
+      errorMessage =
+          'Nao foi possivel obter sua localizacao agora. Tente novamente.';
+    } on PermissionDeniedException {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.permissionDenied);
+      errorMessage =
+          'Permita o acesso a localizacao para localizar pontos proximos.';
+    } on Object catch (error) {
+      debugPrint(
+          'UserLocationRepository.resolveWebCurrentUserLocation: $error');
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.unavailable);
+      errorMessage =
+          'Nao foi possivel obter sua localizacao agora. Tente novamente.';
+    }
+
+    final retryPermission = retryPermissionAfterPromptTimeout;
+    if (retryPermission != null) {
+      return _resolveWebCurrentUserLocation(
+        permission: retryPermission,
+        timeout: timeout,
+        requestPermissionIfNeeded: false,
+      );
+    }
+    if (shouldEmitUnavailable) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.unavailable);
+    }
+
+    return Future.value(errorMessage);
+  }
+
+  Future<Position> _getCurrentPositionWithDeterministicTimeout({
+    required LocationAccuracy accuracy,
+    required Duration? timeout,
+  }) async {
+    final effectiveTimeout =
+        timeout ?? (_isWeb ? _defaultWebLocationResolutionTimeout : null);
+    Future<Position> future = Geolocator.getCurrentPosition(
+      locationSettings: LocationSettings(
+        accuracy: accuracy,
+        timeLimit: effectiveTimeout,
+      ),
+    );
+
+    // `geolocator_web` currently forwards browser timeout using microseconds
+    // instead of milliseconds. Enforce our boundary timeout locally so the
+    // app contract stays deterministic even when the dependency drifts.
+    if (effectiveTimeout != null) {
+      future = future.timeout(effectiveTimeout);
+    }
+
+    return future;
+  }
+
+  @override
+  Future<bool> startTracking({
+    LocationTrackingMode mode = LocationTrackingMode.mapForeground,
+  }) async {
+    await ensureLoaded();
+
+    if (_trackingSubscription != null) {
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.resolved);
+      return true;
+    }
+
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      locationResolutionPhaseStreamValue.addValue(
+        userLocationStreamValue.value != null ||
+                lastKnownLocationStreamValue.value != null
+            ? LocationResolutionPhase.resolved
+            : LocationResolutionPhase.unavailable,
+      );
+      return userLocationStreamValue.value != null ||
+          lastKnownLocationStreamValue.value != null;
+    }
+
+    final permission = await Geolocator.checkPermission();
+    final granted = permission == LocationPermission.always ||
+        permission == LocationPermission.whileInUse;
+    if (!granted) {
+      locationResolutionPhaseStreamValue.addValue(
+        userLocationStreamValue.value != null ||
+                lastKnownLocationStreamValue.value != null
+            ? LocationResolutionPhase.resolved
+            : LocationResolutionPhase.permissionDenied,
+      );
+      return userLocationStreamValue.value != null ||
+          lastKnownLocationStreamValue.value != null;
+    }
+
+    final settings = switch (mode) {
+      LocationTrackingMode.mapForeground => const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 15,
+        ),
+      LocationTrackingMode.lowPower => const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          distanceFilter: 150,
+        ),
+    };
+
+    _trackingSubscription = Geolocator.getPositionStream(
+      locationSettings: settings,
+    ).listen(
+      (pos) async {
+        final now = DateTime.now();
+        if (_lastTrackingUpdateAt != null &&
+            now.difference(_lastTrackingUpdateAt!) <
+                _trackingMinUpdateInterval) {
+          return;
+        }
+        _lastTrackingUpdateAt = now;
+
+        final shouldPersist = _shouldPersistNow(now);
+        await _applyLiveFix(
+          pos,
+          shouldPersist: shouldPersist,
+        );
+        locationResolutionPhaseStreamValue
+            .addValue(LocationResolutionPhase.resolved);
+      },
+      onError: (_) {
+        // Non-fatal: keep last known snapshot.
+      },
+    );
+
+    return true;
+  }
+
+  @override
+  Future<void> stopTracking() async {
+    final sub = _trackingSubscription;
+    _trackingSubscription = null;
+    await sub?.cancel();
+  }
+
+  Future<void> _applyLiveFix(
+    Position position, {
+    required bool shouldPersist,
+  }) async {
+    final coordinate = CityCoordinate(
+      latitudeValue: LatitudeValue()..parse(position.latitude.toString()),
+      longitudeValue: LongitudeValue()..parse(position.longitude.toString()),
+    );
+
+    _hasLiveFix = true;
+    userLocationStreamValue.addValue(coordinate);
+    lastKnownAccuracyStreamValue.addValue(position.accuracy);
+
+    if (shouldPersist) {
+      await _persistLastKnownLocation(
+        coordinate,
+        position.accuracy,
+      );
+    }
+  }
+
+  Future<void> _persistLastKnownLocation(
+    CityCoordinate coordinate,
+    double? accuracy,
+  ) async {
+    lastKnownLocationStreamValue.addValue(coordinate);
+    final now = DateTime.now();
+    lastKnownCapturedAtStreamValue.addValue(now);
+    lastKnownAccuracyStreamValue.addValue(accuracy);
+
+    _lastPersistedAt = now;
+    _lastPersistedCoordinate = coordinate;
+
+    await Future.wait([
+      _storage.write(key: _keyLat, value: coordinate.latitude.toString()),
+      _storage.write(key: _keyLng, value: coordinate.longitude.toString()),
+      _storage.write(key: _keyCapturedAt, value: now.toIso8601String()),
+      if (accuracy != null)
+        _storage.write(
+          key: _keyAccuracy,
+          value: accuracy.toString(),
+        ),
+    ]);
+  }
+
+  Future<void> _loadLastKnownSnapshot() async {
+    try {
+      final values = await Future.wait([
+        _storage.read(key: _keyLat),
+        _storage.read(key: _keyLng),
+        _storage.read(key: _keyCapturedAt),
+        _storage.read(key: _keyAccuracy),
+        _storage.read(key: _keyAddress),
+      ]);
+      final lat = double.tryParse(values[0] ?? '');
+      final lng = double.tryParse(values[1] ?? '');
+      if (lat == null || lng == null) {
+        return;
+      }
+
+      final coordinate = CityCoordinate(
+        latitudeValue: LatitudeValue()..parse(lat.toString()),
+        longitudeValue: LongitudeValue()..parse(lng.toString()),
+      );
+
+      lastKnownLocationStreamValue.addValue(coordinate);
+      final capturedAtRaw = values[2];
+      final capturedAt =
+          capturedAtRaw != null ? DateTime.tryParse(capturedAtRaw) : null;
+      lastKnownCapturedAtStreamValue.addValue(capturedAt);
+      final accuracyRaw = values[3];
+      final accuracy =
+          accuracyRaw != null ? double.tryParse(accuracyRaw) : null;
+      lastKnownAccuracyStreamValue.addValue(accuracy);
+
+      final address = values[4];
+      lastKnownAddressStreamValue.addValue(address);
+
+      // Provide a best-effort default for consumers that use only `userLocationStreamValue`.
+      userLocationStreamValue.addValue(coordinate);
+      locationResolutionPhaseStreamValue
+          .addValue(LocationResolutionPhase.resolved);
+      _hasLiveFix = false;
+      _lastPersistedAt = capturedAt;
+      _lastPersistedCoordinate = coordinate;
+    } catch (_) {
+      // Ignore cache load failures.
+    }
+  }
+
+  bool _shouldPersistNow(DateTime now) {
+    final lastAt = _lastPersistedAt;
+    if (lastAt == null) {
+      return true;
+    }
+    if (now.difference(lastAt) >= _trackingPersistMinInterval) {
+      return true;
+    }
+
+    final lastCoordinate = _lastPersistedCoordinate;
+    final current = userLocationStreamValue.value;
+    if (lastCoordinate == null || current == null) {
+      return true;
+    }
+
+    final deltaLat = (lastCoordinate.latitude - current.latitude).abs();
+    final deltaLng = (lastCoordinate.longitude - current.longitude).abs();
+    // Fast approximation: ~111km per degree.
+    final approxMeters = ((deltaLat + deltaLng) * 111000.0);
+    return approxMeters >= 100;
+  }
+}

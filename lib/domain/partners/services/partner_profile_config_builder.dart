@@ -1,0 +1,229 @@
+import 'package:festou_app/domain/partners/account_profile_model.dart';
+import 'package:festou_app/domain/partners/profile_type_capabilities.dart';
+import 'package:festou_app/domain/partners/projections/partner_profile_config.dart';
+import 'package:festou_app/domain/partners/projections/value_objects/partner_projection_text_values.dart';
+
+/// Builds profile module configuration based on partner type and capabilities.
+class PartnerProfileConfigBuilder {
+  PartnerProfileConfigBuilder();
+
+  PartnerProfileConfig build(
+    AccountProfileModel partner, {
+    ProfileTypeCapabilities? capabilities,
+  }) {
+    if (capabilities != null) {
+      final tabs = <ProfileTabConfig>[];
+      final hasAgenda =
+          capabilities.hasEvents || partner.agendaEvents.isNotEmpty;
+      if (_hasAboutContentForCapabilities(partner, capabilities)) {
+        tabs.add(
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Sobre'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.richText),
+              ProfileModuleConfig(id: ProfileModuleId.photoGallery),
+            ],
+          ),
+        );
+      }
+      if (capabilities.isPoiEnabled) {
+        tabs.add(
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Como Chegar'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.locationInfo),
+            ],
+          ),
+        );
+      }
+      if (hasAgenda) {
+        tabs.add(
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Agenda'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.agendaList),
+            ],
+          ),
+        );
+      }
+      return PartnerProfileConfig(
+        partner: partner,
+        tabs: tabs,
+      );
+    }
+
+    switch (partner.type) {
+      case 'artist':
+        final tabs = <ProfileTabConfig>[];
+        if (_hasAboutContent(partner)) {
+          tabs.add(
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Sobre'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.richText),
+                ProfileModuleConfig(id: ProfileModuleId.photoGallery),
+              ],
+            ),
+          );
+        }
+        tabs.add(
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Agenda'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.agendaList),
+            ],
+          ),
+        );
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: tabs,
+        );
+      case 'venue':
+        final tabs = <ProfileTabConfig>[];
+        if (_hasAboutContent(partner)) {
+          tabs.add(
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Sobre'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.richText),
+                ProfileModuleConfig(id: ProfileModuleId.photoGallery),
+              ],
+            ),
+          );
+        }
+        tabs.addAll([
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Como Chegar'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.locationInfo),
+            ],
+          ),
+          ProfileTabConfig(
+            titleValue: partnerProjectionRequiredText('Agenda'),
+            modules: [
+              ProfileModuleConfig(id: ProfileModuleId.agendaList),
+            ],
+          ),
+        ]);
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: tabs,
+        );
+      case 'experience_provider':
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: [
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Experiências'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.experienceCards),
+              ],
+            ),
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Sobre o Guia'),
+              modules: [
+                ProfileModuleConfig(
+                  id: ProfileModuleId.richText,
+                  titleValue: partnerProjectionOptionalText('Quem Somos'),
+                ),
+              ],
+            ),
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Dúvidas'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.faq),
+              ],
+            ),
+          ],
+        );
+      case 'curator':
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: [
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Acervo'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.videoGallery),
+                ProfileModuleConfig(
+                  id: ProfileModuleId.richText,
+                  titleValue: partnerProjectionOptionalText('Artigos Recentes'),
+                ),
+              ],
+            ),
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Sobre & Apoio'),
+              modules: [
+                ProfileModuleConfig(
+                  id: ProfileModuleId.richText,
+                  titleValue: partnerProjectionOptionalText('Sobre'),
+                ),
+                ProfileModuleConfig(id: ProfileModuleId.externalLinks),
+                ProfileModuleConfig(id: ProfileModuleId.sponsorBanner),
+              ],
+            ),
+          ],
+        );
+      case 'influencer':
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: [
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Galeria'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.photoGallery),
+              ],
+            ),
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Recomendações'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.affinityCarousels),
+              ],
+            ),
+            ProfileTabConfig(
+              titleValue: partnerProjectionRequiredText('Próximos rolês'),
+              modules: [
+                ProfileModuleConfig(id: ProfileModuleId.agendaList),
+              ],
+            ),
+          ],
+        );
+      default:
+        return PartnerProfileConfig(
+          partner: partner,
+          tabs: const [],
+        );
+    }
+  }
+
+  bool _hasCapabilityRichText(
+    AccountProfileModel partner,
+    ProfileTypeCapabilities capabilities,
+  ) {
+    return (capabilities.hasBio && _hasBio(partner)) ||
+        (capabilities.hasContent && _hasContent(partner));
+  }
+
+  bool _hasAboutContentForCapabilities(
+    AccountProfileModel partner,
+    ProfileTypeCapabilities capabilities,
+  ) {
+    return _hasCapabilityRichText(partner, capabilities) ||
+        (capabilities.hasGallery && partner.galleryGroups.isNotEmpty);
+  }
+
+  bool _hasAboutContent(AccountProfileModel partner) {
+    return _hasAnyRichText(partner) || partner.galleryGroups.isNotEmpty;
+  }
+
+  bool _hasAnyRichText(AccountProfileModel partner) {
+    return _hasBio(partner) || _hasContent(partner);
+  }
+
+  bool _hasBio(AccountProfileModel partner) {
+    return partner.bioValue?.value.trim().isNotEmpty ?? false;
+  }
+
+  bool _hasContent(AccountProfileModel partner) {
+    return partner.contentValue?.value.trim().isNotEmpty ?? false;
+  }
+}

@@ -1,43 +1,132 @@
-import 'package:belluga_boilerplate/infrastructure/services/schedule_backend_contract.dart';
-import 'package:get_it/get_it.dart';
-import 'package:belluga_boilerplate/domain/schedule/event_model.dart';
-import 'package:belluga_boilerplate/domain/schedule/schedule_summary_model.dart';
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_dto.dart';
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_summary_dto.dart';
+import 'package:belluga_discovery_filters/belluga_discovery_filters.dart';
+import 'package:festou_app/domain/repositories/value_objects/schedule_repository_contract_values.dart';
+import 'package:festou_app/domain/schedule/event_delta_model.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:stream_value/core/stream_value.dart';
 
-class ScheduleRepositoryContract {
-  ScheduleBackendContract get scheduleBackend => GetIt.I.get();
+typedef ScheduleRepoString = ScheduleRepositoryContractTextValue;
+typedef ScheduleRepoInt = ScheduleRepositoryContractIntValue;
+typedef ScheduleRepoBool = ScheduleRepositoryContractBoolValue;
+typedef ScheduleRepoDouble = ScheduleRepositoryContractDoubleValue;
+typedef ScheduleRepoDateTime = ScheduleRepositoryContractDateTimeValue;
+typedef ScheduleRepoTaxonomyEntry = ScheduleRepositoryContractTaxonomyEntry;
+typedef ScheduleRepoTaxonomyEntries = ScheduleTaxonomyEntries;
 
-  Future<ScheduleSummaryModel> getScheduleSummary() async {
-    final EventSummaryDTO _eventSummaryDTO =
-        await scheduleBackend.getScheduleSummary();
+abstract class ScheduleRepositoryContract {
+  StreamValue<List<EventModel>?> get homeAgendaStreamValue;
+  StreamValue<List<EventModel>?> get discoveryLiveNowEventsStreamValue;
+  final homeAgendaDiscoveryFilterFacetsStreamValue =
+      StreamValue<DiscoveryFilterRuntimeFacets?>(defaultValue: null);
+  final homeAgendaDiscoveryFilterCatalogStreamValue =
+      StreamValue<DiscoveryFilterCatalog?>(defaultValue: null);
 
-    return ScheduleSummaryModel.fromDTO(_eventSummaryDTO);
+  List<EventModel>? readHomeAgenda({
+    required ScheduleRepoBool showPastOnly,
+    required ScheduleRepoString searchQuery,
+    required ScheduleRepoBool confirmedOnly,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+    List<ScheduleRepoString>? categories,
+    ScheduleRepoTaxonomyEntries? taxonomy,
+  });
+
+  Future<List<EventModel>> loadHomeAgenda({
+    required ScheduleRepoBool showPastOnly,
+    required ScheduleRepoString searchQuery,
+    required ScheduleRepoBool confirmedOnly,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+    List<ScheduleRepoString>? categories,
+    ScheduleRepoTaxonomyEntries? taxonomy,
+  });
+
+  Future<List<EventModel>> loadMoreHomeAgenda({
+    required ScheduleRepoBool showPastOnly,
+    required ScheduleRepoString searchQuery,
+    required ScheduleRepoBool confirmedOnly,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+    List<ScheduleRepoString>? categories,
+    ScheduleRepoTaxonomyEntries? taxonomy,
+  });
+
+  Future<EventModel?> getEventBySlug(
+    ScheduleRepoString slug, {
+    ScheduleRepoString? occurrenceId,
+  });
+
+  Future<List<EventModel>> loadEventSearch({
+    required ScheduleRepoBool showPastOnly,
+    ScheduleRepoString? searchQuery,
+    ScheduleRepoBool? confirmedOnly,
+    List<ScheduleRepoString>? occurrenceIds,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+  });
+
+  Future<List<EventModel>> loadMoreEventSearch({
+    required ScheduleRepoBool showPastOnly,
+    ScheduleRepoString? searchQuery,
+    ScheduleRepoBool? confirmedOnly,
+    List<ScheduleRepoString>? occurrenceIds,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+  });
+
+  Future<List<EventModel>> loadConfirmedEvents({
+    required ScheduleRepoBool showPastOnly,
+  });
+
+  Future<void> refreshDiscoveryLiveNowEvents({
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+  });
+
+  Stream<EventDeltaModel> watchEventsStream({
+    ScheduleRepoString? searchQuery,
+    List<ScheduleRepoString>? categories,
+    ScheduleRepoTaxonomyEntries? taxonomy,
+    ScheduleRepoBool? confirmedOnly,
+    List<ScheduleRepoString>? occurrenceIds,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+    ScheduleRepoString? lastEventId,
+    ScheduleRepoBool? showPastOnly,
+  });
+
+  Stream<void> watchEventsSignal({
+    required ScheduleRepositoryContractDeltaHandler onDelta,
+    ScheduleRepoString? searchQuery,
+    List<ScheduleRepoString>? categories,
+    ScheduleRepoTaxonomyEntries? taxonomy,
+    ScheduleRepoBool? confirmedOnly,
+    List<ScheduleRepoString>? occurrenceIds,
+    ScheduleRepoDouble? originLat,
+    ScheduleRepoDouble? originLng,
+    ScheduleRepoDouble? maxDistanceMeters,
+    ScheduleRepoString? lastEventId,
+    ScheduleRepoBool? showPastOnly,
+  }) {
+    return watchEventsStream(
+      searchQuery: searchQuery,
+      categories: categories,
+      taxonomy: taxonomy,
+      confirmedOnly: confirmedOnly,
+      occurrenceIds: occurrenceIds,
+      originLat: originLat,
+      originLng: originLng,
+      maxDistanceMeters: maxDistanceMeters,
+      lastEventId: lastEventId,
+      showPastOnly: showPastOnly,
+    ).map((delta) {
+      onDelta(delta);
+    });
   }
-  
-  Future<EventModel> getEvent(String eventId) async {
-    final EventDTO _eventDTO = await scheduleBackend.getEvent(eventId);
-    return EventModel.fromDTO(_eventDTO);
-  }
-
-  Future<List<EventModel>> getEventsByDate(DateTime date) async {
-    final List<EventDTO> _events = await scheduleBackend.getEventsByDate(date);
-    return _events.map((e) => EventModel.fromDTO(e)).toList();
-  }
-
-  Future<List<EventModel>> filterEvents({String? typeId, String? itemId}) async {
-     final List<EventDTO> _events = await scheduleBackend.filterEvents(typeId: typeId, itemId: itemId);
-     return _events.map((event) => EventModel.fromDTO(event)).toList();
-  }
-
-  Future<List<EventModel>> getFutureEvents() async {
-    final List<EventDTO> _events = await scheduleBackend.getFutureEvents();
-     return _events.map((event) => EventModel.fromDTO(event)).toList();
-  }
-
-  Future<List<EventModel>> getAllEvents() async {
-    final List<EventDTO> _events = await scheduleBackend.getAllEvents();
-     return _events.map((event) => EventModel.fromDTO(event)).toList();
-  }
-
 }

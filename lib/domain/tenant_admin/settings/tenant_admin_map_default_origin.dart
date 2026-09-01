@@ -1,0 +1,30 @@
+import 'package:festou_app/domain/map/value_objects/latitude_value.dart';
+import 'package:festou_app/domain/map/value_objects/longitude_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_dynamic_map_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_text_value.dart';
+
+class TenantAdminMapDefaultOrigin {
+  TenantAdminMapDefaultOrigin({
+    required LatitudeValue lat,
+    required LongitudeValue lng,
+    TenantAdminOptionalTextValue? label,
+  })  : latitudeValue = lat,
+        longitudeValue = lng,
+        labelValue = label;
+
+  final LatitudeValue latitudeValue;
+  final LongitudeValue longitudeValue;
+  final TenantAdminOptionalTextValue? labelValue;
+
+  double get lat => latitudeValue.value;
+  double get lng => longitudeValue.value;
+  String? get label => labelValue?.nullableValue;
+
+  TenantAdminDynamicMapValue toJson() {
+    return TenantAdminDynamicMapValue({
+      'lat': lat,
+      'lng': lng,
+      if (label != null) 'label': label,
+    });
+  }
+}

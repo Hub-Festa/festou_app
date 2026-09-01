@@ -1,0 +1,105 @@
+part of '../partner_profile_module_data.dart';
+
+class PartnerEventView {
+  PartnerEventView({
+    required this.eventIdValue,
+    required this.occurrenceIdValue,
+    required this.slugValue,
+    required this.titleValue,
+    this.eventTypeLabelValue,
+    required this.startDateTimeValue,
+    this.endDateTimeValue,
+    required this.locationValue,
+    this.venueIdValue,
+    this.venueTitleValue,
+    this.imageUriValue,
+    this.counterpartCountValue,
+    required this.linkedAccountProfiles,
+  });
+
+  final MongoIDValue eventIdValue;
+  final MongoIDValue occurrenceIdValue;
+  final SlugValue slugValue;
+  final PartnerProjectionRequiredTextValue titleValue;
+  final PartnerProjectionOptionalTextValue? eventTypeLabelValue;
+  final DateTimeValue startDateTimeValue;
+  final DateTimeValue? endDateTimeValue;
+  final PartnerProjectionRequiredTextValue locationValue;
+  final MongoIDValue? venueIdValue;
+  final PartnerProjectionOptionalTextValue? venueTitleValue;
+  final ThumbUriValue? imageUriValue;
+  final EventCounterpartCountValue? counterpartCountValue;
+  final List<PartnerSupportedEntityView> linkedAccountProfiles;
+
+  String get eventId => eventIdValue.value;
+  String get occurrenceId => occurrenceIdValue.value;
+  String get uniqueId => occurrenceId;
+  String get slug => slugValue.value;
+  String get title => titleValue.value;
+  String? get eventTypeLabel {
+    final value = eventTypeLabelValue?.value.trim();
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    return value;
+  }
+
+  DateTime get startDateTime {
+    final date = startDateTimeValue.value;
+    if (date == null) {
+      throw StateError('startDateTime should not be null');
+    }
+    return TimezoneConverter.utcToLocal(date);
+  }
+
+  DateTime? get endDateTime {
+    final date = endDateTimeValue?.value;
+    if (date == null) {
+      return null;
+    }
+    return TimezoneConverter.utcToLocal(date);
+  }
+
+  EventScheduleDisplay get scheduleDisplay => EventScheduleDisplay(
+    startValue: startDateTimeValue,
+    endValue: endDateTimeValue,
+  );
+
+  String get detailScheduleLabel => scheduleDisplay.detailLabel;
+  String get agendaScheduleLabel => scheduleDisplay.agendaLabel;
+  String get flyerScheduleLabel => scheduleDisplay.flyerLabel;
+  String get expandedScheduleLabel =>
+      scheduleDisplay.withDefaultFallbackEnd().detailLabel;
+
+  String get location => locationValue.value;
+  String? get venueId {
+    final value = venueIdValue?.value.trim();
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    return value;
+  }
+
+  String? get venueTitle {
+    final value = venueTitleValue?.value.trim();
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    return value;
+  }
+
+  Uri? get imageUri => imageUriValue?.value;
+  int get counterpartCount => counterpartCountValue?.value ?? 0;
+  List<PartnerSupportedEntityView> get counterpartProfiles =>
+      List<PartnerSupportedEntityView>.unmodifiable(
+        linkedAccountProfiles.where(
+          (profile) => profile.title.trim().isNotEmpty,
+        ),
+      );
+  PartnerSupportedEntityView? get primaryCounterpart =>
+      counterpartProfiles.isEmpty ? null : counterpartProfiles.first;
+  String get counterpartNamesLabel => counterpartProfiles
+      .map((profile) => profile.title.trim())
+      .where((t) => t.isNotEmpty)
+      .join(', ');
+}

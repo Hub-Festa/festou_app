@@ -1,0 +1,50 @@
+import 'package:festou_app/infrastructure/dal/dao/app_data_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/auth_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_context.dart';
+import 'package:festou_app/infrastructure/dal/dao/favorite_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/app_data_backend/app_data_backend.dart';
+import 'mock_auth_backend.dart';
+import 'mock_favorite_backend.dart';
+import 'mock_account_profiles_backend.dart';
+import 'mock_schedule_backend.dart';
+import 'mock_tenant_backend.dart';
+import 'mock_event_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/account_profiles_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/event_backend_contract.dart';
+import 'package:festou_app/infrastructure/services/schedule_backend_contract.dart';
+
+class MockBackend extends BackendContract {
+  BackendContext? _context;
+
+  @override
+  BackendContext? get context => _context;
+
+  @override
+  void setContext(BackendContext context) {
+    _context = context;
+  }
+
+  @override
+  final AppDataBackendContract appData = AppDataBackend();
+
+  @override
+  final AuthBackendContract auth = MockAuthBackend();
+
+  @override
+  final TenantBackendContract tenant = MockTenantBackend();
+
+  @override
+  final AccountProfilesBackendContract accountProfiles =
+      MockAccountProfilesBackend();
+
+  @override
+  final FavoriteBackendContract favorites = MockFavoriteBackend();
+
+  @override
+  final EventBackendContract events = MockEventBackend();
+
+  @override
+  final ScheduleBackendContract schedule = MockScheduleBackend();
+}

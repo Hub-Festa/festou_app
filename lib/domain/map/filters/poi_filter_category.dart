@@ -1,0 +1,62 @@
+import 'package:festou_app/domain/map/city_poi_category.dart';
+import 'package:festou_app/domain/map/filters/poi_filter_marker_override.dart';
+import 'package:festou_app/domain/map/filters/poi_filter_server_query.dart';
+import 'package:festou_app/domain/map/projections/city_poi_visual.dart';
+import 'package:festou_app/domain/map/value_objects/poi_boolean_value.dart';
+import 'package:festou_app/domain/map/value_objects/poi_filter_count_value.dart';
+import 'package:festou_app/domain/map/value_objects/poi_filter_image_uri_value.dart';
+import 'package:festou_app/domain/map/value_objects/poi_filter_key_value.dart';
+import 'package:festou_app/domain/map/value_objects/poi_filter_label_value.dart';
+import 'package:festou_app/domain/map/value_objects/poi_tag_value.dart';
+
+class PoiFilterCategory {
+  PoiFilterCategory({
+    this.category,
+    required List<PoiTagValue> tagValues,
+    required this.keyValue,
+    required this.labelValue,
+    required this.countValue,
+    this.imageUriValue,
+    PoiBooleanValue? overrideMarkerValue,
+    this.markerOverride,
+    this.serverQuery,
+  })  : tagValues = List<PoiTagValue>.unmodifiable(tagValues),
+        overrideMarkerValue =
+            overrideMarkerValue ?? _buildDefaultOverrideMarkerValue();
+
+  final PoiFilterKeyValue keyValue;
+  final PoiFilterLabelValue labelValue;
+  final PoiFilterImageUriValue? imageUriValue;
+  final PoiFilterCountValue countValue;
+  final CityPoiCategory? category;
+  final List<PoiTagValue> tagValues;
+  final PoiBooleanValue overrideMarkerValue;
+  final PoiFilterMarkerOverride? markerOverride;
+  final PoiFilterServerQuery? serverQuery;
+
+  String get key => keyValue.value;
+  String get label => labelValue.value;
+  String? get imageUri => imageUriValue?.value;
+  int get count => countValue.value;
+  bool get overrideMarker => overrideMarkerValue.value;
+
+  CityPoiVisual? get filterVisual => markerOverride?.toPoiVisual();
+
+  CityPoiVisual? get markerOverrideVisual {
+    if (!overrideMarker) {
+      return null;
+    }
+
+    return markerOverride?.toPoiVisual();
+  }
+
+  List<PoiTagValue> get tags => List<PoiTagValue>.unmodifiable(
+        tagValues.where((tag) => tag.value.trim().isNotEmpty),
+      );
+
+  static PoiBooleanValue _buildDefaultOverrideMarkerValue() {
+    final value = PoiBooleanValue();
+    value.parse('false');
+    return value;
+  }
+}

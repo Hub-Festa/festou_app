@@ -1,0 +1,264 @@
+import 'dart:convert';
+
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/shared/tenant_public_auth_headers.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_delta_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_page_dto.dart';
+import 'package:festou_app/infrastructure/services/schedule_backend_contract.dart';
+import 'package:festou_app/infrastructure/services/sse/sse_client.dart';
+import 'package:dio/dio.dart';
+import 'package:get_it/get_it.dart';
+
+class LaravelScheduleBackend implements ScheduleBackendContract {
+  LaravelScheduleBackend({Dio? dio, SseClient? sseClient})
+    : _dio = dio ?? Dio(),
+      _sseClient = sseClient ?? createSseClient();
+
+  final Dio _dio;
+  final SseClient _sseClient;
+
+  String get _apiBaseUrl =>
+      '${GetIt.I.get<AppData>().mainDomainValue.value.origin}/api';
+
+  Future<Map<String, String>> _buildStreamHeaders({
+    bool includeJsonAccept = false,
+  }) {
+    return TenantPublicAuthHeaders.build(
+      includeJsonAccept: includeJsonAccept,
+      bootstrapIfEmpty: true,
+    );
+  }
+
+  @override
+  Future<EventDTO?> fetchEventDetail({
+    required String eventIdOrSlug,
+    String? occurrenceId,
+  }) async {
+    try {
+      final uri = Uri.parse('$_apiBaseUrl/v1/events/$eventIdOrSlug').replace(
+        queryParameters: occurrenceId == null || occurrenceId.trim().isEmpty
+            ? null
+            : {'occurrence': occurrenceId.trim()},
+      );
+      return await TenantPublicAuthHeaders.retryOnceOnUnauthorized(
+        includeJsonAccept: true,
+        action: (headers) async {
+          final response = await _dio.getUri(
+            uri,
+            options: Options(headers: headers),
+          );
+          final raw = response.data;
+          final Map<String, dynamic> json;
+          if (raw is Map<String, dynamic>) {
+            final data = raw['data'];
+            json = data is Map<String, dynamic> ? data : raw;
+          } else {
+            throw Exception('Unexpected event detail response shape.');
+          }
+          return EventDTO.fromJson(json);
+        },
+      );
+    } on DioException catch (error) {
+      final statusCode = error.response?.statusCode;
+      if (statusCode == 404) {
+        return null;
+      }
+      final data = error.response?.data;
+      throw Exception(
+        'Failed to load event detail '
+        '[status=$statusCode] '
+        '(${error.requestOptions.uri}): '
+        '${data ?? error.message}',
+      );
+    }
+  }
+
+  @override
+  Future<EventPageDTO> fetchEventsPage({
+    required int page,
+    int? pageSize,
+    required bool showPastOnly,
+    bool liveNowOnly = false,
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+  }) async {
+    final params = <String, dynamic>{
+      'page': page,
+      'confirmed_only': confirmedOnly ? 1 : 0,
+    };
+    if (pageSize != null) {
+      params['page_size'] = pageSize;
+    }
+    if (liveNowOnly) {
+      params['live_now_only'] = 1;
+    } else {
+      params['past_only'] = showPastOnly ? 1 : 0;
+    }
+
+    final normalizedSearchQuery = searchQuery?.trim();
+    final hasSearchQuery =
+        normalizedSearchQuery != null && normalizedSearchQuery.isNotEmpty;
+    if (hasSearchQuery) {
+      params['search'] = normalizedSearchQuery;
+    }
+    if (categories != null && categories.isNotEmpty) {
+      params['categories'] = categories;
+    }
+    if (taxonomy != null && taxonomy.isNotEmpty) {
+      for (var index = 0; index < taxonomy.length; index += 1) {
+        final term = taxonomy[index];
+        final type = term['type']?.trim();
+        final value = term['value']?.trim();
+        if (type == null || type.isEmpty || value == null || value.isEmpty) {
+          continue;
+        }
+        params['taxonomy[$index][type]'] = type;
+        params['taxonomy[$index][value]'] = value;
+      }
+    }
+    final normalizedOccurrenceIds = _normalizeStringList(occurrenceIds);
+    if (normalizedOccurrenceIds.isNotEmpty) {
+      params['occurrence_ids'] = normalizedOccurrenceIds;
+    }
+    if (!hasSearchQuery && originLat != null && originLng != null) {
+      params['origin_lat'] = originLat;
+      params['origin_lng'] = originLng;
+      if (maxDistanceMeters != null) {
+        params['max_distance_meters'] = maxDistanceMeters;
+      }
+    }
+
+    try {
+      return await TenantPublicAuthHeaders.retryOnceOnUnauthorized(
+        includeJsonAccept: true,
+        action: (headers) async {
+          final response = await _dio.get(
+            '$_apiBaseUrl/v1/agenda',
+            queryParameters: params,
+            options: Options(
+              headers: headers,
+              listFormat: ListFormat.multiCompatible,
+            ),
+          );
+          final raw = response.data;
+          final Map<String, dynamic> json;
+          if (raw is Map<String, dynamic>) {
+            final data = raw['data'];
+            json = data is Map<String, dynamic> ? data : raw;
+          } else {
+            throw Exception('Unexpected agenda response shape.');
+          }
+          return EventPageDTO.fromJson(json);
+        },
+      );
+    } on DioException catch (error) {
+      final statusCode = error.response?.statusCode;
+      final data = error.response?.data;
+      throw Exception(
+        'Failed to load agenda '
+        '[status=$statusCode] '
+        '(${error.requestOptions.uri}): '
+        '${data ?? error.message}',
+      );
+    }
+  }
+
+  @override
+  Stream<EventDeltaDTO> watchEventsStream({
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+    String? lastEventId,
+    bool showPastOnly = false,
+  }) {
+    final queryParts = <String>[];
+    void addParam(String key, String value) {
+      queryParts.add(
+        '${Uri.encodeQueryComponent(key)}='
+        '${Uri.encodeQueryComponent(value)}',
+      );
+    }
+
+    addParam('past_only', showPastOnly ? '1' : '0');
+    addParam('confirmed_only', confirmedOnly ? '1' : '0');
+    final normalizedSearchQuery = searchQuery?.trim();
+    final hasSearchQuery =
+        normalizedSearchQuery != null && normalizedSearchQuery.isNotEmpty;
+    if (hasSearchQuery) {
+      addParam('search', normalizedSearchQuery);
+    }
+    if (categories != null && categories.isNotEmpty) {
+      for (final category in categories) {
+        addParam('categories[]', category.toString());
+      }
+    }
+    if (taxonomy != null && taxonomy.isNotEmpty) {
+      for (var index = 0; index < taxonomy.length; index++) {
+        final term = taxonomy[index];
+        final type = term['type']?.toString().trim();
+        final value = term['value']?.toString().trim();
+        if (type == null || type.isEmpty || value == null || value.isEmpty) {
+          continue;
+        }
+        addParam('taxonomy[$index][type]', type);
+        addParam('taxonomy[$index][value]', value);
+      }
+    }
+    for (final occurrenceId in _normalizeStringList(occurrenceIds)) {
+      addParam('occurrence_ids[]', occurrenceId);
+    }
+    if (!hasSearchQuery && originLat != null && originLng != null) {
+      addParam('origin_lat', originLat.toString());
+      addParam('origin_lng', originLng.toString());
+      if (maxDistanceMeters != null) {
+        addParam('max_distance_meters', maxDistanceMeters.toString());
+      }
+    }
+
+    final uri = Uri.parse(
+      '$_apiBaseUrl/v1/events/stream'
+      '${queryParts.isEmpty ? '' : '?${queryParts.join('&')}'}',
+    );
+
+    return Stream<Map<String, String>>.fromFuture(
+      _buildStreamHeaders(),
+    ).asyncExpand(
+      (headers) => _sseClient
+          .connect(uri, lastEventId: lastEventId, headers: headers)
+          .map((message) => _parseDelta(message.data, message.id)),
+    );
+  }
+
+  List<String> _normalizeStringList(List<String>? values) {
+    final normalized = (values ?? const <String>[])
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    normalized.sort();
+
+    return normalized;
+  }
+
+  EventDeltaDTO _parseDelta(String raw, String? lastEventId) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return EventDeltaDTO.fromJson(decoded, lastEventId: lastEventId);
+      }
+    } catch (_) {}
+    return EventDeltaDTO(eventId: '', type: '', lastEventId: lastEventId);
+  }
+}

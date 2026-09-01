@@ -1,0 +1,235 @@
+import 'package:festou_app/domain/tenant_admin/tenant_admin_poi_visual.dart';
+import 'package:festou_app/infrastructure/dal/dto/tenant_admin/tenant_admin_profile_type_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/tenant_admin/tenant_admin_static_profile_type_dto.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  group('Tenant admin profile type visual parsing', () {
+    test('parses canonical visual payload for account profile types', () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'restaurant',
+        'label': 'Restaurant',
+        'labels': {'singular': 'Restaurant', 'plural': 'Restaurants'},
+        'allowed_taxonomies': const ['cuisine'],
+        'visual': {
+          'mode': 'icon',
+          'icon': 'restaurant',
+          'color': '#EB2528',
+          'icon_color': '#FFFFFF',
+        },
+        'capabilities': {'is_favoritable': true, 'is_poi_enabled': true},
+      });
+
+      final definition = dto.toDomain();
+
+      expect(definition.label, 'Restaurant');
+      expect(definition.pluralLabel, 'Restaurants');
+      expect(definition.visual?.mode, TenantAdminPoiVisualMode.icon);
+      expect(definition.visual?.icon, 'restaurant');
+      expect(definition.visual?.color, '#EB2528');
+      expect(definition.visual?.iconColor, '#FFFFFF');
+    });
+
+    test('falls back to legacy poi_visual without canonical visual payload',
+        () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'poi_visual': {'image_source': 'avatar'},
+        'capabilities': {'has_avatar': true},
+      });
+
+      final definition = dto.toDomain();
+
+      expect(definition.visual?.mode, TenantAdminPoiVisualMode.image);
+      expect(
+        definition.visual?.imageSource,
+        TenantAdminPoiVisualImageSource.avatar,
+      );
+    });
+
+    test('parses canonical visual payload for static profile types', () {
+      final dto = TenantAdminStaticProfileTypeDTO.fromJson({
+        'type': 'beach',
+        'label': 'Beach',
+        'allowed_taxonomies': const ['region'],
+        'visual': {'mode': 'image', 'image_source': 'cover'},
+        'capabilities': {'is_poi_enabled': true, 'has_cover': true},
+      });
+
+      final definition = dto.toDomain();
+
+      expect(definition.visual?.mode, TenantAdminPoiVisualMode.image);
+      expect(
+        definition.visual?.imageSource,
+        TenantAdminPoiVisualImageSource.cover,
+      );
+    });
+
+    test('parses canonical type_asset image payload for account profile types',
+        () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'restaurant',
+        'label': 'Restaurant',
+        'allowed_taxonomies': const [],
+        'visual': {
+          'mode': 'image',
+          'image_source': 'type_asset',
+          'image_url':
+              'https://tenant.test/api/v1/media/account-profile-types/type-1/type_asset?v=123',
+        },
+        'type_asset_url':
+            'https://tenant.test/api/v1/media/account-profile-types/type-1/type_asset?v=123',
+        'capabilities': {'is_poi_enabled': true},
+      });
+
+      final definition = dto.toDomain();
+
+      expect(definition.visual?.mode, TenantAdminPoiVisualMode.image);
+      expect(
+        definition.visual?.imageSource,
+        TenantAdminPoiVisualImageSource.typeAsset,
+      );
+      expect(
+        definition.visual?.imageUrl,
+        'https://tenant.test/api/v1/media/account-profile-types/type-1/type_asset?v=123',
+      );
+    });
+
+    test('normalizes reference location capability behind poi capability', () {
+      final disabledDto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'hotel',
+        'label': 'Hotel',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_poi_enabled': false,
+          'is_reference_location_enabled': true,
+        },
+      });
+      final enabledDto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'hotel',
+        'label': 'Hotel',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_poi_enabled': true,
+          'is_reference_location_enabled': true,
+        },
+      });
+
+      expect(
+        disabledDto.toDomain().capabilities.isReferenceLocationEnabled,
+        isFalse,
+      );
+      expect(
+        enabledDto.toDomain().capabilities.isReferenceLocationEnabled,
+        isTrue,
+      );
+    });
+
+    test('keeps favoritable capability independent from public discoverability',
+        () {
+      final disabledDto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_publicly_discoverable': false,
+          'is_favoritable': true,
+        },
+      });
+      final enabledDto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_publicly_discoverable': true,
+          'is_favoritable': true,
+        },
+      });
+
+      expect(
+        disabledDto.toDomain().capabilities.isPubliclyDiscoverable,
+        isFalse,
+      );
+      expect(disabledDto.toDomain().capabilities.isFavoritable, isTrue);
+      expect(enabledDto.toDomain().capabilities.isPubliclyDiscoverable, isTrue);
+      expect(enabledDto.toDomain().capabilities.isFavoritable, isTrue);
+    });
+
+    test('treats omitted public capability flags as disabled on decode', () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_favoritable': true,
+        },
+      });
+
+      expect(dto.toDomain().capabilities.isQueryable, isFalse);
+      expect(dto.toDomain().capabilities.isPubliclyNavigable, isFalse);
+      expect(dto.toDomain().capabilities.isPubliclyDiscoverable, isFalse);
+      expect(dto.toDomain().capabilities.isFavoritable, isTrue);
+    });
+
+    test('keeps public discoverability independent from queryability', () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_queryable': false,
+          'is_publicly_discoverable': true,
+          'is_publicly_navigable': true,
+        },
+      });
+
+      expect(dto.toDomain().capabilities.isQueryable, isFalse);
+      expect(dto.toDomain().capabilities.isPubliclyDiscoverable, isTrue);
+      expect(dto.toDomain().capabilities.isPubliclyNavigable, isTrue);
+    });
+
+    test('parses inviteable capability independently', () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'is_inviteable': true,
+          'is_favoritable': false,
+        },
+      });
+
+      expect(dto.toDomain().capabilities.isInviteable, isTrue);
+      expect(dto.toDomain().capabilities.isFavoritable, isFalse);
+    });
+
+    test('parses nested profile group capability for account profile types',
+        () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'market',
+        'label': 'Market',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'has_nested_profile_groups': true,
+        },
+      });
+
+      expect(dto.toDomain().capabilities.hasNestedProfileGroups, isTrue);
+    });
+
+    test('parses gallery capability for account profile types', () {
+      final dto = TenantAdminProfileTypeDTO.fromJson({
+        'type': 'market',
+        'label': 'Market',
+        'allowed_taxonomies': const [],
+        'capabilities': {
+          'has_gallery': true,
+        },
+      });
+
+      expect(dto.toDomain().capabilities.hasGallery, isTrue);
+    });
+  });
+}

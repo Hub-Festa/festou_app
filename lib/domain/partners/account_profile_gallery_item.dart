@@ -1,0 +1,54 @@
+import 'package:festou_app/domain/partners/value_objects/account_profile_nested_group_fields.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_nested_group_member_text_value.dart';
+import 'package:festou_app/domain/value_objects/thumb_uri_value.dart';
+
+class AccountProfileGalleryItem {
+  AccountProfileGalleryItem({
+    required this.itemIdValue,
+    required this.descriptionValue,
+    required this.orderValue,
+    required this.imageUrlValue,
+    required this.thumbUrlValue,
+    required this.cardUrlValue,
+    required this.modalUrlValue,
+  });
+
+  final AccountProfileNestedGroupIdValue itemIdValue;
+  final AccountProfileNestedGroupMemberTextValue descriptionValue;
+  final AccountProfileNestedGroupOrderValue orderValue;
+  final ThumbUriValue imageUrlValue;
+  final ThumbUriValue thumbUrlValue;
+  final ThumbUriValue cardUrlValue;
+  final ThumbUriValue modalUrlValue;
+
+  String get itemId => itemIdValue.value;
+  String? get description {
+    final normalized = descriptionValue.value.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    return normalized;
+  }
+
+  int get order => orderValue.value;
+  String get imageUrl => imageUrlValue.value.toString();
+  String get thumbUrl => thumbUrlValue.value.toString();
+  String get cardUrl => cardUrlValue.value.toString();
+  String get modalUrl => modalUrlValue.value.toString();
+
+  String get previewUrl {
+    final image = imageUrl.trim();
+    if (image.isNotEmpty) {
+      return image;
+    }
+    final card = cardUrl.trim();
+    if (card.isNotEmpty) {
+      return card;
+    }
+    final modal = modalUrl.trim();
+    if (modal.isNotEmpty) {
+      return modal;
+    }
+    return thumbUrl.trim();
+  }
+}

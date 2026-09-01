@@ -1,0 +1,871 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:belluga_form_validation/belluga_form_validation.dart';
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_accounts_repository_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/domain/tenant_admin/ownership_state.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_profile_group.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_term.dart';
+import 'package:festou_app/infrastructure/repositories/tenant_admin/tenant_admin_accounts_repository.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+import 'support/tenant_admin_paged_stream_contract.dart';
+
+TenantAdminAccountsRepositoryContractPrimInt _repoInt(int raw) {
+  return TenantAdminAccountsRepositoryContractPrimInt.fromRaw(
+    raw,
+    defaultValue: raw,
+  );
+}
+
+TenantAdminAccountsRepositoryContractPrimString _repoText(String raw) {
+  return TenantAdminAccountsRepositoryContractPrimString.fromRaw(
+    raw,
+    defaultValue: raw,
+  );
+}
+
+void main() {
+  setUp(() async {
+    await GetIt.I.reset();
+    GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(_StubAuthRepo());
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test(
+    'fetchAccountsPage sends pagination params and parses hasMore',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      final page = await repository.fetchAccountsPage(
+        page: _repoInt(1),
+        pageSize: _repoInt(2),
+      );
+
+      expect(page.accounts, hasLength(2));
+      expect(page.hasMore, isTrue);
+      expect(adapter.requests, hasLength(1));
+      expect(adapter.requests.single.queryParameters['page'], 1);
+      expect(adapter.requests.single.queryParameters['per_page'], 2);
+    },
+  );
+
+  test(
+    'fetchAccountsPage sends ownership_state filter when provided',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      final page = await repository.fetchAccountsPage(
+        page: _repoInt(1),
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+      );
+
+      expect(adapter.requests, hasLength(1));
+      expect(
+        adapter.requests.single.queryParameters['ownership_state'],
+        'unmanaged',
+      );
+      expect(page.accounts, hasLength(1));
+      expect(page.accounts.single.slug, 'acc-u1');
+    },
+  );
+
+  test('fetchAccountsPage sends search query when provided', () async {
+    final adapter = _AccountsRoutingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    await repository.fetchAccountsPage(
+      page: _repoInt(1),
+      pageSize: _repoInt(2),
+      searchQuery: _repoText('  conta test  '),
+    );
+
+    expect(adapter.requests, hasLength(1));
+    expect(adapter.requests.single.queryParameters['search'], 'conta test');
+  });
+
+  test('fetchAccounts aggregates all pages', () async {
+    final adapter = _AccountsRoutingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    final accounts = await repository.fetchAccounts();
+
+    expect(accounts, hasLength(3));
+    expect(accounts.first.slug, 'acc-1');
+    expect(accounts.last.slug, 'acc-3');
+    expect(adapter.requests, hasLength(2));
+  });
+
+  test('fetchAccountsPage maps account avatar_url when provided', () async {
+    final adapter = _AccountsRoutingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    final page = await repository.fetchAccountsPage(
+      page: _repoInt(1),
+      pageSize: _repoInt(2),
+    );
+
+    expect(page.accounts, isNotEmpty);
+    expect(page.accounts.first.avatarUrl, 'https://cdn.test/avatars/acc-1.png');
+  });
+
+  test('fetchAccountsPage tolerates missing document payload', () async {
+    final adapter = _AccountsMissingDocumentAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    final page = await repository.fetchAccountsPage(
+      page: _repoInt(1),
+      pageSize: _repoInt(2),
+    );
+
+    expect(page.accounts, hasLength(1));
+    expect(page.accounts.single.slug, 'acc-missing-document');
+    expect(page.accounts.single.document.type, '');
+    expect(page.accounts.single.document.number, '');
+  });
+
+  test(
+    'fetchAccountsPage normalizes relative avatar_url to tenant origin',
+    () async {
+      final adapter = _AccountsRelativeAvatarAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      final page = await repository.fetchAccountsPage(
+        page: _repoInt(1),
+        pageSize: _repoInt(2),
+      );
+
+      expect(page.accounts, hasLength(1));
+      expect(
+        page.accounts.single.avatarUrl,
+        'https://tenant-a.test/api/v1/media/account-profiles/acc-relative.png',
+      );
+    },
+  );
+
+  test('fetchAccountsPage maps missing ownership_state to unmanaged', () async {
+    final adapter = _AccountsRoutingAdapter(includeOwnershipState: false);
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    final page = await repository.fetchAccountsPage(
+      page: _repoInt(1),
+      pageSize: _repoInt(2),
+    );
+
+    expect(page.accounts, isNotEmpty);
+    expect(
+      page.accounts.every(
+        (account) => account.ownershipState.apiValue == 'unmanaged',
+      ),
+      isTrue,
+    );
+  });
+
+  test(
+    'loadAccounts publishes existing accounts even when ownership_state is missing',
+    () async {
+      final adapter = _AccountsRoutingAdapter(includeOwnershipState: false);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      await repository.loadAccounts(pageSize: _repoInt(2));
+
+      final loaded = repository.accountsStreamValue.value;
+      expect(loaded, isNotNull);
+      expect(loaded, hasLength(2));
+      expect(loaded!.first.slug, 'acc-1');
+    },
+  );
+
+  test('load/reset/next follow paged stream contract', () async {
+    final adapter = _AccountsRoutingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    await verifyTenantAdminPagedStreamContract(
+      scope: 'accounts',
+      loadFirstPage: () => repository.loadAccounts(pageSize: _repoInt(2)),
+      loadNextPage: () =>
+          repository.loadNextAccountsPage(pageSize: _repoInt(2)),
+      resetState: repository.resetAccountsState,
+      readItems: () => repository.accountsStreamValue.value,
+      readHasMore: () => repository.hasMoreAccountsStreamValue.value.value,
+      readError: () => repository.accountsErrorStreamValue.value?.value,
+      expectedCountsPerStep: [2, 3],
+      loadNextCalls: 1,
+    );
+  });
+
+  test(
+    'loadAccounts resets pagination when ownership filter changes',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      await repository.loadAccounts(
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.tenantOwned,
+      );
+      expect(repository.accountsStreamValue.value, hasLength(2));
+
+      await repository.loadAccounts(
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+      );
+
+      final loaded = repository.accountsStreamValue.value;
+      expect(loaded, hasLength(1));
+      expect(loaded!.single.slug, 'acc-u1');
+      expect(
+        adapter.requests.last.queryParameters['ownership_state'],
+        'unmanaged',
+      );
+      expect(adapter.requests.last.queryParameters['page'], 1);
+    },
+  );
+
+  test(
+    'loadAccounts refetches first page when returning to a previous filter',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      await repository.loadAccounts(
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.tenantOwned,
+      );
+      expect(adapter.requests.length, 1);
+
+      await repository.loadAccounts(
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+      );
+      expect(adapter.requests.length, 2);
+
+      await repository.loadAccounts(
+        pageSize: _repoInt(2),
+        ownershipState: TenantAdminOwnershipState.tenantOwned,
+      );
+      expect(adapter.requests.length, 3);
+      expect(
+        repository.accountsStreamValue.value!.map((account) => account.slug),
+        containsAll(['acc-1', 'acc-2']),
+      );
+    },
+  );
+
+  test(
+    'fetchAccountsPage still fails on unknown ownership_state value',
+    () async {
+      final adapter = _AccountsRoutingAdapter(
+        ownershipStateValue: 'broken_state',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      expect(
+        repository.fetchAccountsPage(
+          page: _repoInt(1),
+          pageSize: _repoInt(2),
+          ownershipState: TenantAdminOwnershipState.tenantOwned,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.toString(),
+            'message',
+            contains('Invalid ownership_state value'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('createAccount preserves structured 422 validation failure', () async {
+    final adapter = _AccountsCreateValidationAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    expect(
+      repository.createAccount(
+        name: _repoText(''),
+        ownershipState: TenantAdminOwnershipState.tenantOwned,
+      ),
+      throwsA(
+        isA<FormValidationFailure>()
+            .having(
+              (error) => error.message,
+              'message',
+              'The given data was invalid.',
+            )
+            .having(
+              (error) => error.fieldErrors['name'],
+              'name error',
+              <String>['Nome e obrigatorio.'],
+            ),
+      ),
+    );
+  });
+
+  test('createAccount surfaces structured 429 security failure', () async {
+    final adapter = _AccountsCreateRateLimitedAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    expect(
+      repository.createAccount(
+        name: _repoText('Conta'),
+        ownershipState: TenantAdminOwnershipState.tenantOwned,
+      ),
+      throwsA(
+        isA<FormApiFailure>()
+            .having((error) => error.statusCode, 'statusCode', 429)
+            .having((error) => error.errorCode, 'errorCode', 'rate_limited')
+            .having(
+              (error) => error.retryAfterSeconds,
+              'retryAfterSeconds',
+              12,
+            ),
+      ),
+    );
+  });
+
+  test(
+    'createAccountOnboarding calls onboarding endpoint and maps result',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      final result = await repository.createAccountOnboarding(
+        name: _repoText('Conta onboarding'),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+        profileType: _repoText('venue'),
+        location: tenantAdminLocationFromRaw(
+          latitude: -20.31,
+          longitude: -40.29,
+        ),
+        taxonomyTerms: (() {
+          final terms = TenantAdminTaxonomyTerms();
+          terms.add(
+            tenantAdminTaxonomyTermFromRaw(type: 'genre', value: 'urbana'),
+          );
+          return terms;
+        })(),
+        bio: _repoText('<p>Bio</p>'),
+      );
+
+      expect(result.account.name, 'Conta onboarding');
+      expect(result.accountProfile.accountId, result.account.id);
+      expect(result.accountProfile.profileType, 'venue');
+      expect(adapter.requests.last.path, contains('/v1/account_onboardings'));
+    },
+  );
+
+  test(
+    'createAccountOnboarding forwards nested profile group metadata only',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      await repository.createAccountOnboarding(
+        name: _repoText('Conta onboarding'),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+        profileType: _repoText('venue'),
+        nestedProfileGroups: [
+          TenantAdminNestedProfileGroup(
+            idValue: TenantAdminNestedProfileGroupTextValue('integrantes'),
+            labelValue: TenantAdminNestedProfileGroupTextValue('Integrantes'),
+            orderValue: TenantAdminNestedProfileGroupOrderValue(0),
+            accountProfileIdValues: [
+              TenantAdminNestedProfileGroupTextValue('profile-1'),
+              TenantAdminNestedProfileGroupTextValue('profile-2'),
+            ],
+          ),
+        ],
+      );
+
+      final request = adapter.requests.last;
+      expect(request.path, contains('/v1/account_onboardings'));
+      final payload = request.data as Map<String, dynamic>;
+      expect(payload['nested_profile_groups'], [
+        {'id': 'integrantes', 'label': 'Integrantes', 'order': 0},
+      ]);
+    },
+  );
+
+  test(
+    'createAccountOnboarding uses multipart with avatar+cover uploads when provided',
+    () async {
+      final adapter = _AccountsRoutingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+      final repository = TenantAdminAccountsRepository(
+        dio: dio,
+        tenantScope: scope,
+      );
+
+      await repository.createAccountOnboarding(
+        name: _repoText('Conta onboarding'),
+        ownershipState: TenantAdminOwnershipState.unmanaged,
+        profileType: _repoText('venue'),
+        avatarUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([1, 2, 3]),
+          fileName: 'avatar.jpg',
+        ),
+        coverUpload: tenantAdminMediaUploadFromRaw(
+          bytes: Uint8List.fromList([4, 5, 6]),
+          fileName: 'cover.jpg',
+        ),
+      );
+
+      final request = adapter.requests.last;
+      expect(request.path, contains('/v1/account_onboardings'));
+      expect(request.contentType, contains('multipart/form-data'));
+      expect(request.data, isA<FormData>());
+      final formData = request.data as FormData;
+      expect(formData.files.any((entry) => entry.key == 'avatar'), isTrue);
+      expect(formData.files.any((entry) => entry.key == 'cover'), isTrue);
+    },
+  );
+
+  test('updateAccount sends publication status and maps response', () async {
+    final adapter = _AccountsRoutingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final scope = _MutableTenantScope('https://tenant-a.test/admin/api');
+    final repository = TenantAdminAccountsRepository(
+      dio: dio,
+      tenantScope: scope,
+    );
+
+    final updated = await repository.updateAccount(
+      accountSlug: _repoText('acc-1'),
+      publication: tenantAdminAccountPublicationFromRaw(status: 'published'),
+    );
+
+    expect(updated.publication.status.value, 'published');
+    expect(adapter.requests.last.path, contains('/v1/accounts/acc-1'));
+    expect(
+      adapter.requests.last.data,
+      isA<Map<String, dynamic>>().having(
+        (payload) => payload['publication'],
+        'publication',
+        <String, dynamic>{'status': 'published'},
+      ),
+    );
+  });
+}
+
+class _StubAuthRepo implements LandlordAuthRepositoryContract {
+  @override
+  bool get hasValidSession => true;
+
+  @override
+  String get token => 'test-token';
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    LandlordAuthRepositoryContractPrimString email,
+    LandlordAuthRepositoryContractPrimString password,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+}
+
+class _MutableTenantScope implements TenantAdminTenantScopeContract {
+  _MutableTenantScope(String initialBaseUrl) {
+    _selectedTenantDomainStreamValue.addValue(initialBaseUrl);
+  }
+
+  final StreamValue<String?> _selectedTenantDomainStreamValue =
+      StreamValue<String?>(defaultValue: null);
+
+  @override
+  String? get selectedTenantDomain => _selectedTenantDomainStreamValue.value;
+
+  @override
+  String get selectedTenantAdminBaseUrl => selectedTenantDomain ?? '';
+
+  @override
+  StreamValue<String?> get selectedTenantDomainStreamValue =>
+      _selectedTenantDomainStreamValue;
+
+  @override
+  void clearSelectedTenantDomain() {
+    _selectedTenantDomainStreamValue.addValue(null);
+  }
+
+  @override
+  void selectTenantDomain(Object tenantDomain) {
+    _selectedTenantDomainStreamValue.addValue(
+      (tenantDomain is String
+              ? tenantDomain
+              : (tenantDomain as dynamic).value as String)
+          .trim(),
+    );
+  }
+}
+
+class _AccountsRoutingAdapter implements HttpClientAdapter {
+  _AccountsRoutingAdapter({
+    this.includeOwnershipState = true,
+    this.ownershipStateValue = 'tenant_owned',
+  });
+
+  final List<RequestOptions> requests = [];
+  final bool includeOwnershipState;
+  final String ownershipStateValue;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<dynamic>? cancelFuture,
+  ) async {
+    requests.add(options);
+    final page = (options.queryParameters['page'] as int?) ?? 1;
+    final ownershipState =
+        options.queryParameters['ownership_state'] as String?;
+
+    if (options.method == 'PATCH' && options.path.contains('/v1/accounts/')) {
+      final payload =
+          (options.data as Map?)?.cast<String, dynamic>() ??
+          const <String, dynamic>{};
+      final publication = payload['publication'];
+      final publicationStatus = publication is Map
+          ? publication['status']?.toString()
+          : null;
+      final slug = options.path.split('/').last;
+      return _jsonResponse({
+        'data': _accountJson(
+          id: '1',
+          slug: slug,
+          name: payload['name']?.toString() ?? 'Conta 1',
+          publicationStatus: publicationStatus ?? 'draft',
+        ),
+      });
+    }
+
+    if (options.path.endsWith('/v1/accounts') &&
+        ownershipState == 'unmanaged' &&
+        page == 1) {
+      return _jsonResponse({
+        'data': [
+          _accountJson(id: 'u1', slug: 'acc-u1', ownershipState: 'unmanaged'),
+        ],
+        'current_page': 1,
+        'last_page': 1,
+      });
+    }
+
+    if (options.path.endsWith('/v1/accounts') &&
+        ownershipState == 'tenant_owned' &&
+        page == 1) {
+      return _jsonResponse({
+        'data': [
+          _accountJson(
+            id: '1',
+            slug: 'acc-1',
+            ownershipState: ownershipStateValue,
+          ),
+          _accountJson(
+            id: '2',
+            slug: 'acc-2',
+            ownershipState: ownershipStateValue,
+          ),
+        ],
+        'current_page': 1,
+        'last_page': 1,
+      });
+    }
+
+    if (options.path.endsWith('/v1/accounts') && page == 1) {
+      return _jsonResponse({
+        'data': [
+          _accountJson(id: '1', slug: 'acc-1'),
+          _accountJson(id: '2', slug: 'acc-2'),
+        ],
+        'current_page': 1,
+        'last_page': 2,
+      });
+    }
+
+    if (options.path.endsWith('/v1/accounts') && page == 2) {
+      return _jsonResponse({
+        'data': [_accountJson(id: '3', slug: 'acc-3')],
+        'current_page': 2,
+        'last_page': 2,
+      });
+    }
+
+    if (options.path.endsWith('/v1/account_onboardings')) {
+      return _jsonResponse({
+        'data': {
+          'account': _accountJson(
+            id: 'onboarding-1',
+            slug: 'acc-onboarding-1',
+            ownershipState: 'unmanaged',
+          )..['name'] = 'Conta onboarding',
+          'account_profile': {
+            'id': 'profile-onboarding-1',
+            'account_id': 'onboarding-1',
+            'profile_type': 'venue',
+            'display_name': 'Conta onboarding',
+            'location': {'lat': -20.31, 'lng': -40.29},
+            'taxonomy_terms': [
+              {'type': 'genre', 'value': 'urbana'},
+            ],
+            'ownership_state': 'unmanaged',
+          },
+          'role': {'id': 'role-1', 'slug': 'admin'},
+        },
+      });
+    }
+
+    return _jsonResponse({'data': [], 'current_page': page, 'last_page': page});
+  }
+
+  Map<String, dynamic> _accountJson({
+    required String id,
+    required String slug,
+    String? name,
+    String? ownershipState,
+    String? publicationStatus,
+    String? avatarUrl,
+  }) {
+    return {
+      'id': id,
+      'name': name ?? 'Conta $id',
+      'slug': slug,
+      'avatar_url': avatarUrl ?? 'https://cdn.test/avatars/$slug.png',
+      'document': {'type': 'cpf', 'number': '000$id'},
+      'publication': <String, dynamic>{'status': publicationStatus ?? 'draft'},
+      if (includeOwnershipState)
+        'ownership_state': ownershipState ?? ownershipStateValue,
+    };
+  }
+
+  ResponseBody _jsonResponse(Map<String, dynamic> payload) {
+    return ResponseBody.fromString(
+      jsonEncode(payload),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _AccountsCreateValidationAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<dynamic>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'message': 'The given data was invalid.',
+        'errors': {
+          'name': ['Nome e obrigatorio.'],
+        },
+      }),
+      422,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _AccountsCreateRateLimitedAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<dynamic>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'code': 'rate_limited',
+        'message': 'Too many requests. Retry later.',
+        'retry_after': 12,
+        'correlation_id': 'corr-rate-1',
+      }),
+      429,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _AccountsMissingDocumentAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<dynamic>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'data': [
+          {
+            'id': 'missing-document',
+            'name': 'Conta sem documento',
+            'slug': 'acc-missing-document',
+            'ownership_state': 'tenant_owned',
+            'avatar_url': 'https://cdn.test/avatars/acc-missing-document.png',
+          },
+        ],
+        'current_page': 1,
+        'last_page': 1,
+      }),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
+class _AccountsRelativeAvatarAdapter implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<dynamic>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode({
+        'data': [
+          {
+            'id': 'relative-avatar',
+            'name': 'Conta avatar relativo',
+            'slug': 'acc-relative-avatar',
+            'document': {'type': 'cpf', 'number': '0001'},
+            'ownership_state': 'tenant_owned',
+            'avatar_url': '/api/v1/media/account-profiles/acc-relative.png',
+          },
+        ],
+        'current_page': 1,
+        'last_page': 1,
+      }),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}

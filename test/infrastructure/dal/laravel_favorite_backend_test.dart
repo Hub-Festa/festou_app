@@ -1,0 +1,679 @@
+import 'dart:convert';
+
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/testing/app_data_test_factory.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/favorite_backend/laravel_favorite_backend.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    await GetIt.I.reset();
+  });
+
+  tearDown(() async {
+    await GetIt.I.reset();
+  });
+
+  test(
+    'fetchFavorites uses favorites contract with pagination and auth',
+    () async {
+      final adapter = _FavoritesApiAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites, hasLength(2));
+      expect(favorites.first.id, 'profile-1');
+      expect(favorites.first.slug, 'profile-1');
+      expect(favorites.first.registryKey, 'account_profile');
+      expect(favorites.first.targetType, 'account_profile');
+      expect(favorites.first.coverUrl, 'https://cdn.test/profile-1-cover.png');
+      expect(favorites.first.profileType, 'artist');
+      expect(favorites.first.canOpenPublicDetail, isTrue);
+      expect(favorites.first.publicDetailPath, '/parceiro/profile-1');
+      expect(
+        favorites.first.eventTargetPath,
+        '/agenda/evento/profile-1-show?occurrence=occ-live-1',
+      );
+      expect(favorites.first.nextEventOccurrenceAt, isNotNull);
+      expect(favorites.first.liveNowEventOccurrenceId, 'occ-live-1');
+      expect(favorites[1].id, 'profile-2');
+      expect(favorites[1].canOpenPublicDetail, isFalse);
+      expect(favorites[1].publicDetailPath, isNull);
+
+      expect(adapter.requests, hasLength(2));
+      expect(adapter.requests.first.uri.path, '/api/v1/favorites');
+      expect(adapter.requests.first.queryParameters['page'], 1);
+      expect(adapter.requests.first.queryParameters['page_size'], 10);
+      expect(
+        adapter.requests.first.queryParameters['registry_key'],
+        'account_profile',
+      );
+      expect(
+        adapter.requests.first.queryParameters['target_type'],
+        'account_profile',
+      );
+      expect(
+        adapter.requests.first.headers['Authorization'],
+        'Bearer test-token',
+      );
+      expect(adapter.requests.first.connectTimeout, const Duration(seconds: 5));
+      expect(adapter.requests.first.sendTimeout, const Duration(seconds: 12));
+      expect(
+        adapter.requests.first.receiveTimeout,
+        const Duration(seconds: 12),
+      );
+    },
+  );
+
+  test('fetchFavoritesPage requests only the requested page payload', () async {
+    final adapter = _FavoritesApiAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      _FakeAuthRepository(userTokenValue: 'test-token'),
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    final page = await backend.fetchFavoritesPage(page: 2, pageSize: 10);
+
+    expect(page.items, hasLength(1));
+    expect(page.items.single.id, 'profile-2');
+    expect(page.hasMore, isFalse);
+    expect(adapter.requests, hasLength(1));
+    expect(adapter.requests.single.queryParameters['page'], 2);
+    expect(adapter.requests.single.queryParameters['page_size'], 10);
+    expect(
+      adapter.requests.single.queryParameters['registry_key'],
+      'account_profile',
+    );
+    expect(
+      adapter.requests.single.queryParameters['target_type'],
+      'account_profile',
+    );
+    expect(
+      adapter.requests.single.headers['Authorization'],
+      'Bearer test-token',
+    );
+    expect(adapter.requests.single.connectTimeout, const Duration(seconds: 5));
+    expect(adapter.requests.single.sendTimeout, const Duration(seconds: 12));
+    expect(
+      adapter.requests.single.receiveTimeout,
+      const Duration(seconds: 12),
+    );
+  });
+
+  test(
+    'fetchFavorites leaves event target empty when canonical event path is absent',
+    () async {
+      final adapter = _FavoritesApiAdapter(omitFirstPageEventTargetPath: true);
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites.first.eventTargetPath, isNull);
+    },
+  );
+
+  test(
+    'fetchFavorites falls back to target public detail when navigation profile path is absent',
+    () async {
+      final adapter = _FavoritesApiAdapter(
+        firstPageNavigationRemovals: const <String>{'profile_target_path'},
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites.first.publicDetailPath, '/parceiro/profile-1');
+    },
+  );
+
+  test(
+    'fetchFavorites falls back to target_path for account-profile navigation when explicit public detail path is absent',
+    () async {
+      final adapter = _FavoritesApiAdapter(
+        firstPageNavigationOverrides: const <String, Object?>{
+          'kind': 'account_profile',
+          'target_path': '/parceiro/profile-1-target',
+        },
+        firstPageTargetRemovals: const <String>{'public_detail_path'},
+        firstPageNavigationRemovals: const <String>{
+          'event_target_path',
+          'profile_target_path',
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites.first.publicDetailPath, '/parceiro/profile-1-target');
+      expect(favorites.first.eventTargetPath, isNull);
+    },
+  );
+
+  test(
+    'fetchFavorites honors public detail access when only navigation advertises the capability',
+    () async {
+      final adapter = _FavoritesApiAdapter(
+        firstPageTargetOverrides: const <String, Object?>{
+          'can_open_public_detail': false,
+        },
+        firstPageNavigationOverrides: const <String, Object?>{
+          'can_open_public_detail': true,
+        },
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites.first.canOpenPublicDetail, isTrue);
+    },
+  );
+
+  test(
+    'fetchFavorites honors public detail access when only target metadata advertises the capability',
+    () async {
+      final adapter = _FavoritesApiAdapter(
+        firstPageTargetOverrides: const <String, Object?>{
+          'can_open_public_detail': true,
+        },
+        firstPageNavigationRemovals: const <String>{'can_open_public_detail'},
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+
+      GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+        _FakeAuthRepository(userTokenValue: 'test-token'),
+      );
+      GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+      final backend = LaravelFavoriteBackend(dio: dio);
+      final favorites = await backend.fetchFavorites();
+
+      expect(favorites.first.canOpenPublicDetail, isTrue);
+    },
+  );
+
+  test('fetchFavorites bootstraps token when initially missing', () async {
+    final adapter = _FavoritesApiAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    final authRepository = _FakeAuthRepository(
+      userTokenValue: '',
+      tokenAfterInit: 'refreshed-token',
+    );
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      authRepository,
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    final favorites = await backend.fetchFavorites();
+
+    expect(authRepository.initCallCount, 1);
+    expect(favorites, isNotEmpty);
+    expect(adapter.requests, isNotEmpty);
+    expect(
+      adapter.requests.first.headers['Authorization'],
+      'Bearer refreshed-token',
+    );
+  });
+
+  test('fetchFavorites retries once after unauthorized', () async {
+    final adapter = _FavoritesApiAdapter(unauthorizedFirstGet: true);
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    final authRepository = _FakeAuthRepository(userTokenValue: 'test-token');
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      authRepository,
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    final favorites = await backend.fetchFavorites();
+
+    expect(favorites, hasLength(2));
+    expect(adapter.requests, hasLength(3));
+    expect(adapter.requests.first.headers['Authorization'], 'Bearer test-token');
+    expect(
+      adapter.requests[1].headers['Authorization'],
+      'Bearer refreshed-token',
+    );
+    expect(authRepository.recoverCalls, 1);
+  });
+
+  test('fetchFavoritesPage retries once after unauthorized', () async {
+    final adapter = _FavoritesApiAdapter(unauthorizedFirstGet: true);
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    final authRepository = _FakeAuthRepository(userTokenValue: 'test-token');
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      authRepository,
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    final page = await backend.fetchFavoritesPage(page: 2, pageSize: 10);
+
+    expect(page.items, hasLength(1));
+    expect(adapter.requests, hasLength(2));
+    expect(adapter.requests.first.queryParameters['page'], 2);
+    expect(adapter.requests.first.headers['Authorization'], 'Bearer test-token');
+    expect(
+      adapter.requests.last.headers['Authorization'],
+      'Bearer refreshed-token',
+    );
+    expect(authRepository.recoverCalls, 1);
+  });
+
+  test('favoriteAccountProfile posts canonical payload', () async {
+    final adapter = _FavoritesApiAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      _FakeAuthRepository(userTokenValue: 'test-token'),
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    await backend.favoriteAccountProfile('profile-123');
+
+    expect(adapter.requests, hasLength(1));
+    final request = adapter.requests.first;
+    expect(request.method, 'POST');
+    expect(request.uri.path, '/api/v1/favorites');
+    expect(request.headers['Authorization'], 'Bearer test-token');
+    expect(request.data, {
+      'target_id': 'profile-123',
+      'registry_key': 'account_profile',
+      'target_type': 'account_profile',
+    });
+  });
+
+  test('unfavoriteAccountProfile deletes canonical payload', () async {
+    final adapter = _FavoritesApiAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+
+    GetIt.I.registerSingleton<AuthRepositoryContract<UserContract>>(
+      _FakeAuthRepository(userTokenValue: 'test-token'),
+    );
+    GetIt.I.registerSingleton<AppData>(_buildAppData());
+
+    final backend = LaravelFavoriteBackend(dio: dio);
+    await backend.unfavoriteAccountProfile('profile-123');
+
+    expect(adapter.requests, hasLength(1));
+    final request = adapter.requests.first;
+    expect(request.method, 'DELETE');
+    expect(request.uri.path, '/api/v1/favorites');
+    expect(request.data, {
+      'target_id': 'profile-123',
+      'registry_key': 'account_profile',
+      'target_type': 'account_profile',
+    });
+  });
+}
+
+class _RecordedRequest {
+  const _RecordedRequest({
+    required this.method,
+    required this.uri,
+    required this.queryParameters,
+    required this.headers,
+    required this.data,
+    required this.connectTimeout,
+    required this.sendTimeout,
+    required this.receiveTimeout,
+  });
+
+  final String method;
+  final Uri uri;
+  final Map<String, dynamic> queryParameters;
+  final Map<String, dynamic> headers;
+  final Object? data;
+  final Duration? connectTimeout;
+  final Duration? sendTimeout;
+  final Duration? receiveTimeout;
+}
+
+class _FavoritesApiAdapter implements HttpClientAdapter {
+  _FavoritesApiAdapter({
+    this.omitFirstPageEventTargetPath = false,
+    this.firstPageTargetOverrides = const <String, Object?>{},
+    this.firstPageNavigationOverrides = const <String, Object?>{},
+    this.firstPageTargetRemovals = const <String>{},
+    this.firstPageNavigationRemovals = const <String>{},
+    this.unauthorizedFirstGet = false,
+  });
+
+  final List<_RecordedRequest> requests = <_RecordedRequest>[];
+  final bool omitFirstPageEventTargetPath;
+  final Map<String, Object?> firstPageTargetOverrides;
+  final Map<String, Object?> firstPageNavigationOverrides;
+  final Set<String> firstPageTargetRemovals;
+  final Set<String> firstPageNavigationRemovals;
+  final bool unauthorizedFirstGet;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(
+      _RecordedRequest(
+        method: options.method,
+        uri: options.uri,
+        queryParameters: Map<String, dynamic>.from(options.queryParameters),
+        headers: Map<String, dynamic>.from(options.headers),
+        data: options.data,
+        connectTimeout: options.connectTimeout,
+        sendTimeout: options.sendTimeout,
+        receiveTimeout: options.receiveTimeout,
+      ),
+    );
+
+    if (options.method == 'POST' || options.method == 'DELETE') {
+      return ResponseBody.fromString(
+        jsonEncode({
+          'data': {'is_favorite': options.method == 'POST'},
+        }),
+        200,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    }
+
+    if (unauthorizedFirstGet && requests.where((request) => request.method == 'GET').length == 1) {
+      throw DioException.badResponse(
+        statusCode: 401,
+        requestOptions: options,
+        response: Response<dynamic>(
+          requestOptions: options,
+          statusCode: 401,
+          data: const {'message': 'Unauthorized'},
+        ),
+      );
+    }
+
+    final page = options.queryParameters['page'];
+    final pageNumber = page is int ? page : int.tryParse(page.toString()) ?? 1;
+
+    Map<String, Object?> payload;
+    if (pageNumber == 1) {
+      final firstPageTarget =
+          <String, Object?>{
+              'id': 'profile-1',
+              'slug': 'profile-1',
+              'display_name': 'Profile One',
+              'avatar_url': 'https://cdn.test/profile-1.png',
+              'cover_url': 'https://cdn.test/profile-1-cover.png',
+              'profile_type': 'artist',
+              'can_open_public_detail': true,
+              'public_detail_path': '/parceiro/profile-1',
+            }
+            ..removeWhere((key, _) => firstPageTargetRemovals.contains(key))
+            ..addAll(firstPageTargetOverrides);
+      final firstPageNavigation = <String, Object?>{
+        'kind': 'event',
+        'target_slug': 'profile-1-show',
+        'target_path': '/agenda/evento/profile-1-show?occurrence=occ-live-1',
+        'profile_target_path': '/parceiro/profile-1',
+        'event_target_path':
+            '/agenda/evento/profile-1-show?occurrence=occ-live-1',
+        'event_target_slug': 'profile-1-show',
+        'event_occurrence_id': 'occ-live-1',
+        'can_open_public_detail': true,
+      };
+      if (omitFirstPageEventTargetPath) {
+        firstPageNavigation.remove('event_target_path');
+      }
+      firstPageNavigation
+        ..removeWhere((key, _) => firstPageNavigationRemovals.contains(key))
+        ..addAll(firstPageNavigationOverrides);
+
+      payload = {
+        'data': {
+          'items': [
+            {
+              'registry_key': 'account_profile',
+              'target_type': 'account_profile',
+              'target_id': 'profile-1',
+              'favorited_at': '2026-03-20T10:00:00Z',
+              'target': firstPageTarget,
+              'occurrence_state': {
+                'next_event_occurrence_id': 'occ-1',
+                'next_event_occurrence_at': '2026-03-22T20:00:00Z',
+                'last_event_occurrence_at': null,
+                'live_now_event_occurrence_id': 'occ-live-1',
+                'live_now_event_occurrence_at': '2026-03-20T20:00:00Z',
+              },
+              'navigation': firstPageNavigation,
+            },
+          ],
+          'has_more': true,
+        },
+      };
+    } else {
+      payload = {
+        'data': {
+          'items': [
+            {
+              'registry_key': 'account_profile',
+              'target_type': 'account_profile',
+              'target_id': 'profile-2',
+              'favorited_at': '2026-03-19T08:00:00Z',
+              'target': {
+                'id': 'profile-2',
+                'slug': 'profile-2',
+                'display_name': 'Profile Two',
+                'avatar_url': null,
+                'cover_url': null,
+                'profile_type': 'restaurant',
+                'can_open_public_detail': false,
+                'public_detail_path': null,
+              },
+              'occurrence_state': {
+                'next_event_occurrence_id': null,
+                'next_event_occurrence_at': null,
+                'last_event_occurrence_at': '2026-03-18T20:00:00Z',
+                'live_now_event_occurrence_id': null,
+                'live_now_event_occurrence_at': null,
+              },
+              'navigation': {
+                'kind': 'account_profile',
+                'target_slug': 'profile-2',
+                'target_path': null,
+                'can_open_public_detail': false,
+              },
+            },
+          ],
+          'has_more': false,
+        },
+      };
+    }
+
+    return ResponseBody.fromString(
+      jsonEncode(payload),
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+}
+
+class _FakeAuthRepository extends AuthRepositoryContract<UserContract> {
+  _FakeAuthRepository({required this.userTokenValue, this.tokenAfterInit});
+
+  String userTokenValue;
+  final String? tokenAfterInit;
+  int initCallCount = 0;
+  int recoverCalls = 0;
+
+  @override
+  BackendContract get backend => throw UnimplementedError();
+
+  @override
+  String get userToken => userTokenValue;
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {
+    userTokenValue = token?.value ?? '';
+  }
+
+  @override
+  Future<String> getDeviceId() async => 'device-1';
+
+  @override
+  Future<String?> getUserId() async => 'user-1';
+
+  @override
+  bool get isUserLoggedIn => true;
+
+  @override
+  bool get isAuthorized => true;
+
+  @override
+  Future<void> init() async {
+    initCallCount += 1;
+    if (userTokenValue.trim().isEmpty &&
+        tokenAfterInit != null &&
+        tokenAfterInit!.trim().isNotEmpty) {
+      userTokenValue = tokenAfterInit!;
+    }
+  }
+
+  @override
+  Future<void> ensureTenantPublicIdentityReady() async {
+    await init();
+  }
+
+  @override
+  Future<void> recoverTenantPublicIdentityAfterUnauthorizedPublicRequest() async {
+    recoverCalls += 1;
+    userTokenValue = 'refreshed-token';
+  }
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+AppData _buildAppData() {
+  final remoteData = {
+    'name': 'Tenant Test',
+    'type': 'tenant',
+    'main_domain': 'https://tenant.test',
+    'profile_types': [
+      {
+        'type': 'artist',
+        'label': 'Artist',
+        'allowed_taxonomies': [],
+        'capabilities': {'is_favoritable': true, 'is_poi_enabled': false},
+      },
+    ],
+    'domains': ['https://tenant.test'],
+    'app_domains': const [],
+    'theme_data_settings': {
+      'brightness_default': 'light',
+      'primary_seed_color': '#FFFFFF',
+      'secondary_seed_color': '#000000',
+    },
+    'main_color': '#FFFFFF',
+    'tenant_id': 'tenant-1',
+    'telemetry': const {'trackers': []},
+    'telemetry_context': const {'location_freshness_minutes': 5},
+    'firebase': null,
+    'push': null,
+  };
+  final localInfo = {
+    'platformType': PlatformTypeValue()..parse('mobile'),
+    'hostname': 'tenant.test',
+    'href': 'https://tenant.test',
+    'port': null,
+    'device': 'test-device',
+  };
+  return buildAppDataFromInitialization(
+    remoteData: remoteData,
+    localInfo: localInfo,
+  );
+}

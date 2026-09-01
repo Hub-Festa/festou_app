@@ -1,29 +1,50 @@
 import 'package:auto_route/auto_route.dart';
-import 'package:belluga_boilerplate/application/configurations/browser_location.dart';
-import 'package:belluga_boilerplate/application/router/app_router.gr.dart';
-import 'package:belluga_boilerplate/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/support/route_redirect_path.dart';
+import 'package:festou_app/application/telemetry/auth_wall_telemetry.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
 
-typedef BrowserPathReplacer = bool Function(String path);
-
 class AuthRouteGuard extends AutoRouteGuard {
-  AuthRouteGuard({BrowserPathReplacer? replaceBrowserPathFn})
-      : _replaceBrowserPath = replaceBrowserPathFn ?? replaceBrowserPath;
+  AuthRouteGuard({
+    bool? isWebRuntime,
+    AuthRepositoryContract? authRepository,
+  })  : _isWebRuntime = isWebRuntime ?? kIsWeb,
+        _authRepository =
+            authRepository ?? GetIt.I.get<AuthRepositoryContract>();
 
-  final _authRepository = GetIt.I.get<AuthRepositoryContract>();
-  final BrowserPathReplacer _replaceBrowserPath;
+  final bool _isWebRuntime;
+  final AuthRepositoryContract _authRepository;
 
   @override
   void onNavigation(NavigationResolver resolver, StackRouter router) {
     if (_authRepository.isAuthorized) {
       resolver.next(true);
     } else {
-      if (_replaceBrowserPath('/login')) {
-        resolver.next(false);
-        return;
+      final pendingPath = buildRedirectPathFromRouteMatch(resolver.route);
+      final actionType =
+          AuthWallTelemetry.resolveActionTypeForPath(pendingPath);
+      if (actionType != null) {
+        AuthWallTelemetry.trackTriggered(
+          actionType: actionType,
+          redirectPath: pendingPath,
+        );
       }
-
-      resolver.redirectUntil(const AuthLoginRoute());
+      if (_isWebRuntime) {
+        resolver.redirectUntil(
+          AppPromotionRoute(
+            redirectPath: pendingPath,
+          ),
+        );
+      } else {
+        resolver.redirectUntil(
+          AuthLoginRoute(
+            redirectPath: pendingPath,
+          ),
+        );
+      }
+      resolver.next(false);
     }
   }
 }

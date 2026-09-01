@@ -1,0 +1,32 @@
+import 'package:festou_app/domain/map/city_poi_model.dart';
+import 'package:festou_app/domain/map/projections/city_poi_visual.dart';
+import 'package:festou_app/presentation/tenant_public/map/screens/map_screen/map_surface/belluga_map_surface_contract.dart';
+import 'package:festou_app/presentation/tenant_public/map/screens/map_screen/widgets/shared/poi_marker.dart';
+import 'package:flutter/material.dart';
+
+class PoiMarkerBuilder {
+  const PoiMarkerBuilder();
+
+  BellugaMapAnnotation build({
+    required CityPoiModel poi,
+    required bool isSelected,
+    required bool isLoading,
+    required VoidCallback onTap,
+    required double size,
+    CityPoiVisual? overrideVisual,
+  }) {
+    return BellugaMapAnnotation(
+      id: poi.id,
+      coordinate: poi.coordinate,
+      width: size,
+      height: size,
+      child: PoiMarker(
+        poi: poi,
+        isSelected: isSelected,
+        isLoading: isLoading,
+        overrideVisual: overrideVisual,
+      ),
+      onTap: onTap,
+    );
+  }
+}

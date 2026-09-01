@@ -1,0 +1,103 @@
+import 'package:festou_app/application/time/timezone_converter.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_attendance_policy_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_event_date_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_event_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_host_name_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_location_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_message_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_occurrence_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_tag_value.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:festou_app/domain/schedule/event_profile_group.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_linked_account_profile_text_value.dart';
+import 'package:festou_app/domain/value_objects/slug_value.dart';
+import 'package:festou_app/domain/value_objects/thumb_uri_value.dart';
+import 'package:festou_app/domain/value_objects/title_value.dart';
+import 'package:festou_app/domain/upcoming_ocurrence/projections/upcoming_ocurrence_resume.dart';
+
+final class InviteFromEventFactory {
+  InviteFromEventFactory._();
+
+  static InviteModel build({
+    required EventModel event,
+    required Uri fallbackImageUri,
+    List<EventProfileGroup>? profileGroups,
+  }) {
+    final eventName = event.title.value;
+    final selectedOccurrence = event.selectedOccurrence;
+    final rawEventDate =
+        selectedOccurrence?.dateTimeStart ?? event.dateTimeStart.value;
+    final eventDate = rawEventDate == null
+        ? DateTime.now()
+        : TimezoneConverter.utcToLocal(rawEventDate);
+    final fallbackImageValue = ThumbUriValue(
+      defaultValue: fallbackImageUri,
+      isRequired: true,
+    )..parse(fallbackImageUri.toString());
+    final imageUrl = UpcomingOcurrenceResume.resolvePreferredImageUri(
+      event,
+      settingsDefaultImageValue: fallbackImageValue,
+    ).toString();
+    final locationLabel = event.location.value;
+    final hostName = (event.counterpartProfiles.isNotEmpty
+            ? event.counterpartProfiles.first.displayName
+            : null) ??
+        event.venue?.displayName ??
+        'Festou';
+    final description = stripHtml(event.content.value ?? '').trim();
+    final tags = event.taxonomyTags;
+    final eventId = event.id.value;
+    final inviteId = eventId.isNotEmpty ? eventId : eventName;
+    final parsedTags = tags.isEmpty
+        ? <InviteTagValue>[InviteTagValue()..parse('festou')]
+        : tags
+            .map((tag) => InviteTagValue()..parse(tag.value))
+            .toList(growable: false);
+
+    return InviteModel(
+      idValue: InviteIdValue()..parse(inviteId),
+      eventIdValue: InviteEventIdValue()..parse(eventId),
+      eventSlugValue: SlugValue()..parse(event.slug),
+      eventNameValue: TitleValue()..parse(eventName),
+      eventDateValue: InviteEventDateValue(isRequired: true)
+        ..parse(eventDate.toIso8601String()),
+      eventImageValue: ThumbUriValue(
+        defaultValue: Uri.parse(imageUrl),
+        isRequired: true,
+      )..parse(imageUrl),
+      locationValue: InviteLocationValue()..parse(locationLabel),
+      hostNameValue: InviteHostNameValue()..parse(hostName),
+      messageValue: InviteMessageValue()
+        ..parse(description.isEmpty ? 'Partiu $eventName?' : description),
+      tagValues: parsedTags,
+      attendancePolicyValue: InviteAttendancePolicyValue(
+        defaultValue: 'free_confirmation_only',
+      )..parse('free_confirmation_only'),
+      occurrenceIdValue: InviteOccurrenceIdValue()
+        ..parse(event.selectedOccurrenceId),
+      linkedAccountProfiles: event.heroCounterpartProfiles,
+      profileGroups: profileGroups ?? event.profileGroups,
+      venueAccountProfileIdValue: _venueAccountProfileIdValue(event),
+    );
+  }
+
+  static EventLinkedAccountProfileTextValue? _venueAccountProfileIdValue(
+    EventModel event,
+  ) {
+    final venueId = event.venue?.id.trim();
+    if (venueId == null || venueId.isEmpty) {
+      return null;
+    }
+    return EventLinkedAccountProfileTextValue(venueId);
+  }
+
+  static String stripHtml(String raw) {
+    return raw
+        .replaceAll(RegExp(r'<[^>]+>'), ' ')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+}

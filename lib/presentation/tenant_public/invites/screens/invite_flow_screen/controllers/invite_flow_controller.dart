@@ -1,0 +1,781 @@
+export 'invite_decision_result.dart';
+
+import 'dart:async';
+
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/application/sharing/invite_share_uri_builder.dart';
+import 'package:festou_app/application/router/support/tenant_public_event_path.dart';
+import 'package:festou_app/domain/invites/invite_decision.dart';
+import 'package:festou_app/domain/invites/invite_inviter_type.dart';
+import 'package:festou_app/domain/invites/invite_materialize_result.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_id_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:festou_app/presentation/tenant_public/invites/screens/invite_flow_screen/controllers/invite_decision_result.dart';
+import 'package:card_stack_swiper/card_stack_swiper.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:flutter/foundation.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+class InviteFlowScreenController with Disposable {
+  InviteFlowScreenController({
+    AppData? appData,
+    InvitesRepositoryContract? repository,
+    UserEventsRepositoryContract? userEventsRepository,
+    TelemetryRepositoryContract? telemetryRepository,
+    CardStackSwiperController? cardStackSwiperController,
+    AuthRepositoryContract? authRepository,
+  }) : _appData =
+           appData ??
+           (GetIt.I.isRegistered<AppData>() ? GetIt.I.get<AppData>() : null),
+       _repository = repository ?? GetIt.I.get<InvitesRepositoryContract>(),
+       _telemetryRepository =
+           telemetryRepository ?? GetIt.I.get<TelemetryRepositoryContract>(),
+       _authRepository =
+           authRepository ??
+           (GetIt.I.isRegistered<AuthRepositoryContract>()
+               ? GetIt.I.get<AuthRepositoryContract>()
+               : null),
+       swiperController =
+           cardStackSwiperController ?? CardStackSwiperController();
+
+  final AppData? _appData;
+  final InvitesRepositoryContract _repository;
+  final TelemetryRepositoryContract _telemetryRepository;
+  final AuthRepositoryContract? _authRepository;
+
+  final CardStackSwiperController swiperController;
+
+  final decisionsStreamValue = StreamValue<Map<String, InviteDecision>>(
+    defaultValue: const {},
+  );
+  StreamValue<List<InviteModel>> get displayInvitesStreamValue =>
+      _repository.inviteFlowDisplayInvitesStreamValue;
+  final authRequiredForDecisionStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final initializedStreamValue = StreamValue<bool>(defaultValue: false);
+  final redirectPathStreamValue = StreamValue<String?>(defaultValue: null);
+  final materializedShareResultStreamValue =
+      StreamValue<InviteMaterializeResult?>(defaultValue: null);
+
+  StreamValue<List<InviteModel>> get pendingInvitesStreamValue =>
+      _repository.inviteFlowPendingInvitesStreamValue;
+
+  InviteModel? get currentInvite => displayInvitesStreamValue.value.isNotEmpty
+      ? displayInvitesStreamValue.value.first
+      : null;
+  bool get hasPendingInvites => displayInvitesStreamValue.value.isNotEmpty;
+  bool get requiresAuthenticationForDecision =>
+      authRequiredForDecisionStreamValue.value;
+  bool get isAuthorized => _isAuthorized;
+  bool get isSelfIssuerPreview =>
+      materializedShareResultStreamValue.value?.isSelfIssuerPreview ?? false;
+  String? get redirectPath => redirectPathStreamValue.value;
+  String get tenantName => _appData?.nameValue.value ?? '';
+
+  final Map<String, InviteDecision> _decisions = <String, InviteDecision>{};
+  Map<String, InviteDecision> get decisions => Map.unmodifiable(_decisions);
+
+  final confirmingPresenceStreamValue = StreamValue<bool>(defaultValue: false);
+  final topCardIndexStreamValue = StreamValue<int>(defaultValue: 0);
+  final loadedImagesStreamValue = StreamValue<Set<String>>(
+    defaultValue: const {},
+  );
+  final decisionResultStreamValue = StreamValue<InviteDecisionResult?>(
+    defaultValue: null,
+  );
+  final Set<String> _openedInviteIds = <String>{};
+  Future<EventTrackerTimedEventHandle?>? _activeInviteTimedEventFuture;
+  String? _activeInviteId;
+  String? _activeMaterializedInviteId;
+  StreamSubscription<List<InviteModel>>? _pendingInvitesSubscription;
+
+  bool get _isAuthorized => _authRepository?.isAuthorized ?? true;
+
+  Future<void> init({
+    String? prioritizeInviteId,
+    String? shareCode,
+    String? redirectPath,
+  }) async {
+    initializedStreamValue.addValue(false);
+    _repository.clearInviteFlowState();
+    if ((shareCode?.trim() ?? '').isEmpty) {
+      _repository.clearShareCodeSessionContext();
+    }
+    _setRedirectPath(redirectPath);
+    _activeMaterializedInviteId = null;
+    materializedShareResultStreamValue.addValue(null);
+    final normalizedShareCode = shareCode?.trim() ?? '';
+
+    if (kIsWeb && !_isAuthorized) {
+      // Anonymous web policy: preview only; actions hand off to app promotion.
+      authRequiredForDecisionStreamValue.addValue(false);
+      _finishActiveInviteTimedEvent();
+      final preview = await _fetchAnonymousPreviewInvites(normalizedShareCode);
+      _setPendingInvites(preview);
+      _setDisplayInvites(preview);
+      _ensureTopIndexBounds(preview.length);
+      initializedStreamValue.addValue(true);
+      return;
+    }
+
+    if (!_isAuthorized) {
+      authRequiredForDecisionStreamValue.addValue(true);
+      _finishActiveInviteTimedEvent();
+      final preview = await _fetchAnonymousPreviewInvites(normalizedShareCode);
+      _setPendingInvites(preview);
+      _setDisplayInvites(preview);
+      _ensureTopIndexBounds(preview.length);
+      initializedStreamValue.addValue(true);
+      return;
+    }
+
+    var initialized = false;
+    try {
+      authRequiredForDecisionStreamValue.addValue(false);
+      _ensureInviteTrackingSubscription();
+      if (normalizedShareCode.isNotEmpty) {
+        final materialized = await _materializeShareCode(normalizedShareCode);
+        materializedShareResultStreamValue.addValue(materialized);
+        final materializedInviteId = materialized.inviteId.trim();
+        if (materialized.isPending && materializedInviteId.isNotEmpty) {
+          _activeMaterializedInviteId = materializedInviteId;
+          if (!await fetchPendingInvites()) return;
+          _prioritizeInvite(materializedInviteId);
+          _seedShareCodeSessionContext(
+            normalizedShareCode,
+            inviteId: materializedInviteId,
+          );
+        } else if (materialized.isSelfIssuerPreview) {
+          final preview = await _fetchAnonymousPreviewInvites(
+            normalizedShareCode,
+          );
+          _setPendingInvites(const <InviteModel>[]);
+          _setDisplayInvites(preview);
+          _seedShareCodeSessionContext(normalizedShareCode);
+          _ensureTopIndexBounds(preview.length);
+        } else {
+          _repository.clearShareCodeSessionContext(
+            code: invitesRepoString(
+              normalizedShareCode,
+              defaultValue: '',
+              isRequired: true,
+            ),
+          );
+          _repository.clearInviteFlowState();
+          _ensureTopIndexBounds(0);
+        }
+      } else {
+        if (!await fetchPendingInvites()) return;
+        if (prioritizeInviteId != null && prioritizeInviteId.isNotEmpty) {
+          _prioritizeInvite(prioritizeInviteId);
+        }
+        _syncDisplayInvitesWithPending();
+      }
+      initialized = true;
+    } catch (_) {
+      // A failed authenticated materialization/refresh is not terminal absence.
+    } finally {
+      if (initialized) {
+        initializedStreamValue.addValue(true);
+      }
+    }
+  }
+
+  Future<void> trackWebLanding(String? shareCode) async {
+    if (!kIsWeb) {
+      return;
+    }
+    final normalizedCode = shareCode?.trim();
+    final hasCode = normalizedCode != null && normalizedCode.isNotEmpty;
+    await _telemetryRepository.logEvent(
+      EventTrackerEvents.viewContent,
+      eventName: telemetryRepoString('web_invite_landing_opened'),
+      properties: telemetryRepoMap(<String, dynamic>{
+        'store_channel': 'web',
+        'has_code': hasCode,
+        if (hasCode) 'code': normalizedCode,
+      }),
+    );
+  }
+
+  Future<InviteMaterializeResult> _materializeShareCode(
+    String shareCode,
+  ) async {
+    return _repository.materializeShareCode(
+      invitesRepoString(shareCode, defaultValue: '', isRequired: true),
+    );
+  }
+
+  void _setRedirectPath(String? redirectPath) {
+    final normalized = redirectPath?.trim();
+    if (normalized == null || normalized.isEmpty) {
+      redirectPathStreamValue.addValue('/invite');
+      return;
+    }
+    redirectPathStreamValue.addValue(normalized);
+  }
+
+  void _setPendingInvites(List<InviteModel> invites) {
+    _repository.setInviteFlowPendingInvites(invites);
+  }
+
+  void _setDisplayInvites(List<InviteModel> invites) {
+    _repository.setInviteFlowDisplayInvites(invites);
+  }
+
+  Future<List<InviteModel>> _fetchAnonymousPreviewInvites(
+    String shareCode,
+  ) async {
+    final normalizedCode = shareCode.trim();
+    if (normalizedCode.isEmpty) {
+      _repository.clearShareCodePreview();
+      return const <InviteModel>[];
+    }
+
+    try {
+      await _repository.loadShareCodePreview(
+        invitesRepoString(normalizedCode, defaultValue: '', isRequired: true),
+      );
+      final preview = _repository.shareCodePreviewInviteStreamValue.value;
+      if (preview == null) {
+        return const <InviteModel>[];
+      }
+      return <InviteModel>[preview];
+    } catch (_) {
+      _repository.clearShareCodePreview();
+      return const <InviteModel>[];
+    }
+  }
+
+  Future<bool> fetchPendingInvites() async {
+    try {
+      await _repository.refreshPendingInvites();
+      final invites = List<InviteModel>.from(
+        _repository.pendingInvitesStreamValue.value,
+      );
+      _setPendingInvites(invites);
+      _syncDisplayInvitesWithPending();
+      _ensureTopIndexBounds(invites.length);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String? resolveFallbackNavigationPath() {
+    return _buildSessionFallbackPath();
+  }
+
+  void _syncDisplayInvitesWithPending() {
+    if (authRequiredForDecisionStreamValue.value || isSelfIssuerPreview) {
+      return;
+    }
+    _setDisplayInvites(List<InviteModel>.from(pendingInvitesStreamValue.value));
+  }
+
+  String? _buildSessionFallbackPath() {
+    final context = _repository.shareCodeSessionContextStreamValue.value;
+    if (context == null) {
+      return null;
+    }
+    return buildTenantPublicEventPath(
+      eventSlug: context.invite.eventSlug,
+      occurrenceId: context.occurrenceId,
+    );
+  }
+
+  void _prioritizeInvite(String inviteId) {
+    final inviteIdValue = _inviteIdValue(inviteId);
+    final invites = List<InviteModel>.from(pendingInvitesStreamValue.value);
+    final index = invites.indexWhere(
+      (invite) => invite.containsInviteId(inviteIdValue),
+    );
+    if (index < 0) {
+      return;
+    }
+
+    final invite = invites.removeAt(index).prioritizeInviter(inviteIdValue);
+    invites.insert(0, invite);
+    _setPendingInvites(invites);
+    _syncDisplayInvitesWithPending();
+    _ensureTopIndexBounds(invites.length);
+  }
+
+  void removeInvite() {
+    final pendingInvites = List<InviteModel>.from(
+      pendingInvitesStreamValue.value,
+    );
+
+    if (pendingInvites.isEmpty) {
+      return;
+    }
+
+    pendingInvites.removeAt(0);
+    _setPendingInvites(pendingInvites);
+    _syncDisplayInvitesWithPending();
+    _ensureTopIndexBounds(pendingInvites.length);
+  }
+
+  void addInvite(InviteModel invite) {
+    final pendingInvites = List<InviteModel>.from(
+      pendingInvitesStreamValue.value,
+    )..add(invite);
+
+    _setPendingInvites(pendingInvites);
+    _syncDisplayInvitesWithPending();
+    _ensureTopIndexBounds(pendingInvites.length);
+  }
+
+  Future<InviteDecisionResult?> applyDecision(InviteDecision decision) async {
+    final result = await _finalizeDecision(decision);
+    if (decision != InviteDecision.accepted) {
+      resetConfirmPresence();
+    }
+    return result;
+  }
+
+  Future<InviteDecisionResult?> applyDecisionForInvite(
+    InviteDecision decision,
+    String inviteId,
+  ) async {
+    final result = await _finalizeDecision(decision, inviteId: inviteId);
+    if (decision != InviteDecision.accepted) {
+      resetConfirmPresence();
+    }
+    return result;
+  }
+
+  Future<void> requestDecision(InviteDecision decision) async {
+    if (decision == InviteDecision.accepted) {
+      await _trackInviteAcceptanceRequested();
+    }
+    final result = await applyDecision(decision);
+    decisionResultStreamValue.addValue(result);
+  }
+
+  Future<void> requestDecisionForInvite(
+    InviteDecision decision,
+    String inviteId,
+  ) async {
+    if (decision == InviteDecision.accepted) {
+      await _trackInviteAcceptanceRequested();
+    }
+    final result = await applyDecisionForInvite(decision, inviteId);
+    decisionResultStreamValue.addValue(result);
+  }
+
+  void clearDecisionResult() {
+    decisionResultStreamValue.addValue(null);
+  }
+
+  Future<InviteDecisionResult?> _finalizeDecision(
+    InviteDecision decision, {
+    String? inviteId,
+  }) async {
+    if (!_isAuthorized || authRequiredForDecisionStreamValue.value) {
+      return null;
+    }
+
+    if (isSelfIssuerPreview) {
+      return null;
+    }
+
+    final invites = List<InviteModel>.from(displayInvitesStreamValue.value);
+    final current = invites.isEmpty ? null : invites.first;
+    if (current == null) {
+      return null;
+    }
+    var resolvedInviteId = inviteId ?? current.primaryInviteId;
+    if (resolvedInviteId == null || resolvedInviteId.isEmpty) {
+      resolvedInviteId = await _resolveInviteIdForTarget(current);
+    }
+    final materializedInviteId = _activeMaterializedInviteId?.trim() ?? '';
+    if ((resolvedInviteId == null || resolvedInviteId.isEmpty) &&
+        materializedInviteId.isNotEmpty &&
+        (current.id == materializedInviteId ||
+            current.containsInviteId(_inviteIdValue(materializedInviteId)))) {
+      resolvedInviteId = materializedInviteId;
+    }
+
+    if (resolvedInviteId == null || resolvedInviteId.isEmpty) {
+      return null;
+    }
+
+    _finishActiveInviteTimedEvent(expectedInviteId: current.id);
+    _decisions[current.id] = decision;
+    decisionsStreamValue.addValue(Map.unmodifiable(_decisions));
+
+    if (decision == InviteDecision.accepted) {
+      final matchingShareCode = _resolveShareCodeForInvite(current);
+      final result = matchingShareCode == null
+          ? await _repository.acceptInvite(
+              invitesRepoString(
+                resolvedInviteId,
+                defaultValue: '',
+                isRequired: true,
+              ),
+            )
+          : await _repository.acceptInviteByCode(
+              invitesRepoString(
+                matchingShareCode,
+                defaultValue: '',
+                isRequired: true,
+              ),
+            );
+      final updatedInvites = List<InviteModel>.from(
+        _repository.pendingInvitesStreamValue.value,
+      );
+      _setPendingInvites(updatedInvites);
+      _syncDisplayInvitesWithPending();
+      _ensureTopIndexBounds(updatedInvites.length);
+      final resolvedInviteIdValue = _inviteIdValue(resolvedInviteId);
+      return InviteDecisionResult(
+        invite: current.prioritizeInviter(resolvedInviteIdValue),
+        queued: false,
+        nextStep: result.nextStep,
+      );
+    }
+
+    await _repository.declineInvite(
+      invitesRepoString(resolvedInviteId, defaultValue: '', isRequired: true),
+    );
+    final updatedInvites = List<InviteModel>.from(
+      _repository.pendingInvitesStreamValue.value,
+    );
+    _setPendingInvites(updatedInvites);
+    _syncDisplayInvitesWithPending();
+    _ensureTopIndexBounds(updatedInvites.length);
+    return const InviteDecisionResult(invite: null, queued: false);
+  }
+
+  Future<String?> _resolveInviteIdForTarget(InviteModel reference) async {
+    final fromCurrent = _findInviteIdForTarget(
+      reference: reference,
+      invites: pendingInvitesStreamValue.value,
+    );
+    if (fromCurrent != null && fromCurrent.isNotEmpty) {
+      return fromCurrent;
+    }
+
+    if (!await fetchPendingInvites()) {
+      return null;
+    }
+    return _findInviteIdForTarget(
+      reference: reference,
+      invites: pendingInvitesStreamValue.value,
+    );
+  }
+
+  String? _findInviteIdForTarget({
+    required InviteModel reference,
+    required List<InviteModel> invites,
+  }) {
+    for (final invite in invites) {
+      final primaryInviteId = invite.primaryInviteId;
+      if (primaryInviteId == null || primaryInviteId.isEmpty) {
+        continue;
+      }
+      if (_matchesInviteTarget(reference, invite)) {
+        return primaryInviteId;
+      }
+    }
+    return null;
+  }
+
+  bool _matchesInviteTarget(InviteModel reference, InviteModel candidate) {
+    if (reference.id == candidate.id) {
+      return true;
+    }
+    if (reference.eventId != candidate.eventId) {
+      return false;
+    }
+    final referenceOccurrence = reference.occurrenceId?.trim();
+    final candidateOccurrence = candidate.occurrenceId?.trim();
+    if ((referenceOccurrence ?? '').isEmpty &&
+        (candidateOccurrence ?? '').isEmpty) {
+      return true;
+    }
+    return referenceOccurrence == candidateOccurrence;
+  }
+
+  void rewindInvite(InviteModel invite) {
+    addInvite(invite);
+
+    _decisions.remove(invite.id);
+    decisionsStreamValue.addValue(Map.unmodifiable(_decisions));
+  }
+
+  bool beginConfirmPresence() {
+    if (confirmingPresenceStreamValue.value) {
+      return false;
+    }
+
+    if (!hasPendingInvites) {
+      return false;
+    }
+
+    confirmingPresenceStreamValue.addValue(true);
+    return true;
+  }
+
+  void resetConfirmPresence() {
+    confirmingPresenceStreamValue.addValue(false);
+  }
+
+  void updateTopCardIndex({
+    required int previousIndex,
+    required int? currentIndex,
+    required int invitesLength,
+  }) {
+    if (invitesLength == 0) {
+      topCardIndexStreamValue.addValue(0);
+      return;
+    }
+
+    final nextIndex = (currentIndex ?? previousIndex).clamp(
+      0,
+      invitesLength - 1,
+    );
+    if (nextIndex != topCardIndexStreamValue.value) {
+      topCardIndexStreamValue.addValue(nextIndex);
+    }
+  }
+
+  void _ensureTopIndexBounds(int invitesLength) {
+    if (invitesLength <= 0) {
+      if (topCardIndexStreamValue.value != 0) {
+        topCardIndexStreamValue.addValue(0);
+      }
+      return;
+    }
+
+    final current = topCardIndexStreamValue.value;
+    final clamped = current.clamp(0, invitesLength - 1);
+    if (clamped != current) {
+      topCardIndexStreamValue.addValue(clamped);
+    }
+  }
+
+  bool isImageLoaded(String url) {
+    return loadedImagesStreamValue.value.contains(url);
+  }
+
+  void markImageLoaded(String url) {
+    final current = loadedImagesStreamValue.value;
+    if (current.contains(url)) {
+      return;
+    }
+    final next = Set<String>.from(current)..add(url);
+    loadedImagesStreamValue.addValue(next);
+  }
+
+  void _ensureInviteTrackingSubscription() {
+    if (_pendingInvitesSubscription != null) {
+      return;
+    }
+    _pendingInvitesSubscription = pendingInvitesStreamValue.stream.listen(
+      _handleInviteStreamUpdate,
+    );
+    _handleInviteStreamUpdate(pendingInvitesStreamValue.value);
+  }
+
+  void _handleInviteStreamUpdate(List<InviteModel> invites) {
+    _syncDisplayInvitesWithPending();
+    if (invites.isEmpty) {
+      _finishActiveInviteTimedEvent();
+      return;
+    }
+    unawaited(_trackInviteOpened(invites));
+  }
+
+  Future<void> _trackInviteOpened(List<InviteModel> invites) async {
+    if (invites.isEmpty) return;
+    final current = invites.first;
+    if (_activeInviteId != null && _activeInviteId != current.id) {
+      _finishActiveInviteTimedEvent();
+    }
+    if (_openedInviteIds.add(current.id)) {
+      _activeInviteTimedEventFuture = _telemetryRepository.startTimedEvent(
+        EventTrackerEvents.inviteOpened,
+        eventName: telemetryRepoString('invite_opened'),
+        properties: telemetryRepoMap(_buildInviteTelemetryProperties(current)),
+      );
+      _activeInviteId = current.id;
+    }
+  }
+
+  Future<void> _trackInviteAcceptanceRequested() async {
+    final current = currentInvite;
+    if (current == null) {
+      return;
+    }
+    await _telemetryRepository.logEvent(
+      EventTrackerEvents.buttonClick,
+      eventName: telemetryRepoString('app_invite_acceptance_requested'),
+      properties: telemetryRepoMap(
+        _buildInviteAcceptanceRequestedProperties(current),
+      ),
+    );
+  }
+
+  Map<String, dynamic> _buildInviteAcceptanceRequestedProperties(
+    InviteModel invite,
+  ) {
+    final properties = <String, dynamic>{
+      'occurrence_id': invite.occurrenceId,
+      'source': 'invite_flow',
+      'auth_state': _isAuthorized ? 'authenticated' : 'auth_required',
+    };
+    if (invite.eventId.trim().isNotEmpty) {
+      properties['event_id'] = invite.eventId;
+    }
+    final shareCode = _resolveShareCodeForInvite(invite);
+    if (shareCode != null) {
+      properties['code'] = shareCode;
+    }
+    return properties;
+  }
+
+  Map<String, dynamic> _buildInviteTelemetryProperties(InviteModel invite) {
+    final properties = <String, dynamic>{
+      'event_id': invite.eventId,
+      'source': 'invite_flow',
+    };
+
+    final inviterPrincipal = invite.inviterPrincipal;
+    if (inviterPrincipal != null) {
+      properties['inviter_kind'] = inviterPrincipal.type.name;
+      properties['inviter_id'] = inviterPrincipal.id;
+      if (inviterPrincipal.type == InviteInviterType.accountProfile) {
+        properties['account_profile_id'] = inviterPrincipal.id;
+      }
+    }
+
+    return properties;
+  }
+
+  void _seedShareCodeSessionContext(String shareCode, {String? inviteId}) {
+    final normalizedCode = shareCode.trim();
+    if (normalizedCode.isEmpty) {
+      _repository.clearShareCodeSessionContext();
+      return;
+    }
+    final pendingInvites = pendingInvitesStreamValue.value;
+    final displayInvites = displayInvitesStreamValue.value;
+    InviteModel? matchedInvite;
+    if (inviteId != null && inviteId.isNotEmpty) {
+      final inviteIdValue = _inviteIdValue(inviteId);
+      for (final invite in [...pendingInvites, ...displayInvites]) {
+        if (invite.id == inviteId || invite.containsInviteId(inviteIdValue)) {
+          matchedInvite = invite;
+          break;
+        }
+      }
+    }
+    matchedInvite ??= pendingInvites.isNotEmpty
+        ? pendingInvites.first
+        : (displayInvites.isEmpty ? null : displayInvites.first);
+    if (matchedInvite == null) {
+      _repository.clearShareCodeSessionContext(
+        code: invitesRepoString(
+          normalizedCode,
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+      return;
+    }
+    _repository.setShareCodeSessionContext(
+      code: invitesRepoString(
+        normalizedCode,
+        defaultValue: '',
+        isRequired: true,
+      ),
+      invite: matchedInvite,
+    );
+  }
+
+  String? _resolveShareCodeForInvite(InviteModel invite) {
+    final context = _repository.shareCodeSessionContextStreamValue.value;
+    if (context == null) {
+      return null;
+    }
+    final inviteOccurrenceId = invite.occurrenceId?.trim() ?? '';
+    final contextOccurrenceId = context.occurrenceId?.trim() ?? '';
+    if (inviteOccurrenceId.isEmpty ||
+        contextOccurrenceId.isEmpty ||
+        inviteOccurrenceId != contextOccurrenceId) {
+      return null;
+    }
+    final shareCode = context.shareCode.trim();
+    return shareCode.isEmpty ? null : shareCode;
+  }
+
+  Uri? currentShareUriFor(InviteModel invite) {
+    final shareCode = _resolveShareCodeForInvite(invite);
+    if (shareCode == null || shareCode.isEmpty) {
+      return null;
+    }
+
+    return buildInviteShareUri(
+      origin: _appData?.mainDomainValue.value.origin,
+      shareCode: shareCode,
+      eventSlug: invite.eventSlug,
+      occurrenceId: invite.occurrenceId,
+    );
+  }
+
+  InviteIdValue _inviteIdValue(String raw) {
+    final value = InviteIdValue();
+    value.parse(raw);
+    return value;
+  }
+
+  void syncTopCardIndex(int invitesLength) {
+    _ensureTopIndexBounds(invitesLength);
+  }
+
+  @override
+  FutureOr<void> onDispose() {
+    _pendingInvitesSubscription?.cancel();
+    _pendingInvitesSubscription = null;
+    _finishActiveInviteTimedEvent();
+    decisionsStreamValue.dispose();
+    materializedShareResultStreamValue.dispose();
+    _repository.clearInviteFlowState();
+    authRequiredForDecisionStreamValue.dispose();
+    initializedStreamValue.dispose();
+    redirectPathStreamValue.dispose();
+    swiperController.dispose();
+    confirmingPresenceStreamValue.dispose();
+    topCardIndexStreamValue.dispose();
+    loadedImagesStreamValue.dispose();
+    decisionResultStreamValue.dispose();
+  }
+
+  void _finishActiveInviteTimedEvent({String? expectedInviteId}) {
+    final handleFuture = _activeInviteTimedEventFuture;
+    if (handleFuture == null) {
+      return;
+    }
+    if (expectedInviteId != null && _activeInviteId != expectedInviteId) {
+      return;
+    }
+    _activeInviteTimedEventFuture = null;
+    _activeInviteId = null;
+    unawaited(
+      handleFuture.then<void>((handle) async {
+        if (handle != null) {
+          await _telemetryRepository.finishTimedEvent(handle);
+        }
+      }),
+    );
+  }
+}

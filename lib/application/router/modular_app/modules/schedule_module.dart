@@ -1,54 +1,48 @@
 import 'dart:async';
 
 import 'package:auto_route/auto_route.dart';
-import 'package:belluga_boilerplate/application/router/app_router.gr.dart';
-import 'package:belluga_boilerplate/application/router/guards/auth_route_guard.dart';
-import 'package:belluga_boilerplate/application/router/guards/tenant_route_guard.dart';
-import 'package:belluga_boilerplate/application/router/resolvers/event_item_route_resolver.dart';
-import 'package:belluga_boilerplate/domain/repositories/schedule_repository_contract.dart';
-import 'package:belluga_boilerplate/domain/schedule/event_model.dart';
-import 'package:belluga_boilerplate/infrastructure/repositories/schedule_repository.dart';
-import 'package:belluga_boilerplate/presentation/screens/tenants/schedule/controller/event_search_screen_controller.dart';
-import 'package:belluga_boilerplate/presentation/screens/tenants/schedule/controller/schedule_screen_controller.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/guards/tenant_route_guard.dart';
+import 'package:festou_app/application/router/guards/web_anonymous_fallback_guard.dart';
+import 'package:festou_app/application/router/resolvers/immersive_event_detail_route_resolver.dart';
+import 'package:festou_app/application/router/support/canonical_route_family.dart';
+import 'package:festou_app/application/router/support/canonical_route_meta.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:festou_app/presentation/tenant_public/schedule/screens/event_search_screen/controllers/event_search_screen_controller.dart';
+import 'package:festou_app/presentation/tenant_public/schedule/screens/immersive_event_detail/controllers/immersive_event_detail_controller.dart';
 import 'package:get_it_modular_with_auto_route/get_it_modular_with_auto_route.dart';
 
 class ScheduleModule extends ModuleContract {
   @override
   FutureOr<void> registerDependencies() {
-    _registerRepositories();
     _registerControllers();
     _registerResolvers();
+  }
+
+  void _registerControllers() {
+    registerFactory(() => EventSearchScreenController());
+    registerFactory(() => ImmersiveEventDetailController());
+  }
+
+  void _registerResolvers() {
+    registerRouteResolver<EventModel>(ImmersiveEventDetailRouteResolver.new);
   }
 
   @override
   List<AutoRoute> get routes => [
         AutoRoute(
-          path: "/agenda",
+          path: '/agenda',
           page: EventSearchRoute.page,
-          guards: [AuthRouteGuard(), TenantRouteGuard()],
+          guards: [TenantRouteGuard(), WebAnonymousFallbackGuard()],
+          meta: canonicalRouteMeta(family: CanonicalRouteFamily.eventSearch),
         ),
         AutoRoute(
-          path: "/agenda/procurar",
-          page: ScheduleRoute.page,
-          guards: [AuthRouteGuard(), TenantRouteGuard()],
-        ),
-        AutoRoute(
-          path: "/agenda/:event_id",
-          page: EventItemRoute.page,
-          guards: [AuthRouteGuard(), TenantRouteGuard()],
+          path: '/agenda/evento/:slug',
+          page: ImmersiveEventDetailRoute.page,
+          guards: [TenantRouteGuard()],
+          meta: canonicalRouteMeta(
+            family: CanonicalRouteFamily.immersiveEventDetail,
+          ),
         ),
       ];
-
-  void _registerRepositories() {
-    registerLazySingleton<ScheduleRepositoryContract>(ScheduleRepository.new);
-  }
-
-  void _registerResolvers() {
-    registerRouteResolver<EventModel>(EventItemRouteResolver.new);
-  }
-
-  void _registerControllers() {
-    registerLazySingleton(ScheduleScreenController.new);
-    registerLazySingleton(EventSearchScreenController.new);
-  }
 }

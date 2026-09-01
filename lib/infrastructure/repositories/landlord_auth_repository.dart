@@ -1,0 +1,303 @@
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/landlord_auth_repository_contract_values.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_context.dart';
+import 'package:festou_app/infrastructure/dal/dao/landlord/landlord_auth_response_decoder.dart';
+import 'package:festou_app/infrastructure/repositories/auth_repository.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/main.dart';
+
+class LandlordAuthRepository implements LandlordAuthRepositoryContract {
+  LandlordAuthRepository({
+    Dio? dio,
+    Dio Function(String baseUrl)? dioFactory,
+    FlutterSecureStorage? storage,
+  }) : this._internal(dio, dioFactory, storage ?? const FlutterSecureStorage());
+
+  LandlordAuthRepository._internal(this._dio, this._dioFactory, this._storage);
+
+  static const String _tokenStorageKey = 'landlord_token';
+  static const String _userIdStorageKey = 'landlord_user_id';
+
+  final StreamValue<String?> _tokenStreamValue = StreamValue<String?>();
+  final StreamValue<String?> _userIdStreamValue = StreamValue<String?>();
+  final LandlordAuthResponseDecoder _responseDecoder =
+      const LandlordAuthResponseDecoder();
+  Dio? _dio;
+  final Dio Function(String baseUrl)? _dioFactory;
+  final FlutterSecureStorage _storage;
+
+  static FlutterSecureStorage get storage => const FlutterSecureStorage();
+
+  @override
+  bool get hasValidSession => token.isNotEmpty;
+
+  @override
+  String get token => _tokenStreamValue.value ?? '';
+
+  Future<Dio> _resolveDio() async {
+    if (_dio != null) {
+      return _dio!;
+    }
+    final adminApiBaseUrl = _resolveAdminApiBaseUrl();
+    final dioFactory = _dioFactory;
+    _dio = dioFactory != null
+        ? dioFactory(adminApiBaseUrl)
+        : Dio(BaseOptions(baseUrl: adminApiBaseUrl));
+    return _dio!;
+  }
+
+  @override
+  Future<void> init() async {
+    await _loadFromStorage();
+    if (token.isEmpty) {
+      return;
+    }
+    try {
+      await _tokenValidate();
+      await _fetchProfile();
+    } catch (_) {
+      await _clearSession();
+    }
+  }
+
+  @override
+  Future<void> loginWithEmailPassword(
+    LandlordAuthRepositoryContractTextValue email,
+    LandlordAuthRepositoryContractTextValue password,
+  ) async {
+    final deviceName = await _resolveDeviceName();
+    final payload = {
+      'email': email.value,
+      'password': password.value,
+      'device_name': deviceName,
+    };
+    final dio = await _resolveDio();
+    try {
+      final response = await dio.post('/v1/auth/login', data: payload);
+      final loginPayload = _responseDecoder.decodeLogin(response.data);
+      final token = loginPayload.token;
+      final userId = loginPayload.userId;
+      if (token.isEmpty) {
+        throw Exception('Landlord token missing.');
+      }
+      _tokenStreamValue.addValue(token);
+      await _writeSessionValueBestEffort(
+        key: _tokenStorageKey,
+        value: token,
+        operation: 'login.storeToken',
+      );
+      if (userId != null && userId.isNotEmpty) {
+        _userIdStreamValue.addValue(userId);
+        await _writeSessionValueBestEffort(
+          key: _userIdStorageKey,
+          value: userId,
+          operation: 'login.storeUserId',
+        );
+      }
+      await _tokenValidate();
+      await _fetchProfile();
+    } on DioException catch (e) {
+      final statusCode = e.response?.statusCode;
+      final data = e.response?.data;
+      throw Exception(
+        'Landlord login failed '
+        '[${_responseLabel(statusCode)}]: '
+        '${data ?? e.message}',
+      );
+    }
+  }
+
+  @override
+  Future<void> logout() async {
+    if (token.isEmpty) {
+      return;
+    }
+    final dio = await _resolveDio();
+    try {
+      await dio.post(
+        '/v1/auth/logout',
+        data: {'device': await _resolveDeviceName()},
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    } catch (_) {
+      // Ignore logout failures; clear local session regardless.
+    }
+    await _clearSession();
+  }
+
+  Future<void> _tokenValidate() async {
+    final dio = await _resolveDio();
+    await dio.get(
+      '/v1/auth/token_validate',
+      options: Options(headers: {'Authorization': 'Bearer $token'}),
+    );
+  }
+
+  Future<void> _fetchProfile() async {
+    final dio = await _resolveDio();
+    final response = await dio.get(
+      '/v1/me',
+      options: Options(headers: {'Authorization': 'Bearer $token'}),
+    );
+    final userId = _responseDecoder.decodeProfileUserId(response.data);
+    if (userId != null && userId.isNotEmpty) {
+      _userIdStreamValue.addValue(userId);
+      await _writeSessionValueBestEffort(
+        key: _userIdStorageKey,
+        value: userId,
+        operation: 'fetchProfile.storeUserId',
+      );
+    }
+  }
+
+  Future<void> _loadFromStorage() async {
+    try {
+      final storedToken = await _storage.read(key: _tokenStorageKey);
+      final storedUserId = await _storage.read(key: _userIdStorageKey);
+      _tokenStreamValue.addValue(storedToken);
+      _userIdStreamValue.addValue(storedUserId);
+    } catch (error, stackTrace) {
+      _logStorageFailure(
+        operation: 'loadFromStorage',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      _tokenStreamValue.addValue(null);
+      _userIdStreamValue.addValue(null);
+    }
+  }
+
+  Future<void> _clearSession() async {
+    _tokenStreamValue.addValue(null);
+    _userIdStreamValue.addValue(null);
+    try {
+      await _storage.delete(key: _tokenStorageKey);
+      await _storage.delete(key: _userIdStorageKey);
+    } catch (error, stackTrace) {
+      _logStorageFailure(
+        operation: 'clearSession',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<String> _resolveDeviceName() async {
+    final deviceId = await AuthRepository.ensureDeviceId();
+    final platformLabel = _resolvePlatformLabel();
+    final shortId = deviceId.length > 8 ? deviceId.substring(0, 8) : deviceId;
+    return 'festou-$platformLabel-$shortId';
+  }
+
+  String _resolvePlatformLabel() {
+    if (kIsWeb) {
+      return 'web';
+    }
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return 'android';
+      case TargetPlatform.iOS:
+        return 'ios';
+      case TargetPlatform.fuchsia:
+        return 'fuchsia';
+      case TargetPlatform.linux:
+        return 'linux';
+      case TargetPlatform.macOS:
+        return 'macos';
+      case TargetPlatform.windows:
+        return 'windows';
+    }
+  }
+
+  String _resolveAdminApiBaseUrl() {
+    final appDataAdminUrl = _resolveAppDataAdminApiBaseUrl();
+    if (appDataAdminUrl != null) {
+      return appDataAdminUrl;
+    }
+
+    final runtimeAdminUrl = _resolveRuntimeAdminApiBaseUrl();
+    if (runtimeAdminUrl != null) {
+      return runtimeAdminUrl;
+    }
+
+    throw StateError(
+      'Failed to resolve landlord auth admin base URL. '
+      'Root cause: runtime app context is unavailable (AppData/BackendContext).',
+    );
+  }
+
+  String? _resolveAppDataAdminApiBaseUrl() {
+    if (!GetIt.I.isRegistered<AppData>()) {
+      return null;
+    }
+
+    final rawHref = GetIt.I.get<AppData>().href.trim();
+    if (rawHref.isEmpty) {
+      return null;
+    }
+
+    final hrefUri = Uri.tryParse(rawHref);
+    if (hrefUri == null || !hrefUri.hasScheme || hrefUri.host.trim().isEmpty) {
+      return null;
+    }
+
+    return hrefUri.resolve('/admin/api').toString();
+  }
+
+  String? _resolveRuntimeAdminApiBaseUrl() {
+    if (!GetIt.I.isRegistered<BackendContext>()) {
+      return null;
+    }
+
+    final raw = GetIt.I.get<BackendContext>().adminUrl.trim();
+    if (raw.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.tryParse(raw);
+    if (uri == null ||
+        !uri.hasScheme ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.trim().isEmpty) {
+      return null;
+    }
+
+    final normalized = uri.replace(query: null, fragment: null).toString();
+    return normalized.endsWith('/')
+        ? normalized.substring(0, normalized.length - 1)
+        : normalized;
+  }
+
+  Future<void> _writeSessionValueBestEffort({
+    required String key,
+    required String value,
+    required String operation,
+  }) async {
+    try {
+      await _storage.write(key: key, value: value);
+    } catch (error, stackTrace) {
+      _logStorageFailure(
+        operation: operation,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  void _logStorageFailure({
+    required String operation,
+    required Object error,
+    required StackTrace stackTrace,
+  }) {
+    debugPrint('LandlordAuthRepository.$operation failed: $error\n$stackTrace');
+  }
+}
+
+String _responseLabel(int? statusCode) {
+  if (statusCode == null) return 'status=unknown';
+  return 'status=$statusCode';
+}

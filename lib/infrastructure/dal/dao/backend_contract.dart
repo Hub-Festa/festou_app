@@ -1,0 +1,25 @@
+import 'package:festou_app/infrastructure/dal/dao/auth_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/app_data_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_context.dart';
+import 'package:festou_app/infrastructure/dal/dao/favorite_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/account_profiles_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/static_assets_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/unsupported_static_assets_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/event_backend_contract.dart';
+import 'package:festou_app/infrastructure/services/schedule_backend_contract.dart';
+
+abstract class BackendContract {
+  BackendContext? get context;
+  void setContext(BackendContext context);
+
+  AppDataBackendContract get appData;
+  AuthBackendContract get auth;
+  TenantBackendContract get tenant;
+  AccountProfilesBackendContract get accountProfiles;
+  StaticAssetsBackendContract get staticAssets =>
+      const UnsupportedStaticAssetsBackend();
+  FavoriteBackendContract get favorites;
+  EventBackendContract get events;
+  ScheduleBackendContract get schedule;
+}

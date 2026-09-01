@@ -1,0 +1,207 @@
+import 'dart:math' as math;
+import 'dart:ui';
+
+import 'package:festou_app/application/schedule/event_related_profile_groups.dart';
+import 'package:festou_app/domain/invites/invite_model.dart';
+import 'package:festou_app/presentation/shared/widgets/belluga_network_image.dart';
+import 'package:festou_app/presentation/shared/widgets/swipeable_card/swipeable_card.dart';
+import 'package:festou_app/presentation/tenant_public/invites/screens/invite_flow_screen/widgets/invite_content_card.dart';
+import 'package:festou_app/presentation/tenant_public/invites/screens/invite_flow_screen/widgets/invite_decision_footer.dart';
+import 'package:flutter/material.dart';
+
+/// Fullscreen invite hero with a swipeable card and page-bottom decision footer.
+class InviteHeroCard extends StatelessWidget {
+  const InviteHeroCard({
+    super.key,
+    required this.invite,
+    required this.onAccept,
+    required this.onDecline,
+    required this.onRequestAuthentication,
+    required this.onViewDetails,
+    required this.onClose,
+    required this.remainingCount,
+    required this.requiresAuthentication,
+    required this.isIssuerPreview,
+    required this.onSharePreview,
+  });
+
+  final InviteModel invite;
+  final VoidCallback onAccept;
+  final VoidCallback onDecline;
+  final VoidCallback onRequestAuthentication;
+  final VoidCallback onViewDetails;
+  final VoidCallback onClose;
+  final int remainingCount;
+  final bool requiresAuthentication;
+  final bool isIssuerPreview;
+  final VoidCallback onSharePreview;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final heroImage = invite.eventImageUrl;
+    final dateLabel = invite.eventDateDetailLabel;
+    final host = invite.hostName.isNotEmpty ? invite.hostName : 'Festou';
+    final location = invite.location.isNotEmpty
+        ? invite.location
+        : 'Local a definir';
+    final participantGroups = EventRelatedProfileGroups.fromParts(
+      profileGroups: invite.profileGroups,
+      linkedAccountProfiles: invite.linkedAccountProfiles,
+      venueId: invite.venueAccountProfileId,
+    );
+    final showHost =
+        participantGroups.isEmpty &&
+        host.trim().isNotEmpty &&
+        host.trim().toLowerCase() != location.trim().toLowerCase();
+    final inviter = invite.inviterName ?? 'Um amigo';
+    final extraInviters = invite.additionalInviters.length;
+    final scrim = Theme.of(context).colorScheme.scrim;
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+            child: BellugaNetworkImage(
+              heroImage,
+              fit: BoxFit.cover,
+              errorWidget: Container(
+                color: theme.colorScheme.surfaceContainerHighest,
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  scrim.withValues(alpha: 0.82),
+                  scrim.withValues(alpha: 0.45),
+                  scrim.withValues(alpha: 0.82),
+                ],
+                stops: const [0, 0.5, 1],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+            ),
+          ),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
+            child: Column(
+              children: [
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    onPressed: onClose,
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    tooltip: 'Fechar',
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final isCompact =
+                          constraints.maxHeight < 520 ||
+                          constraints.maxWidth < 360;
+                      final horizontalInset = constraints.maxWidth < 360
+                          ? 8.0
+                          : 16.0;
+                      final verticalInset = isCompact ? 8.0 : 16.0;
+                      final footerGap = isCompact ? 10.0 : 14.0;
+                      final contentWidth = math.max(
+                        0.0,
+                        math.min(
+                          420.0,
+                          constraints.maxWidth - horizontalInset * 2,
+                        ),
+                      );
+                      final contentHeight = math.max(
+                        0.0,
+                        constraints.maxHeight - verticalInset * 2,
+                      );
+
+                      return Center(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: horizontalInset,
+                            vertical: verticalInset,
+                          ),
+                          child: SizedBox(
+                            width: contentWidth,
+                            height: contentHeight,
+                            child: Column(
+                              children: [
+                                Expanded(
+                                  child: SwipeableCard(
+                                    onSwipeRight:
+                                        requiresAuthentication ||
+                                            isIssuerPreview
+                                        ? null
+                                        : onAccept,
+                                    onSwipeLeft:
+                                        requiresAuthentication ||
+                                            isIssuerPreview
+                                        ? null
+                                        : onDecline,
+                                    child: InviteContentCard(
+                                      heroImage: heroImage,
+                                      title: invite.eventName,
+                                      dateLabel: dateLabel,
+                                      location: location,
+                                      host: host,
+                                      showHost: showHost,
+                                      inviter: inviter,
+                                      extraInviters: extraInviters,
+                                      participantGroups: participantGroups,
+                                      onViewDetails: onViewDetails,
+                                      isIssuerPreview: isIssuerPreview,
+                                      onSharePreview: onSharePreview,
+                                    ),
+                                  ),
+                                ),
+                                if (!isIssuerPreview && remainingCount > 0) ...[
+                                  SizedBox(height: footerGap),
+                                  Text(
+                                    'Você tem mais $remainingCount convites',
+                                    textAlign: TextAlign.center,
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.85,
+                                          ),
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                  ),
+                                ],
+                                if (!isIssuerPreview) ...[
+                                  SizedBox(height: footerGap),
+                                  InviteDecisionFooter(
+                                    onAccept: onAccept,
+                                    onDecline: onDecline,
+                                    onRequestAuthentication:
+                                        onRequestAuthentication,
+                                    requiresAuthentication:
+                                        requiresAuthentication,
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}

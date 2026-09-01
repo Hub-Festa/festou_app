@@ -1,32 +1,37 @@
-import 'package:belluga_boilerplate/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
 import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:get_it/get_it.dart';
 import 'package:push_handler/push_handler.dart';
 
 class PushTelemetryForwarder {
-  const PushTelemetryForwarder({required this.telemetryRepository});
+  PushTelemetryForwarder({TelemetryRepositoryContract? telemetryRepository})
+      : _telemetryRepository =
+            telemetryRepository ?? GetIt.I.get<TelemetryRepositoryContract>();
 
-  final TelemetryRepositoryContract telemetryRepository;
+  final TelemetryRepositoryContract _telemetryRepository;
 
-  Future<void> forward(PushEvent event) {
-    return telemetryRepository.logEvent(
-      _mapEvent(event.type),
-      eventName: 'push_${event.type}',
-      idempotencyKey: _idempotencyKey(event),
-      properties: {
+  Future<void> forward(PushEvent event) async {
+    final trackerEvent = _mapEvent(event.type);
+    final idempotencyKey = _buildIdempotencyKey(event);
+    await _telemetryRepository.logEvent(
+      trackerEvent,
+      eventName: telemetryRepoString('push_${event.type}'),
+      properties: telemetryRepoMap({
         'push_id': event.pushId,
-        if (event.messageInstanceId != null)
-          'message_instance_id': event.messageInstanceId,
-        if (event.stepSlug != null) 'step_slug': event.stepSlug,
-        if (event.stepType != null) 'step_type': event.stepType,
-        if (event.buttonKey != null) 'button_key': event.buttonKey,
-        if (event.actionType != null) 'action_type': event.actionType,
-        if (event.routeKey != null) 'route_key': event.routeKey,
+        'message_instance_id': event.messageInstanceId,
+        'step_slug': event.stepSlug,
+        'step_type': event.stepType,
+        'button_key': event.buttonKey,
+        'action_type': event.actionType,
+        'route_key': event.routeKey,
         'app_state': event.appState,
         'source': event.source,
         'timestamp': event.timestamp.toIso8601String(),
-        ...?event.metadata,
-      },
-    ).then((_) {});
+        if (event.metadata != null) ...event.metadata!,
+        'idempotency_key': idempotencyKey,
+      }),
+    );
   }
 
   EventTrackerEvents _mapEvent(String type) {
@@ -35,14 +40,12 @@ class PushTelemetryForwarder {
         return EventTrackerEvents.buttonClick;
       case 'submit':
         return EventTrackerEvents.selectItem;
-      case 'delivered':
-      case 'opened':
       default:
         return EventTrackerEvents.viewContent;
     }
   }
 
-  String _idempotencyKey(PushEvent event) {
+  String _buildIdempotencyKey(PushEvent event) {
     return [
       'push',
       event.type,

@@ -1,9 +1,4 @@
-import 'package:belluga_boilerplate/domain/user/user_profile_contract.dart';
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/user_profile_dto.dart';
-import 'package:value_object_pattern/domain/value_objects/date_time_value.dart';
-import 'package:value_object_pattern/domain/value_objects/email_address_value.dart';
-import 'package:value_object_pattern/domain/value_objects/full_name_value.dart';
-import 'package:value_object_pattern/domain/value_objects/uri_value.dart';
+import 'package:festou_app/domain/user/user_profile_contract.dart';
 
 class UserProfile extends UserProfileContract {
   UserProfile({
@@ -12,13 +7,4 @@ class UserProfile extends UserProfileContract {
     super.nameValue,
     super.pictureUrlValue,
   });
-
-  factory UserProfile.fromDTO(UserProfileDTO dto) {
-    return UserProfile(
-      birthdayValue: DateTimeValue()..tryParse(dto.birthday),
-      emailValue: EmailAddressValue()..tryParse(dto.email),
-      nameValue: FullNameValue()..tryParse(dto.name),
-      pictureUrlValue: URIValue()..tryParse(dto.pictureUrl),
-    );
-  }
 }

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 class WidgetKeys {
   static final auth = _WidgetKeysAuth();
-  static final splash =_WidgetKeysSplash();
+  static final splash = _WidgetKeysSplash();
 }
 
 class _WidgetKeysAuth {
@@ -11,6 +11,8 @@ class _WidgetKeysAuth {
   Key get navigateToRecoverButton => const Key("go_to_recover_button");
   Key get loginEmailField => const Key("login_email_field");
   Key get loginPasswordField => const Key("login_password_field");
+  Key get loginPhoneField => const Key("login_phone_field");
+  Key get loginOtpCodeField => const Key("login_otp_code_field");
   Key get loginButton => const Key("login_button");
   Key get logoutButton => const Key("logout_button");
   Key get signupNameField => const Key("signup_name_field");

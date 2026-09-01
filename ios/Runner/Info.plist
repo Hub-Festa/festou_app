@@ -5,7 +5,7 @@
 		<key>CFBundleDevelopmentRegion</key>
 		<string>$(DEVELOPMENT_LANGUAGE)</string>
 		<key>CFBundleDisplayName</key>
-		<string>Platform Boilerplate</string>
+		<string>$(BELLUGA_IOS_DISPLAY_NAME)</string>
 		<key>CFBundleExecutable</key>
 		<string>$(EXECUTABLE_NAME)</string>
 		<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 		<key>CFBundleInfoDictionaryVersion</key>
 		<string>6.0</string>
 		<key>CFBundleName</key>
-		<string>platform_boilerplate</string>
+		<string>$(BELLUGA_IOS_BUNDLE_NAME)</string>
 		<key>CFBundlePackageType</key>
 		<string>APPL</string>
 		<key>CFBundleShortVersionString</key>
@@ -45,6 +45,26 @@
 		<true/>
 		<key>UIApplicationSupportsIndirectInputEvents</key>
 		<true/>
+		<key>LSApplicationQueriesSchemes</key>
+		<array>
+			<string>comgooglemaps</string>
+			<string>waze</string>
+		</array>
+		<key>NSCameraUsageDescription</key>
+		<string>Permita usar a câmera para tirar a foto do seu perfil e enviar imagens quando necessário.</string>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>Permita acesso à sua localização para mostrar eventos, lugares e distâncias perto de você.</string>
+		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+		<string>Permita acesso à sua localização para mostrar eventos, lugares e distâncias perto de você, inclusive quando o sistema exigir acesso contínuo para recursos baseados em proximidade.</string>
+		<key>NSContactsUsageDescription</key>
+		<string>Permita acesso aos seus contatos para encontrar pessoas conhecidas no app e enviar convites.</string>
+		<key>NSPhotoLibraryUsageDescription</key>
+		<string>Permita acessar suas fotos para escolher a imagem do perfil e enviar imagens quando necessário.</string>
+		<key>UIBackgroundModes</key>
+		<array>
+			<string>fetch</string>
+			<string>remote-notification</string>
+		</array>
 		<key>UIStatusBarHidden</key>
 		<false/>
 	</dict>

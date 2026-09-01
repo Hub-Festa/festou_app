@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
 
+import 'package:flutter/foundation.dart';
+
 class TelemetryQueue {
-  TelemetryQueue({List<Duration>? retryDelays})
-      : retryDelays = retryDelays ??
+  TelemetryQueue({
+    List<Duration>? retryDelays,
+  }) : _retryDelays = retryDelays ??
             const [
               Duration.zero,
               Duration(seconds: 2),
@@ -11,28 +14,28 @@ class TelemetryQueue {
               Duration(seconds: 4),
             ];
 
-  final List<Duration> retryDelays;
+  final List<Duration> _retryDelays;
   final Queue<_TelemetryJob> _jobs = Queue<_TelemetryJob>();
   bool _processing = false;
 
   Future<bool> enqueue(Future<void> Function() task) {
     final completer = Completer<bool>();
     _jobs.add(_TelemetryJob(task: task, completer: completer));
-    unawaited(_process());
+    _process();
     return completer.future;
   }
 
   Future<void> _process() async {
-    if (_processing) {
-      return;
-    }
+    if (_processing) return;
     _processing = true;
 
     while (_jobs.isNotEmpty) {
       final job = _jobs.removeFirst();
       var success = false;
 
-      for (final delay in retryDelays) {
+      Object? lastError;
+      StackTrace? lastStackTrace;
+      for (final delay in _retryDelays) {
         if (delay > Duration.zero) {
           await Future<void>.delayed(delay);
         }
@@ -40,9 +43,18 @@ class TelemetryQueue {
           await job.task();
           success = true;
           break;
-        } catch (_) {
+        } catch (error, stackTrace) {
+          lastError = error;
+          lastStackTrace = stackTrace;
           success = false;
         }
+      }
+
+      if (!success && kIsWeb && lastError != null) {
+        // ignore: avoid_print
+        print(
+          '[Telemetry][Web][Queue] job failed | $lastError\n$lastStackTrace',
+        );
       }
 
       if (!job.completer.isCompleted) {
@@ -55,7 +67,10 @@ class TelemetryQueue {
 }
 
 class _TelemetryJob {
-  _TelemetryJob({required this.task, required this.completer});
+  _TelemetryJob({
+    required this.task,
+    required this.completer,
+  });
 
   final Future<void> Function() task;
   final Completer<bool> completer;

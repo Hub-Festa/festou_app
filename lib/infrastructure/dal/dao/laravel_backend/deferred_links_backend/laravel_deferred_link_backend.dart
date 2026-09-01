@@ -1,0 +1,74 @@
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/infrastructure/dal/dto/deferred_link/deferred_link_resolution_dto.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/shared/tenant_public_auth_headers.dart';
+import 'package:festou_app/infrastructure/services/deferred_link_backend_contract.dart';
+import 'package:dio/dio.dart';
+import 'package:get_it/get_it.dart';
+
+class LaravelDeferredLinkBackend implements DeferredLinkBackendContract {
+  LaravelDeferredLinkBackend({Dio? dio}) : _dio = dio ?? Dio();
+
+  final Dio _dio;
+
+  String get _apiBaseUrl =>
+      '${GetIt.I.get<AppData>().mainDomainValue.value.origin}/api';
+
+  @override
+  Future<DeferredLinkResolutionDto> resolveDeferredLink({
+    required String platform,
+    String? resolverPayload,
+    String? storeChannel,
+  }) async {
+    try {
+      final response =
+          await TenantPublicAuthHeaders.retryOnceOnUnauthorized<Response>(
+            includeJsonAccept: true,
+            action: (headers) => _dio.post(
+              '$_apiBaseUrl/v1/deep-links/deferred/resolve',
+              data: <String, dynamic>{
+                'platform': platform,
+                if (resolverPayload != null &&
+                    resolverPayload.trim().isNotEmpty)
+                  (platform == 'android'
+                      ? 'install_referrer'
+                      : 'deferred_payload'): resolverPayload
+                      .trim(),
+                if (storeChannel != null && storeChannel.trim().isNotEmpty)
+                  'store_channel': storeChannel.trim(),
+              },
+              options: Options(headers: headers),
+            ),
+          );
+      return _normalizeResponse(response.data);
+    } on DioException catch (error) {
+      throw Exception(
+        'Failed to resolve deferred deep link '
+        '[status=${error.response?.statusCode}] '
+        '(${error.requestOptions.uri}): '
+        '${error.response?.data ?? error.message}',
+      );
+    }
+  }
+
+  DeferredLinkResolutionDto _normalizeResponse(dynamic raw) {
+    if (raw is Map<String, dynamic>) {
+      final data = raw['data'];
+      if (data is Map<String, dynamic>) {
+        return _mapResolutionDto(data);
+      }
+      return _mapResolutionDto(raw);
+    }
+
+    throw Exception('Unexpected deferred deep link response shape.');
+  }
+
+  DeferredLinkResolutionDto _mapResolutionDto(Map<String, dynamic> data) {
+    return DeferredLinkResolutionDto(
+      status: data['status']?.toString().trim() ?? 'not_captured',
+      code: data['code']?.toString().trim(),
+      targetPath: data['target_path']?.toString().trim(),
+      storeChannel: data['store_channel']?.toString().trim(),
+      failureReason: data['failure_reason']?.toString().trim(),
+    );
+  }
+}

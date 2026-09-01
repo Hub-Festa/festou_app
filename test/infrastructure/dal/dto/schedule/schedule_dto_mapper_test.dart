@@ -1,0 +1,35 @@
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_dto.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('maps event when event type id is not a Mongo ObjectId', () {
+    final dto = EventDTO.fromJson({
+      'event_id': '507f1f77bcf86cd799439011',
+      'slug': 'evento-1',
+      'type': {
+        'id': 'type-1',
+        'name': 'Show',
+        'slug': 'show',
+        'description': 'Show type description',
+        'color': '#112233',
+      },
+      'title': 'Evento 1',
+      'content': 'Conteudo',
+      'location': {
+        'mode': 'physical',
+        'display_name': 'Praia do Morro',
+        'geo': {
+          'type': 'Point',
+          'coordinates': [-40.495395, -20.671339],
+        },
+      },
+      'date_time_start': '2026-03-03T20:00:00+00:00',
+      'artists': const [],
+    });
+
+    final event = dto.toDomain();
+
+    expect(event.type.id.value, 'type-1');
+    expect(event.coordinate, isNotNull);
+  });
+}

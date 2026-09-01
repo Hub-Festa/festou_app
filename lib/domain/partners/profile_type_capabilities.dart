@@ -1,0 +1,54 @@
+import 'package:festou_app/domain/partners/value_objects/profile_type_flag_value.dart';
+
+class ProfileTypeCapabilities {
+  ProfileTypeCapabilities({
+    required this.isPubliclyDiscoverableValue,
+    required this.isFavoritableValue,
+    required this.isPoiEnabledValue,
+    ProfileTypeFlagValue? isReferenceLocationEnabledValue,
+    required this.hasBioValue,
+    required this.hasContentValue,
+    required this.hasTaxonomiesValue,
+    required this.hasAvatarValue,
+    required this.hasCoverValue,
+    required this.hasEventsValue,
+    ProfileTypeFlagValue? hasGalleryValue,
+    ProfileTypeFlagValue? hasNestedProfileGroupsValue,
+    ProfileTypeFlagValue? hasContactChannelsValue,
+  }) : isReferenceLocationEnabledValue =
+           isReferenceLocationEnabledValue ?? ProfileTypeFlagValue(false),
+       hasGalleryValue = hasGalleryValue ?? ProfileTypeFlagValue(false),
+       hasNestedProfileGroupsValue =
+           hasNestedProfileGroupsValue ?? ProfileTypeFlagValue(false),
+       hasContactChannelsValue =
+           hasContactChannelsValue ?? ProfileTypeFlagValue(false);
+
+  final ProfileTypeFlagValue isPubliclyDiscoverableValue;
+  final ProfileTypeFlagValue isFavoritableValue;
+  final ProfileTypeFlagValue isPoiEnabledValue;
+  final ProfileTypeFlagValue isReferenceLocationEnabledValue;
+  final ProfileTypeFlagValue hasBioValue;
+  final ProfileTypeFlagValue hasContentValue;
+  final ProfileTypeFlagValue hasTaxonomiesValue;
+  final ProfileTypeFlagValue hasAvatarValue;
+  final ProfileTypeFlagValue hasCoverValue;
+  final ProfileTypeFlagValue hasEventsValue;
+  final ProfileTypeFlagValue hasGalleryValue;
+  final ProfileTypeFlagValue hasNestedProfileGroupsValue;
+  final ProfileTypeFlagValue hasContactChannelsValue;
+
+  bool get isPubliclyDiscoverable => isPubliclyDiscoverableValue.value;
+  bool get isFavoritable => isFavoritableValue.value;
+  bool get isPoiEnabled => isPoiEnabledValue.value;
+  bool get isReferenceLocationEnabled =>
+      isPoiEnabled && isReferenceLocationEnabledValue.value;
+  bool get hasBio => hasBioValue.value;
+  bool get hasContent => hasContentValue.value;
+  bool get hasTaxonomies => hasTaxonomiesValue.value;
+  bool get hasAvatar => hasAvatarValue.value;
+  bool get hasCover => hasCoverValue.value;
+  bool get hasEvents => hasEventsValue.value;
+  bool get hasGallery => hasGalleryValue.value;
+  bool get hasNestedProfileGroups => hasNestedProfileGroupsValue.value;
+  bool get hasContactChannels => hasContactChannelsValue.value;
+}

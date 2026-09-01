@@ -1,18 +1,22 @@
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_summary_item_dto.dart';
+import 'package:festou_app/domain/schedule/value_objects/schedule_summary_color_value.dart';
+import 'package:value_object_pattern/domain/value_objects/date_time_value.dart';
 
 class ScheduleSummaryItemModel {
-  final String? color;
-  final DateTime dateTimeStart;
+  final ScheduleSummaryColorValue colorValue;
+  final DateTimeValue dateTimeStartValue;
 
   ScheduleSummaryItemModel({
-    this.color,
-    required this.dateTimeStart,
-  });
+    ScheduleSummaryColorValue? colorValue,
+    required this.dateTimeStartValue,
+  }) : colorValue = colorValue ?? ScheduleSummaryColorValue();
 
-  factory ScheduleSummaryItemModel.fromDTO(EventSummaryItemDTO dto) {
-    return ScheduleSummaryItemModel(
-      color: dto.color,
-      dateTimeStart: DateTime.parse(dto.dateTimeStart),
-    );
+  String? get color =>
+      colorValue.value.trim().isEmpty ? null : colorValue.value;
+  DateTime get dateTimeStart {
+    final value = dateTimeStartValue.value;
+    if (value == null) {
+      throw StateError('dateTimeStart should not be null');
+    }
+    return value;
   }
 }

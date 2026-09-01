@@ -1,0 +1,1807 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:festou_app/domain/invites/invite_next_step.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_account_profile_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_contact_group_id_value.dart';
+import 'package:festou_app/domain/invites/value_objects/invite_contact_group_name_value.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/invite_contact_region_code_value.dart';
+import 'package:festou_app/domain/user/user_contract.dart';
+import 'package:festou_app/domain/user/user_profile_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/invites_repository_contract_values.dart';
+import 'package:festou_app/domain/schedule/friend_resume.dart';
+import 'package:festou_app/domain/schedule/invite_status.dart';
+import 'package:festou_app/domain/schedule/sent_invite_status.dart';
+import 'package:festou_app/domain/schedule/sent_invite_summary.dart';
+import 'package:festou_app/domain/user/value_objects/user_avatar_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_display_name_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_id_value.dart';
+import 'package:festou_app/domain/value_objects/domain_boolean_value.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invites_backend_requests.dart';
+import 'package:festou_app/infrastructure/dal/dto/invites/invite_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/invites/invite_realtime_delta_dto.dart';
+import 'package:festou_app/infrastructure/repositories/invites_repository.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invite_contact_import_cache_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/invites/invite_contact_match_cache_dto.dart';
+import 'package:festou_app/infrastructure/services/invites_backend_contract.dart';
+import 'package:festou_app/testing/domain_factories.dart';
+import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:value_object_pattern/domain/value_objects/date_time_value.dart';
+import 'package:value_object_pattern/domain/value_objects/mongo_id_value.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final fixedRealtimeCursor = DateTime.utc(2026, 05, 14, 14, 12, 00);
+
+  test('init binds realtime stream and upserts invite deltas', () async {
+    final firstStream = StreamController<InviteRealtimeDeltaDto>();
+    final backend = _FakeInvitesBackend(
+      inviteRealtimeStreams: [firstStream.stream],
+    );
+    final authRepository = _FakeInvitesAuthRepository(
+      userId: 'user-1',
+      authorized: true,
+    );
+    final waitCompleters = <Completer<void>>[];
+    final repository = InvitesRepository(
+      backend: backend,
+      authRepository: authRepository,
+      now: () => fixedRealtimeCursor,
+      wait: (duration) {
+        final completer = Completer<void>();
+        waitCompleters.add(completer);
+        return completer.future;
+      },
+    );
+    addTearDown(repository.dispose);
+
+    await repository.init();
+
+    expect(backend.watchInvitesLastEventIds, [
+      fixedRealtimeCursor.toIso8601String(),
+    ]);
+
+    firstStream.add(
+      InviteRealtimeDeltaDto(
+        type: 'invite.upsert',
+        lastEventId: 'cursor-1',
+        invite: _inviteDto(_buildInvitePayload(id: 'invite-live-1')),
+      ),
+    );
+    await pumpEventQueue();
+
+    expect(repository.pendingInvitesStreamValue.value, hasLength(1));
+    expect(
+      repository.pendingInvitesStreamValue.value.single.id,
+      'invite-live-1',
+    );
+
+    await firstStream.close();
+    await pumpEventQueue();
+
+    expect(waitCompleters, hasLength(1));
+  });
+
+  test('init tolerates persisted tenant scope storage failures', () async {
+    final firstStream = StreamController<InviteRealtimeDeltaDto>();
+    final backend = _FakeInvitesBackend(
+      inviteRealtimeStreams: [firstStream.stream],
+    );
+    final authRepository = _FakeInvitesAuthRepository(
+      userId: 'user-1',
+      authorized: true,
+    );
+    final repository = InvitesRepository(
+      backend: backend,
+      authRepository: authRepository,
+      storage: const _ThrowingSecureStorage(),
+      now: () => fixedRealtimeCursor,
+      wait: (_) => Future<void>.value(),
+    );
+    addTearDown(repository.dispose);
+
+    await repository.init();
+
+    expect(backend.watchInvitesLastEventIds, [
+      fixedRealtimeCursor.toIso8601String(),
+    ]);
+
+    await firstStream.close();
+  });
+
+  test('realtime delete delta removes matching pending invite group', () async {
+    final firstStream = StreamController<InviteRealtimeDeltaDto>();
+    final backend = _FakeInvitesBackend(
+      fetchInvitesResponse: {
+        'invites': [
+          _buildInvitePayload(
+            id: 'invite-1',
+            eventId: 'event-1',
+            occurrenceId: 'occurrence-1',
+          ),
+        ],
+      },
+      inviteRealtimeStreams: [firstStream.stream],
+    );
+    final repository = InvitesRepository(
+      backend: backend,
+      authRepository: _FakeInvitesAuthRepository(
+        userId: 'user-1',
+        authorized: true,
+      ),
+      now: () => fixedRealtimeCursor,
+      wait: (_) => Future<void>.value(),
+    );
+    addTearDown(repository.dispose);
+
+    await repository.init();
+    expect(repository.pendingInvitesStreamValue.value, hasLength(1));
+
+    firstStream.add(
+      const InviteRealtimeDeltaDto(
+        type: 'invite.deleted',
+        eventId: 'event-1',
+        occurrenceId: 'occurrence-1',
+      ),
+    );
+    await pumpEventQueue();
+
+    expect(repository.pendingInvitesStreamValue.value, isEmpty);
+  });
+
+  test(
+    'realtime loop reconnects with last event id after stream closes',
+    () async {
+      final firstStream = StreamController<InviteRealtimeDeltaDto>();
+      final secondStream = StreamController<InviteRealtimeDeltaDto>();
+      final waitCompleters = <Completer<void>>[];
+      final backend = _FakeInvitesBackend(
+        inviteRealtimeStreams: [firstStream.stream, secondStream.stream],
+      );
+      final repository = InvitesRepository(
+        backend: backend,
+        authRepository: _FakeInvitesAuthRepository(
+          userId: 'user-1',
+          authorized: true,
+        ),
+        now: () => fixedRealtimeCursor,
+        wait: (duration) {
+          final completer = Completer<void>();
+          waitCompleters.add(completer);
+          return completer.future;
+        },
+      );
+      addTearDown(repository.dispose);
+
+      await repository.init();
+
+      firstStream.add(
+        InviteRealtimeDeltaDto(
+          type: 'invite.upsert',
+          lastEventId: 'cursor-1',
+          invite: _inviteDto(_buildInvitePayload(id: 'invite-live-1')),
+        ),
+      );
+      await pumpEventQueue();
+      await firstStream.close();
+      await pumpEventQueue();
+
+      expect(waitCompleters, hasLength(1));
+
+      waitCompleters.single.complete();
+      await pumpEventQueue();
+
+      expect(backend.watchInvitesLastEventIds, [
+        fixedRealtimeCursor.toIso8601String(),
+        'cursor-1',
+      ]);
+
+      await secondStream.close();
+    },
+  );
+
+  test(
+    'auth transition rebinds realtime stream when user becomes authorized',
+    () async {
+      final firstStream = StreamController<InviteRealtimeDeltaDto>();
+      final authRepository = _FakeInvitesAuthRepository(
+        userId: null,
+        authorized: false,
+      );
+      final backend = _FakeInvitesBackend(
+        inviteRealtimeStreams: [firstStream.stream],
+      );
+      final repository = InvitesRepository(
+        backend: backend,
+        authRepository: authRepository,
+        now: () => fixedRealtimeCursor,
+        wait: (_) => Future<void>.value(),
+      );
+      addTearDown(repository.dispose);
+
+      await repository.init();
+      expect(backend.watchInvitesLastEventIds, isEmpty);
+
+      authRepository.setAuthorized(userId: 'user-1');
+      await pumpEventQueue();
+
+      expect(backend.watchInvitesLastEventIds, [
+        fixedRealtimeCursor.toIso8601String(),
+      ]);
+      await firstStream.close();
+    },
+  );
+
+  test('previewShareCode decodes canonical preview payload', () async {
+    final repository = InvitesRepository(
+      backend: _FakeInvitesBackend(
+        previewResponse: {'invite': _buildInvitePayload(id: 'share:ABCD1234')},
+      ),
+    );
+
+    final preview = await repository.previewShareCode(
+      invitesRepoString('ABCD1234', defaultValue: '', isRequired: true),
+    );
+
+    expect(preview, isNotNull);
+    expect(preview!.id, 'share:ABCD1234');
+    expect(preview.eventId, 'event-1');
+    expect(preview.primaryInviteId, 'share:ABCD1234');
+  });
+
+  test('previewShareCode fails loudly on malformed preview payload', () async {
+    final repository = InvitesRepository(
+      backend: _FakeInvitesBackend(
+        previewResponse: {
+          'invite': {
+            'id': 'share:broken',
+            'event_id': 'event-1',
+            'occurrence_id': 'occurrence-1',
+          },
+        },
+      ),
+    );
+
+    await expectLater(
+      repository.previewShareCode(
+        invitesRepoString('BROKEN', defaultValue: '', isRequired: true),
+      ),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('missing event_name'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'acceptInvite maps canonical superseded ids and ignores legacy field',
+    () async {
+      final repository = InvitesRepository(
+        backend: _FakeInvitesBackend(
+          acceptResponse: {
+            'invite_id': 'invite-1',
+            'status': 'accepted',
+            'credited_acceptance': true,
+            'attendance_policy': 'free_confirmation_only',
+            'next_step': 'free_confirmation_created',
+            'superseded_invite_ids': ['invite-2'],
+            'closed_duplicate_invite_ids': ['legacy-only'],
+            'accepted_at': '2099-01-01T20:00:00Z',
+          },
+        ),
+      );
+
+      final result = await repository.acceptInvite(
+        invitesRepoString('invite-1', defaultValue: '', isRequired: true),
+      );
+
+      expect(result.inviteId, 'invite-1');
+      expect(result.isAccepted, isTrue);
+      expect(result.nextStep, InviteNextStep.freeConfirmationCreated);
+      expect(
+        result.supersededInviteIds.map((inviteId) => inviteId.value).toList(),
+        ['invite-2'],
+      );
+    },
+  );
+
+  test('acceptInviteByCode routes to share accept endpoint', () async {
+    final backend = _FakeInvitesBackend(
+      acceptResponse: {
+        'invite_id': 'invite-from-share',
+        'status': 'accepted',
+        'credited_acceptance': true,
+        'attendance_policy': 'free_confirmation_only',
+        'next_step': 'free_confirmation_created',
+        'superseded_invite_ids': [],
+        'accepted_at': null,
+      },
+    );
+    final repository = InvitesRepository(backend: backend);
+
+    final result = await repository.acceptInviteByCode(
+      invitesRepoString('ABCD1234'),
+    );
+
+    expect(result.inviteId, 'invite-from-share');
+    expect(result.isAccepted, isTrue);
+    expect(backend.acceptShareCodeCalls, ['ABCD1234']);
+    expect(backend.acceptInviteCalls, isEmpty);
+  });
+
+  test(
+    'materializeShareCode maps pending state from canonical payload',
+    () async {
+      final repository = InvitesRepository(
+        backend: _FakeInvitesBackend(
+          materializeResponse: {
+            'invite_id': 'invite-1',
+            'status': 'pending',
+            'credited_acceptance': false,
+            'attendance_policy': 'free_confirmation_only',
+            'accepted_at': null,
+          },
+        ),
+      );
+
+      final result = await repository.materializeShareCode(
+        invitesRepoString('ABCD1234', defaultValue: '', isRequired: true),
+      );
+
+      expect(result.inviteId, 'invite-1');
+      expect(result.isPending, isTrue);
+      expect(result.creditedAcceptance, isFalse);
+    },
+  );
+
+  test(
+    'materializeShareCode maps self issuer preview state from canonical payload',
+    () async {
+      final repository = InvitesRepository(
+        backend: _FakeInvitesBackend(
+          materializeResponse: {
+            'invite_id': null,
+            'status': 'self_issuer_preview',
+            'credited_acceptance': false,
+            'attendance_policy': 'free_confirmation_only',
+            'accepted_at': null,
+          },
+        ),
+      );
+
+      final result = await repository.materializeShareCode(
+        invitesRepoString('ABCD1234', defaultValue: '', isRequired: true),
+      );
+
+      expect(result.status, 'self_issuer_preview');
+      expect(result.isPending, isFalse);
+      expect(result.creditedAcceptance, isFalse);
+    },
+  );
+
+  test(
+    'declineInvite maps canonical payload and refreshes pending invites',
+    () async {
+      final backend = _FakeInvitesBackend(
+        declineResponse: {
+          'invite_id': 'invite-1',
+          'status': 'declined',
+          'group_has_other_pending': true,
+          'declined_at': '2099-01-01T20:00:00Z',
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+
+      final result = await repository.declineInvite(
+        invitesRepoString('invite-1', defaultValue: '', isRequired: true),
+      );
+
+      expect(result.inviteId, 'invite-1');
+      expect(result.isDeclined, isTrue);
+      expect(result.groupHasOtherPending, isTrue);
+      expect(backend.fetchInvitesCalls, 1);
+    },
+  );
+
+  test(
+    'fetchInvites accepts invite feed entries without custom message',
+    () async {
+      final repository = InvitesRepository(
+        backend: _FakeInvitesBackend(
+          fetchInvitesResponse: {
+            'invites': [_buildInvitePayload(id: 'invite-1', message: '')],
+          },
+        ),
+      );
+
+      final invites = await repository.fetchInvites();
+
+      expect(invites, hasLength(1));
+      expect(invites.single.message, isEmpty);
+    },
+  );
+
+  test('importContacts preserves account-profile recipient metadata', () async {
+    final repository = InvitesRepository(
+      backend: _FakeInvitesBackend(
+        importContactsResponse: {
+          'matches': [
+            {
+              'contact_hash': 'hash-1',
+              'type': 'phone',
+              'user_id': 'user-1',
+              'receiver_account_profile_id': 'profile-1',
+              'display_name': 'Matched Contact',
+              'avatar_url': null,
+              'profile_exposure_level': 'capped_profile',
+              'inviteable_reasons': ['contact_match'],
+              'is_inviteable': true,
+            },
+          ],
+        },
+      ),
+    );
+    final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+      ..add(
+        buildContactModel(
+          id: 'contact-1',
+          displayName: 'Matched Contact',
+          phones: <String>['+55 27 99999-9999'],
+        ),
+      );
+
+    final matches = await repository.importContacts(contacts);
+
+    expect(matches.single.receiverAccountProfileId, 'profile-1');
+    expect(matches.single.profileExposureLevel, 'capped_profile');
+    expect(matches.single.inviteableReasons, ['contact_match']);
+  });
+
+  test(
+    'importContacts sends region-aware OTP-compatible phone hash variants',
+    () async {
+      final backend = _FakeInvitesBackend(
+        importContactsResponse: const {'matches': []},
+      );
+      final repository = InvitesRepository(backend: backend);
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Local Contact',
+            phones: <String>['(27) 99999-9999'],
+          ),
+        );
+
+      await repository.importContacts(contacts);
+
+      final payloadContacts =
+          backend.importContactPayloads.single['contacts'] as List<dynamic>;
+      final phoneHashes = payloadContacts
+          .whereType<Map<String, dynamic>>()
+          .where((item) => item['type'] == 'phone')
+          .map((item) => item['hash'])
+          .toList();
+
+      expect(phoneHashes, contains(_sha256('27999999999')));
+      expect(phoneHashes, contains(_sha256('5527999999999')));
+    },
+  );
+
+  test(
+    'importContacts reimports repeated unchanged hash import when cached matches are empty',
+    () async {
+      final importedAt = DateTime.utc(2026, 5);
+      var now = importedAt;
+      final backend = _FakeInvitesBackend(
+        importContactsResponse: const {'matches': []},
+      );
+      final cache = _FakeInviteContactImportCache();
+      final repository = InvitesRepository(
+        backend: backend,
+        contactImportCache: cache,
+        now: () => now,
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Contato Cache',
+            phones: <String>['+55 27 99999-9999'],
+          ),
+        );
+
+      await repository.importContacts(contacts);
+      now = importedAt.add(const Duration(minutes: 10));
+      await repository.importContacts(contacts);
+
+      expect(backend.importContactPayloads, hasLength(2));
+      expect(cache.writeCount, 2);
+    },
+  );
+
+  test(
+    'importContacts reuses repository-cached matches while signature cache is fresh',
+    () async {
+      final importedAt = DateTime.utc(2026, 5);
+      var now = importedAt;
+      final backend = _FakeInvitesBackend(
+        importContactsResponse: {
+          'matches': [
+            {
+              'contact_hash': 'hash-1',
+              'type': 'phone',
+              'user_id': 'user-1',
+              'receiver_account_profile_id': 'profile-1',
+              'display_name': 'Matched Contact',
+              'avatar_url': null,
+              'profile_exposure_level': 'capped_profile',
+              'inviteable_reasons': ['contact_match'],
+              'is_inviteable': true,
+            },
+          ],
+        },
+      );
+      final cache = _FakeInviteContactImportCache();
+      final repository = InvitesRepository(
+        backend: backend,
+        contactImportCache: cache,
+        now: () => now,
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Contato Cache',
+            phones: <String>['+55 27 99999-9999'],
+          ),
+        );
+
+      final firstMatches = await repository.importContacts(contacts);
+      now = importedAt.add(const Duration(minutes: 10));
+      final secondMatches = await repository.importContacts(contacts);
+
+      expect(backend.importContactPayloads, hasLength(1));
+      expect(firstMatches.single.receiverAccountProfileId, 'profile-1');
+      expect(secondMatches.single.receiverAccountProfileId, 'profile-1');
+      expect(
+        repository.importedContactMatchesStreamValue.value?.single.displayName,
+        'Matched Contact',
+      );
+    },
+  );
+
+  test(
+    'hydrateImportedContactMatchesFromCache restores persisted matches into a fresh repository instance',
+    () async {
+      final importedAt = DateTime.utc(2026, 5);
+      final cache = _FakeInviteContactImportCache();
+      final primingBackend = _FakeInvitesBackend(
+        importContactsResponse: {
+          'matches': [
+            {
+              'contact_hash': 'hash-1',
+              'type': 'phone',
+              'user_id': 'user-1',
+              'receiver_account_profile_id': 'profile-1',
+              'display_name': 'Matched Contact',
+              'avatar_url': null,
+              'profile_exposure_level': 'capped_profile',
+              'inviteable_reasons': ['contact_match'],
+              'is_inviteable': true,
+            },
+          ],
+        },
+      );
+      final primingRepository = InvitesRepository(
+        backend: primingBackend,
+        contactImportCache: cache,
+        now: () => importedAt,
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Contato Cache',
+            phones: <String>['+55 27 99999-9999'],
+          ),
+        );
+
+      await primingRepository.importContacts(contacts);
+      expect(primingBackend.importContactPayloads, hasLength(1));
+
+      final coldBackend = _FakeInvitesBackend(
+        importContactsResponse: const {'matches': []},
+      );
+      final coldRepository = InvitesRepository(
+        backend: coldBackend,
+        contactImportCache: cache,
+        now: () => importedAt.add(const Duration(minutes: 10)),
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final hydrated = await coldRepository
+          .hydrateImportedContactMatchesFromCache(contacts);
+
+      expect(coldBackend.importContactPayloads, isEmpty);
+      expect(hydrated, isNotNull);
+      expect(hydrated!.single.receiverAccountProfileId, 'profile-1');
+      expect(
+        coldRepository
+            .importedContactMatchesStreamValue
+            .value
+            ?.single
+            .displayName,
+        'Matched Contact',
+      );
+    },
+  );
+
+  test(
+    'hydrateImportedContactMatchesFromCache uses persisted tenant scope fallback during cold start',
+    () async {
+      final importedAt = DateTime.utc(2026, 5);
+      final cache = _FakeInviteContactImportCache();
+      final primingBackend = _FakeInvitesBackend(
+        importContactsResponse: {
+          'matches': [
+            {
+              'contact_hash': 'hash-1',
+              'type': 'phone',
+              'user_id': 'user-1',
+              'receiver_account_profile_id': 'profile-1',
+              'display_name': 'Matched Contact',
+              'avatar_url': null,
+              'profile_exposure_level': 'capped_profile',
+              'inviteable_reasons': ['contact_match'],
+              'is_inviteable': true,
+            },
+          ],
+        },
+      );
+      final primingRepository = InvitesRepository(
+        backend: primingBackend,
+        contactImportCache: cache,
+        now: () => importedAt,
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Contato Cache',
+            phones: <String>['+55 27 99999-9999'],
+          ),
+        );
+
+      await primingRepository.importContacts(contacts);
+      expect(primingBackend.importContactPayloads, hasLength(1));
+
+      final coldBackend = _FakeInvitesBackend(
+        importContactsResponse: const {'matches': []},
+      );
+      final coldRepository = InvitesRepository(
+        backend: coldBackend,
+        contactImportCache: cache,
+        now: () => importedAt.add(const Duration(minutes: 10)),
+        currentUserIdProvider: () async => 'viewer-1',
+        persistedTenantCacheScopeProvider: () async => 'tenant-1',
+      );
+
+      final hydrated = await coldRepository
+          .hydrateImportedContactMatchesFromCache(contacts);
+
+      expect(coldBackend.importContactPayloads, isEmpty);
+      expect(hydrated, isNotNull);
+      expect(hydrated!.single.receiverAccountProfileId, 'profile-1');
+      expect(
+        coldRepository
+            .importedContactMatchesStreamValue
+            .value
+            ?.single
+            .displayName,
+        'Matched Contact',
+      );
+    },
+  );
+
+  test('importContacts scopes fresh import cache by tenant', () async {
+    final importedAt = DateTime.utc(2026, 5);
+    var tenantScope = 'tenant-1';
+    final backend = _FakeInvitesBackend(
+      importContactsResponse: const {'matches': []},
+    );
+    final cache = _FakeInviteContactImportCache();
+    final repository = InvitesRepository(
+      backend: backend,
+      contactImportCache: cache,
+      now: () => importedAt,
+      currentUserIdProvider: () async => 'viewer-1',
+      tenantCacheScopeProvider: () async => tenantScope,
+    );
+    final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+      ..add(
+        buildContactModel(
+          id: 'contact-1',
+          displayName: 'Contato Cache',
+          phones: <String>['+55 27 99999-9999'],
+        ),
+      );
+
+    await repository.importContacts(contacts);
+    tenantScope = 'tenant-2';
+    await repository.importContacts(contacts);
+
+    expect(backend.importContactPayloads, hasLength(2));
+    expect(cache.writeCount, 2);
+  });
+
+  test(
+    'importContacts reimports changed hashes and explicit refreshes',
+    () async {
+      final importedAt = DateTime.utc(2026, 5);
+      var now = importedAt;
+      final backend = _FakeInvitesBackend(
+        importContactsResponse: const {'matches': []},
+      );
+      final cache = _FakeInviteContactImportCache();
+      final repository = InvitesRepository(
+        backend: backend,
+        contactImportCache: cache,
+        now: () => now,
+        currentUserIdProvider: () async => 'viewer-1',
+        tenantCacheScopeProvider: () async => 'tenant-1',
+      );
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'))
+        ..add(
+          buildContactModel(
+            id: 'contact-1',
+            displayName: 'Contato Cache',
+            phones: <String>['+55 27 99999-9999'],
+          ),
+        );
+      final changedContacts =
+          InviteContacts(regionCodeValue: _regionCodeValue('BR'))..add(
+            buildContactModel(
+              id: 'contact-2',
+              displayName: 'Contato Novo',
+              phones: <String>['+55 27 98888-7777'],
+            ),
+          );
+      final forcedContacts =
+          InviteContacts(
+            regionCodeValue: _regionCodeValue('BR'),
+            forceImportValue: DomainBooleanValue()..parse('true'),
+          )..add(
+            buildContactModel(
+              id: 'contact-1',
+              displayName: 'Contato Cache',
+              phones: <String>['+55 27 99999-9999'],
+            ),
+          );
+
+      await repository.importContacts(contacts);
+      now = importedAt.add(const Duration(minutes: 10));
+      await repository.importContacts(changedContacts);
+      await repository.importContacts(forcedContacts);
+
+      expect(backend.importContactPayloads, hasLength(3));
+      expect(cache.writeCount, 3);
+    },
+  );
+
+  test('sendInvites targets receiver account profile when present', () async {
+    final backend = _FakeInvitesBackend(
+      sendInvitesResponse: {
+        'created': [
+          {'invite_id': 'invite-1', 'receiver_account_profile_id': 'profile-1'},
+        ],
+        'already_invited': [],
+      },
+    );
+    final repository = InvitesRepository(backend: backend);
+    final recipients = InviteRecipients()
+      ..add(
+        EventFriendResume(
+          idValue: UserIdValue()..parse('user-1'),
+          accountProfileIdValue: InviteAccountProfileIdValue()
+            ..parse('profile-1'),
+          displayNameValue: UserDisplayNameValue()..parse('Friend Contact'),
+          avatarUrlValue: UserAvatarValue(),
+        ),
+      );
+
+    await repository.sendInvites(
+      invitesRepoString('event-1', defaultValue: '', isRequired: true),
+      recipients,
+      occurrenceId: invitesRepoString(
+        'occurrence-1',
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+
+    expect(backend.sentInvitePayloads.single['recipients'], [
+      {'receiver_account_profile_id': 'profile-1'},
+    ]);
+    expect(
+      (await repository.getSentInvitesForOccurrence(
+        invitesRepoString('occurrence-1', defaultValue: '', isRequired: true),
+      )).single.friend.accountProfileId,
+      'profile-1',
+    );
+  });
+
+  test(
+    'refreshSentInvitesForOccurrence fetches backend statuses and stores by occurrence',
+    () async {
+      final backend = _FakeInvitesBackend(
+        sentInviteStatusesResponse: {
+          'items': [
+            {
+              'invite_id': 'invite-accepted',
+              'receiver_account_profile_id': 'profile-1',
+              'receiver_user_id': 'user-1',
+              'display_name': 'Friend One',
+              'avatar_url': 'https://tenant.test/friend.png',
+              'status': 'accepted',
+              'sent_at': '2026-05-23T12:00:00Z',
+              'responded_at': '2026-05-23T12:10:00Z',
+            },
+            {
+              'invite_id': 'invite-pending',
+              'receiver_account_profile_id': 'profile-2',
+              'receiver_user_id': 'user-2',
+              'display_name': 'Friend Two',
+              'status': 'pending',
+              'sent_at': '2026-05-23T12:05:00Z',
+            },
+            {
+              'invite_id': 'invite-superseded',
+              'receiver_account_profile_id': 'profile-3',
+              'receiver_user_id': 'user-3',
+              'display_name': 'Friend Three',
+              'status': 'superseded',
+              'sent_at': '2026-05-23T12:06:00Z',
+              'responded_at': '2026-05-23T12:11:00Z',
+              'supersession_reason': 'other_invite_credited',
+            },
+          ],
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+
+      final statuses = await repository.refreshSentInvitesForOccurrence(
+        occurrenceId: invitesRepoString(
+          'occurrence-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        eventId: invitesRepoString(
+          'event-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        recipientAccountProfileIds: [
+          invitesRepoString('profile-1', defaultValue: '', isRequired: true),
+          invitesRepoString('profile-2', defaultValue: '', isRequired: true),
+          invitesRepoString('profile-3', defaultValue: '', isRequired: true),
+        ],
+      );
+
+      expect(backend.sentInviteStatusPayloads, [
+        {
+          'occurrence_id': 'occurrence-1',
+          'event_id': 'event-1',
+          'recipient_account_profile_ids': [
+            'profile-1',
+            'profile-2',
+            'profile-3',
+          ],
+        },
+      ]);
+      expect(statuses.map((status) => status.friend.accountProfileId), [
+        'profile-1',
+        'profile-2',
+        'profile-3',
+      ]);
+      expect(statuses.first.status.name, 'accepted');
+      expect(statuses.last.status, InviteStatus.superseded);
+      expect(
+        (await repository.getSentInvitesForOccurrence(
+          invitesRepoString('occurrence-1', defaultValue: '', isRequired: true),
+        )).map((status) => status.friend.accountProfileId),
+        ['profile-1', 'profile-2', 'profile-3'],
+      );
+    },
+  );
+
+  test(
+    'refreshSentInvitesForOccurrence overwrites filtered recipients without dropping unrelated recipients',
+    () async {
+      final backend = _FakeInvitesBackend(
+        sentInviteStatusesResponse: {
+          'items': [
+            {
+              'invite_id': 'invite-accepted',
+              'receiver_account_profile_id': 'profile-1',
+              'receiver_user_id': 'user-1',
+              'display_name': 'Friend One',
+              'status': 'accepted',
+              'sent_at': '2026-05-23T12:00:00Z',
+              'responded_at': '2026-05-23T12:10:00Z',
+            },
+          ],
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+      final occurrenceId = invitesRepoString(
+        'occurrence-1',
+        defaultValue: '',
+        isRequired: true,
+      );
+      repository.sentInvitesByOccurrenceStreamValue.addValue({
+        occurrenceId: [
+          _sentStatus(
+            userId: 'user-1',
+            accountProfileId: 'profile-1',
+            status: InviteStatus.pending,
+          ),
+          _sentStatus(
+            userId: 'user-2',
+            accountProfileId: 'profile-2',
+            status: InviteStatus.pending,
+          ),
+          _sentStatus(
+            userId: 'user-3',
+            accountProfileId: 'profile-3',
+            status: InviteStatus.pending,
+          ),
+        ],
+      });
+
+      final statuses = await repository.refreshSentInvitesForOccurrence(
+        occurrenceId: occurrenceId,
+        eventId: invitesRepoString(
+          'event-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        recipientAccountProfileIds: [
+          invitesRepoString('profile-1', defaultValue: '', isRequired: true),
+          invitesRepoString('profile-2', defaultValue: '', isRequired: true),
+        ],
+      );
+
+      expect(backend.sentInviteStatusPayloads.single, {
+        'occurrence_id': 'occurrence-1',
+        'event_id': 'event-1',
+        'recipient_account_profile_ids': ['profile-1', 'profile-2'],
+      });
+      expect(statuses.map((status) => status.friend.accountProfileId), [
+        'profile-1',
+        'profile-3',
+      ]);
+      expect(statuses.map((status) => status.status), [
+        InviteStatus.accepted,
+        InviteStatus.pending,
+      ]);
+      expect(
+        (await repository.getSentInvitesForOccurrence(occurrenceId)).map(
+          (status) => '${status.friend.accountProfileId}:${status.status.name}',
+        ),
+        ['profile-1:accepted', 'profile-3:pending'],
+      );
+    },
+  );
+
+  test(
+    'refreshSentInvitesForOccurrence dedupes same-key in-flight requests',
+    () async {
+      final responseCompleter = Completer<Map<String, dynamic>>();
+      final backend = _FakeInvitesBackend(
+        sentInviteStatusesCompleter: responseCompleter,
+      );
+      final repository = InvitesRepository(backend: backend);
+      final occurrenceId = invitesRepoString(
+        'occurrence-1',
+        defaultValue: '',
+        isRequired: true,
+      );
+      final eventId = invitesRepoString(
+        'event-1',
+        defaultValue: '',
+        isRequired: true,
+      );
+      final recipientFilter = [
+        invitesRepoString('profile-2', defaultValue: '', isRequired: true),
+        invitesRepoString('profile-1', defaultValue: '', isRequired: true),
+      ];
+
+      final first = repository.refreshSentInvitesForOccurrence(
+        occurrenceId: occurrenceId,
+        eventId: eventId,
+        recipientAccountProfileIds: recipientFilter,
+      );
+      final second = repository.refreshSentInvitesForOccurrence(
+        occurrenceId: occurrenceId,
+        eventId: eventId,
+        recipientAccountProfileIds: recipientFilter.reversed,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(backend.sentInviteStatusPayloads, hasLength(1));
+
+      responseCompleter.complete({
+        'items': [
+          {
+            'invite_id': 'invite-accepted',
+            'receiver_account_profile_id': 'profile-1',
+            'receiver_user_id': 'user-1',
+            'display_name': 'Friend One',
+            'status': 'accepted',
+            'sent_at': '2026-05-23T12:00:00Z',
+            'responded_at': '2026-05-23T12:10:00Z',
+          },
+        ],
+      });
+
+      final results = await Future.wait([first, second]);
+
+      expect(results.first.single.friend.accountProfileId, 'profile-1');
+      expect(results.last.single.status, InviteStatus.accepted);
+      expect(backend.sentInviteStatusPayloads, hasLength(1));
+    },
+  );
+
+  test(
+    'refreshSentInviteSummaryForOccurrence stores exact counters separately from targeted status hydration',
+    () async {
+      final backend = _FakeInvitesBackend(
+        sentInviteSummaryResponse: {
+          'event_id': 'event-1',
+          'occurrence_id': 'occurrence-1',
+          'summary': {
+            'pending': 203,
+            'accepted': 2,
+            'declined': 0,
+            'terminal_hidden': 0,
+            'total_visible': 205,
+            'total_sent': 205,
+          },
+          'preview': [
+            {
+              'invite_id': 'invite-preview',
+              'receiver_account_profile_id': 'profile-1',
+              'receiver_user_id': 'user-1',
+              'display_name': 'Preview Friend',
+              'status': 'pending',
+              'sent_at': '2026-05-23T12:00:00Z',
+            },
+          ],
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+
+      final summary = await repository.refreshSentInviteSummaryForOccurrence(
+        occurrenceId: invitesRepoString(
+          'occurrence-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        eventId: invitesRepoString(
+          'event-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(backend.sentInviteSummaryPayloads, [
+        {
+          'occurrence_id': 'occurrence-1',
+          'event_id': 'event-1',
+          'preview_limit': 5,
+        },
+      ]);
+      expect(summary.pending, 203);
+      expect(summary.accepted, 2);
+      expect(summary.totalVisible, 205);
+      expect(summary.preview.single.friend.accountProfileId, 'profile-1');
+      expect(backend.sentInviteStatusPayloads, isEmpty);
+      expect(
+        repository
+            .sentInviteSummariesByOccurrenceStreamValue
+            .value[invitesRepoString(
+          'occurrence-1',
+          defaultValue: '',
+          isRequired: true,
+        )],
+        isA<SentInviteSummary>(),
+      );
+    },
+  );
+
+  test(
+    'createShareCode sends and returns the selected occurrence identity',
+    () async {
+      final backend = _FakeInvitesBackend(
+        createShareCodeResponse: {
+          'code': 'SHARE-CODE',
+          'target_ref': {
+            'event_id': 'event-1',
+            'occurrence_id': 'occurrence-2',
+          },
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+
+      final result = await repository.createShareCode(
+        eventId: invitesRepoString(
+          'event-1',
+          defaultValue: '',
+          isRequired: true,
+        ),
+        occurrenceId: invitesRepoString(
+          'occurrence-2',
+          defaultValue: '',
+          isRequired: true,
+        ),
+      );
+
+      expect(result.code, 'SHARE-CODE');
+      expect(result.eventId, 'event-1');
+      expect(result.occurrenceId, 'occurrence-2');
+      expect(backend.createdShareCodePayloads.single, {
+        'target_ref': {'event_id': 'event-1', 'occurrence_id': 'occurrence-2'},
+      });
+    },
+  );
+
+  test(
+    'importContacts sends expanded payload once without request-loop fanout',
+    () async {
+      final expectedHash = _sha256('5527999990250');
+      final backend = _FakeInvitesBackend(
+        importContactsResponseBuilder: (payload) {
+          final contacts = payload['contacts'] as List<dynamic>;
+          final hasExpectedHash = contacts
+              .whereType<Map<String, dynamic>>()
+              .any(
+                (item) =>
+                    item['type'] == 'phone' && item['hash'] == expectedHash,
+              );
+          return {
+            'matches': hasExpectedHash
+                ? [
+                    {
+                      'contact_hash': expectedHash,
+                      'type': 'phone',
+                      'user_id': 'user-250',
+                      'receiver_account_profile_id': 'profile-250',
+                      'display_name': 'Contato 250',
+                      'avatar_url': null,
+                      'profile_exposure_level': 'capped_profile',
+                      'inviteable_reasons': ['contact_match'],
+                      'is_inviteable': true,
+                    },
+                  ]
+                : [],
+          };
+        },
+      );
+      final repository = InvitesRepository(backend: backend);
+      final contacts = InviteContacts(regionCodeValue: _regionCodeValue('BR'));
+      for (var index = 0; index <= 250; index += 1) {
+        contacts.add(
+          buildContactModel(
+            id: 'contact-$index',
+            displayName: 'Contato $index',
+            phones: <String>['(27) 99999-${index.toString().padLeft(4, '0')}'],
+          ),
+        );
+      }
+
+      final matches = await repository.importContacts(contacts);
+
+      expect(backend.importContactPayloads, hasLength(1));
+      expect(
+        (backend.importContactPayloads.single['contacts'] as List<dynamic>)
+            .length,
+        502,
+      );
+      expect(matches.single.receiverAccountProfileId, 'profile-250');
+    },
+  );
+
+  test('contact group CRUD maps backend payloads', () async {
+    final backend = _FakeInvitesBackend(
+      contactGroupsResponse: {
+        'data': [
+          {
+            'id': 'group-1',
+            'name': 'Rolê',
+            'recipient_account_profile_ids': ['profile-1'],
+          },
+        ],
+      },
+      createContactGroupResponse: {
+        'data': {
+          'id': 'group-2',
+          'name': 'Amigos',
+          'recipient_account_profile_ids': ['profile-2'],
+        },
+      },
+      updateContactGroupResponse: {
+        'data': {
+          'id': 'group-2',
+          'name': 'Amigos próximos',
+          'recipient_account_profile_ids': ['profile-1', 'profile-2'],
+        },
+      },
+    );
+    final repository = InvitesRepository(backend: backend);
+
+    final groups = await repository.fetchContactGroups();
+    final created = await repository.createContactGroup(
+      nameValue: InviteContactGroupNameValue()..parse('Amigos'),
+      recipientAccountProfileIds: buildInviteAccountProfileIds(['profile-2']),
+    );
+    final updated = await repository.updateContactGroup(
+      groupIdValue: InviteContactGroupIdValue()..parse('group-2'),
+      nameValue: InviteContactGroupNameValue()..parse('Amigos próximos'),
+      recipientAccountProfileIds: buildInviteAccountProfileIds([
+        'profile-1',
+        'profile-2',
+      ]),
+    );
+    await repository.deleteContactGroup(
+      InviteContactGroupIdValue()..parse('group-2'),
+    );
+
+    expect(groups.single.name, 'Rolê');
+    expect(groups.single.recipientAccountProfileIds, ['profile-1']);
+    expect(created?.id, 'group-2');
+    expect(updated?.name, 'Amigos próximos');
+    expect(backend.createdContactGroupPayloads.single, {
+      'name': 'Amigos',
+      'recipient_account_profile_ids': ['profile-2'],
+    });
+    expect(backend.updatedContactGroupPayloads.single, {
+      'group_id': 'group-2',
+      'name': 'Amigos próximos',
+      'recipient_account_profile_ids': ['profile-1', 'profile-2'],
+    });
+    expect(backend.deletedContactGroupIds, ['group-2']);
+  });
+
+  test(
+    'current identity cleanup erases persisted contact-import projections',
+    () async {
+      final cache = _FakeInviteContactImportCache();
+      cache.entries['former-user'] = InviteContactImportCacheEntry(
+        signature: 'former-user-signature',
+        importedAt: DateTime.utc(2026, 7, 14),
+        matches: const <InviteContactMatchCacheDto>[],
+      );
+      final repository = InvitesRepository(contactImportCache: cache);
+
+      await repository.clearCurrentIdentityState();
+
+      expect(cache.clearAllCount, 1);
+      expect(cache.entries, isEmpty);
+      expect(repository.importedContactMatchesStreamValue.value, isNull);
+    },
+  );
+}
+
+SentInviteStatus _sentStatus({
+  required String userId,
+  required String accountProfileId,
+  required InviteStatus status,
+}) {
+  return SentInviteStatus(
+    friend: EventFriendResume(
+      idValue: UserIdValue()..parse(userId),
+      accountProfileIdValue: InviteAccountProfileIdValue()
+        ..parse(accountProfileId),
+      displayNameValue: UserDisplayNameValue()..parse('Friend'),
+      avatarUrlValue: UserAvatarValue(),
+    ),
+    status: status,
+    sentAtValue: DateTimeValue()..parse('2026-05-23T12:00:00Z'),
+  );
+}
+
+class _FakeInviteContactImportCache
+    implements InviteContactImportCacheContract {
+  final entries = <String, InviteContactImportCacheEntry>{};
+  int readCount = 0;
+  int writeCount = 0;
+  int clearAllCount = 0;
+
+  @override
+  Future<InviteContactImportCacheEntry?> read(String cacheKey) async {
+    readCount += 1;
+    return entries[cacheKey];
+  }
+
+  @override
+  Future<void> write(
+    String cacheKey,
+    InviteContactImportCacheEntry entry,
+  ) async {
+    writeCount += 1;
+    entries[cacheKey] = entry;
+  }
+
+  @override
+  Future<void> clearAll() async {
+    clearAllCount += 1;
+    entries.clear();
+  }
+}
+
+class _FakeInvitesBackend implements InvitesBackendContract {
+  _FakeInvitesBackend({
+    Map<String, dynamic>? fetchInvitesResponse,
+    Map<String, dynamic>? previewResponse,
+    Map<String, dynamic>? materializeResponse,
+    Map<String, dynamic>? acceptResponse,
+    Map<String, dynamic>? declineResponse,
+    Map<String, dynamic>? importContactsResponse,
+    Map<String, dynamic>? inviteableContactsResponse,
+    Map<String, dynamic>? contactGroupsResponse,
+    Map<String, dynamic>? createContactGroupResponse,
+    Map<String, dynamic>? updateContactGroupResponse,
+    Map<String, dynamic>? sendInvitesResponse,
+    Map<String, dynamic>? sentInviteStatusesResponse,
+    Map<String, dynamic>? sentInviteSummaryResponse,
+    this.sentInviteStatusesCompleter,
+    Map<String, dynamic>? createShareCodeResponse,
+    List<Stream<InviteRealtimeDeltaDto>> inviteRealtimeStreams = const [],
+    this.importContactsResponseBuilder,
+  }) : _fetchInvitesResponse = fetchInvitesResponse ?? const {'invites': []},
+       _previewResponse = previewResponse ?? const {'invite': null},
+       _materializeResponse =
+           materializeResponse ??
+           const {
+             'invite_id': 'invite-1',
+             'status': 'pending',
+             'credited_acceptance': false,
+             'attendance_policy': 'free_confirmation_only',
+             'accepted_at': null,
+           },
+       _acceptResponse =
+           acceptResponse ??
+           const {
+             'invite_id': 'invite-1',
+             'status': 'accepted',
+             'credited_acceptance': true,
+             'attendance_policy': 'free_confirmation_only',
+             'next_step': 'free_confirmation_created',
+             'superseded_invite_ids': [],
+             'accepted_at': null,
+           },
+       _declineResponse =
+           declineResponse ??
+           const {
+             'invite_id': 'invite-1',
+             'status': 'declined',
+             'group_has_other_pending': false,
+             'declined_at': null,
+           },
+       _importContactsResponse =
+           importContactsResponse ?? const {'matches': []},
+       _inviteableContactsResponse =
+           inviteableContactsResponse ?? const {'items': []},
+       _contactGroupsResponse = contactGroupsResponse ?? const {'data': []},
+       _createContactGroupResponse =
+           createContactGroupResponse ??
+           const {
+             'data': {
+               'id': 'group-1',
+               'name': 'Grupo',
+               'recipient_account_profile_ids': [],
+             },
+           },
+       _updateContactGroupResponse =
+           updateContactGroupResponse ??
+           const {
+             'data': {
+               'id': 'group-1',
+               'name': 'Grupo',
+               'recipient_account_profile_ids': [],
+             },
+           },
+       _sendInvitesResponse =
+           sendInvitesResponse ?? const {'created': [], 'already_invited': []},
+       _sentInviteStatusesResponse =
+           sentInviteStatusesResponse ?? const {'items': []},
+       _sentInviteSummaryResponse =
+           sentInviteSummaryResponse ??
+           const {
+             'summary': {
+               'pending': 0,
+               'accepted': 0,
+               'declined': 0,
+               'terminal_hidden': 0,
+               'total_visible': 0,
+               'total_sent': 0,
+             },
+             'preview': [],
+           },
+       _createShareCodeResponse =
+           createShareCodeResponse ??
+           const {
+             'code': 'SHARE-CODE',
+             'target_ref': {
+               'event_id': 'event-1',
+               'occurrence_id': 'occurrence-1',
+             },
+           },
+       _inviteRealtimeStreams = List<Stream<InviteRealtimeDeltaDto>>.from(
+         inviteRealtimeStreams,
+       );
+
+  final Map<String, dynamic> _fetchInvitesResponse;
+  final Map<String, dynamic> _previewResponse;
+  final Map<String, dynamic> _materializeResponse;
+  final Map<String, dynamic> _acceptResponse;
+  final Map<String, dynamic> _declineResponse;
+  final Map<String, dynamic> _importContactsResponse;
+  final Map<String, dynamic> _inviteableContactsResponse;
+  final Map<String, dynamic> _contactGroupsResponse;
+  final Map<String, dynamic> _createContactGroupResponse;
+  final Map<String, dynamic> _updateContactGroupResponse;
+  final Map<String, dynamic> _sendInvitesResponse;
+  final Completer<Map<String, dynamic>>? sentInviteStatusesCompleter;
+  final Map<String, dynamic> _sentInviteStatusesResponse;
+  final Map<String, dynamic> _sentInviteSummaryResponse;
+  final Map<String, dynamic> _createShareCodeResponse;
+  final List<Stream<InviteRealtimeDeltaDto>> _inviteRealtimeStreams;
+  final Map<String, dynamic> Function(Map<String, dynamic> payload)?
+  importContactsResponseBuilder;
+
+  int fetchInvitesCalls = 0;
+  final List<String> acceptInviteCalls = <String>[];
+  final List<String> acceptShareCodeCalls = <String>[];
+  final List<String?> watchInvitesLastEventIds = <String?>[];
+  final List<Map<String, dynamic>> sentInvitePayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> sentInviteStatusPayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> sentInviteSummaryPayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> createdShareCodePayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> importContactPayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> createdContactGroupPayloads =
+      <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> updatedContactGroupPayloads =
+      <Map<String, dynamic>>[];
+  final List<String> deletedContactGroupIds = <String>[];
+
+  @override
+  Future<Map<String, dynamic>> acceptInvite(String inviteId) async {
+    acceptInviteCalls.add(inviteId);
+    return _acceptResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> acceptShareCode(String code) async {
+    acceptShareCodeCalls.add(code);
+    return _acceptResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> createShareCode(
+    InviteShareCodeCreateRequest request,
+  ) async {
+    final payload = request.toJson();
+    createdShareCodePayloads.add(payload);
+    return _createShareCodeResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> declineInvite(String inviteId) async =>
+      _declineResponse;
+
+  @override
+  Future<Map<String, dynamic>> fetchInvites({
+    required int page,
+    required int pageSize,
+  }) async {
+    fetchInvitesCalls += 1;
+    return _fetchInvitesResponse;
+  }
+
+  @override
+  Stream<InviteRealtimeDeltaDto> watchInvitesStream({String? lastEventId}) {
+    watchInvitesLastEventIds.add(lastEventId);
+    if (_inviteRealtimeStreams.isEmpty) {
+      return const Stream<InviteRealtimeDeltaDto>.empty();
+    }
+    return _inviteRealtimeStreams.removeAt(0);
+  }
+
+  @override
+  Future<Map<String, dynamic>> fetchSettings() async => const {
+    'tenant_id': null,
+    'limits': <String, int>{},
+    'cooldowns': <String, int>{},
+  };
+
+  @override
+  Future<Map<String, dynamic>> fetchShareCodePreview(String code) async =>
+      _previewResponse;
+
+  @override
+  Future<Map<String, dynamic>> importContacts(
+    InviteContactImportRequest request,
+  ) async {
+    final payload = request.toJson();
+    importContactPayloads.add(payload);
+    final builder = importContactsResponseBuilder;
+    if (builder != null) {
+      return builder(payload);
+    }
+    return _importContactsResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> fetchInviteableContacts(
+    InviteableContactsRequest request,
+  ) async => _inviteableContactsResponse;
+
+  @override
+  Future<Map<String, dynamic>> fetchContactGroups() async =>
+      _contactGroupsResponse;
+
+  @override
+  Future<Map<String, dynamic>> createContactGroup({
+    required String name,
+    required List<String> recipientAccountProfileIds,
+  }) async {
+    final payload = {
+      'name': name,
+      'recipient_account_profile_ids': recipientAccountProfileIds,
+    };
+    createdContactGroupPayloads.add(payload);
+    return _createContactGroupResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> updateContactGroup({
+    required String groupId,
+    String? name,
+    List<String>? recipientAccountProfileIds,
+  }) async {
+    updatedContactGroupPayloads.add({
+      'group_id': groupId,
+      ...?(name == null ? null : <String, dynamic>{'name': name}),
+      ...?(recipientAccountProfileIds == null
+          ? null
+          : <String, dynamic>{
+              'recipient_account_profile_ids': recipientAccountProfileIds,
+            }),
+    });
+    return _updateContactGroupResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> deleteContactGroup(String groupId) async {
+    deletedContactGroupIds.add(groupId);
+    return const <String, dynamic>{};
+  }
+
+  @override
+  Future<Map<String, dynamic>> materializeShareCode(String code) async =>
+      _materializeResponse;
+
+  @override
+  Future<Map<String, dynamic>> sendInvites(InviteSendRequest request) async {
+    final payload = request.toJson();
+    sentInvitePayloads.add(payload);
+    return _sendInvitesResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> fetchSentInviteStatuses(
+    InviteSentStatusesRequest request,
+  ) async {
+    sentInviteStatusPayloads.add(request.toJson());
+    final completer = sentInviteStatusesCompleter;
+    if (completer != null) {
+      return completer.future;
+    }
+    return _sentInviteStatusesResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> fetchSentInviteSummary(
+    InviteSentSummaryRequest request,
+  ) async {
+    sentInviteSummaryPayloads.add(request.toJson());
+    return _sentInviteSummaryResponse;
+  }
+}
+
+class _FakeInvitesAuthRepository extends AuthRepositoryContract<_FakeUser> {
+  _FakeInvitesAuthRepository({
+    required String? userId,
+    required this.authorized,
+  }) : _userId = userId {
+    if (userId != null) {
+      userStreamValue.addValue(_buildUser(userId));
+    }
+  }
+
+  String? _userId;
+  bool authorized;
+
+  void setAuthorized({required String userId}) {
+    _userId = userId;
+    authorized = true;
+    userStreamValue.addValue(_buildUser(userId));
+  }
+
+  @override
+  Object get backend => Object();
+
+  @override
+  String get userToken => 'token';
+
+  @override
+  Future<void> autoLogin() async {}
+
+  @override
+  Future<void> createNewPassword(
+    AuthRepositoryContractParamString newPassword,
+    AuthRepositoryContractParamString confirmPassword,
+  ) async {}
+
+  @override
+  Future<String> getDeviceId() async => 'device-id';
+
+  @override
+  Future<String?> getUserId() async => _userId;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  bool get isAuthorized => authorized;
+
+  @override
+  bool get isUserLoggedIn => _userId != null;
+
+  @override
+  Future<void> loginWithEmailPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<void> sendPasswordResetEmail(
+    AuthRepositoryContractParamString email,
+  ) async {}
+
+  @override
+  Future<void> sendTokenRecoveryPassword(
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString codigoEnviado,
+  ) async {}
+
+  @override
+  void setUserToken(AuthRepositoryContractParamString? token) {}
+
+  @override
+  Future<void> signUpWithEmailPassword(
+    AuthRepositoryContractParamString name,
+    AuthRepositoryContractParamString email,
+    AuthRepositoryContractParamString password,
+  ) async {}
+
+  @override
+  Future<void> updateUser(UserCustomData data) async {}
+}
+
+class _FakeUser extends UserContract {
+  _FakeUser({required super.uuidValue, required super.profile});
+}
+
+class _ThrowingSecureStorage extends FlutterSecureStorage {
+  const _ThrowingSecureStorage();
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    WindowsOptions? wOptions,
+    AppleOptions? mOptions,
+  }) {
+    throw StateError('secure storage read failed');
+  }
+}
+
+_FakeUser _buildUser(String id) {
+  final normalizedId = _mongoIdSeed(id);
+  return _FakeUser(
+    uuidValue: MongoIDValue(defaultValue: normalizedId)..parse(normalizedId),
+    profile: UserProfileContract(),
+  );
+}
+
+InviteDto _inviteDto(Map<String, dynamic> payload) =>
+    InviteDto.fromJson(payload);
+
+String _sha256(String raw) => sha256.convert(utf8.encode(raw)).toString();
+
+String _mongoIdSeed(String raw) {
+  final normalized = raw.trim();
+  final validMongoId = RegExp(r'^[a-fA-F0-9]{24}$');
+  if (validMongoId.hasMatch(normalized)) {
+    return normalized.toLowerCase();
+  }
+  return _sha256(normalized).substring(0, 24);
+}
+
+InviteContactRegionCodeValue _regionCodeValue(String raw) =>
+    InviteContactRegionCodeValue()..parse(raw);
+
+Map<String, dynamic> _buildInvitePayload({
+  required String id,
+  String eventId = 'event-1',
+  String occurrenceId = 'occurrence-1',
+  String message = 'Bora?',
+}) {
+  return {
+    'id': id,
+    'event_id': eventId,
+    'occurrence_id': occurrenceId,
+    'event_name': 'Invite Event',
+    'event_date': '2099-01-01T20:00:00Z',
+    'event_image_url': 'https://example.com/event.png',
+    'location': 'Guarapari',
+    'host_name': 'Belluga',
+    'message': message,
+    'tags': ['music'],
+    'attendance_policy': 'free_confirmation_only',
+    'inviter_candidates': [
+      {
+        'invite_id': id,
+        'display_name': 'Invite Sender',
+        'avatar_url': 'https://example.com/avatar.png',
+        'status': 'pending',
+        'principal_kind': 'user',
+        'principal_id': 'user-1',
+      },
+    ],
+    'inviter_principal': {'kind': 'user', 'id': 'user-1'},
+  };
+}

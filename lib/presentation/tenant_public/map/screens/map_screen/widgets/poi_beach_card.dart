@@ -1,0 +1,17 @@
+import 'package:festou_app/presentation/tenant_public/map/screens/map_screen/widgets/poi_base_card.dart';
+import 'package:flutter/material.dart';
+
+class PoiBeachCard extends PoiBaseCard {
+  const PoiBeachCard({
+    super.key,
+    required super.poi,
+    required super.colorScheme,
+    required super.onPrimaryAction,
+    required super.secondaryAction,
+    required super.onRoute,
+    super.referencePointAction,
+  });
+
+  @override
+  List<Widget Function(BuildContext)> buildSections() => [tagsSection];
+}

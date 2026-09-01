@@ -1,0 +1,35 @@
+import 'package:festou_app/application/configurations/belluga_constants.dart';
+import 'package:festou_app/domain/app_data/app_type.dart';
+import 'package:festou_app/domain/app_data/value_object/platform_type_value.dart';
+import 'package:festou_app/infrastructure/platform/app_data_local_info_source/app_data_local_info_dto.dart';
+import 'package:festou_app/infrastructure/repositories/auth_repository.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+
+/// Local environment metadata for mobile/desktop targets.
+class AppDataLocalInfoSource {
+  Future<AppDataLocalInfoDTO> getInfo() async {
+    final packageInfo = await PackageInfo.fromPlatform();
+
+    AppType platformType = AppType.mobile;
+    final platformStr = BellugaConstants.settings.platform;
+    if (platformStr == 'web') {
+      platformType = AppType.web;
+    } else if (['windows', 'macos', 'linux'].contains(platformStr)) {
+      platformType = AppType.desktop;
+    }
+
+    final platformTypeValue = PlatformTypeValue(defaultValue: platformType)
+      ..parse(platformType.name);
+
+    final deviceId = await AuthRepository.ensureDeviceId();
+    return AppDataLocalInfoDTO(
+      platformTypeValue: platformTypeValue,
+      port: packageInfo.version,
+      hostname: packageInfo.packageName,
+      href: packageInfo.appName,
+      // NOTE: Avoid `platform_device_id_*` plugins to keep Flutter Web WASM builds compatible.
+      // We rely on a generated device id stored in secure storage instead.
+      device: deviceId,
+    );
+  }
+}

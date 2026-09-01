@@ -1,0 +1,106 @@
+import 'package:festou_app/domain/tenant_admin/tenant_admin_event.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_nested_profile_group.dart';
+
+class TenantAdminEventFormState {
+  static const Object _undefined = Object();
+
+  const TenantAdminEventFormState({
+    required this.startAt,
+    required this.endAt,
+    required this.publishAt,
+    required this.locationMode,
+    required this.publicationStatus,
+    required this.selectedVenue,
+    required this.selectedTypeSlug,
+    required this.selectedRelatedAccountProfileIds,
+    required this.profileGroups,
+    required this.occurrences,
+    required this.occurrenceLocalIds,
+    required this.programmingItemLocalIdsByOccurrenceKey,
+    required this.selectedTaxonomyTerms,
+    required this.hasHydratedDefaultVenue,
+  });
+
+  factory TenantAdminEventFormState.initial() {
+    return const TenantAdminEventFormState(
+      startAt: null,
+      endAt: null,
+      publishAt: null,
+      locationMode: 'physical',
+      publicationStatus: 'draft',
+      selectedVenue: null,
+      selectedTypeSlug: null,
+      selectedRelatedAccountProfileIds: <String>[],
+      profileGroups: <TenantAdminNestedProfileGroup>[],
+      occurrences: <TenantAdminEventOccurrence>[],
+      occurrenceLocalIds: <String>[],
+      programmingItemLocalIdsByOccurrenceKey: <String, List<String>>{},
+      selectedTaxonomyTerms: <String, Set<String>>{},
+      hasHydratedDefaultVenue: false,
+    );
+  }
+
+  final DateTime? startAt;
+  final DateTime? endAt;
+  final DateTime? publishAt;
+  final String locationMode;
+  final String publicationStatus;
+  final TenantAdminAccountProfile? selectedVenue;
+  final String? selectedTypeSlug;
+  final List<String> selectedRelatedAccountProfileIds;
+  final List<TenantAdminNestedProfileGroup> profileGroups;
+  final List<TenantAdminEventOccurrence> occurrences;
+  final List<String> occurrenceLocalIds;
+  final Map<String, List<String>> programmingItemLocalIdsByOccurrenceKey;
+  final Map<String, Set<String>> selectedTaxonomyTerms;
+  final bool hasHydratedDefaultVenue;
+
+  String? get selectedVenueId => selectedVenue?.id;
+
+  TenantAdminEventFormState copyWith({
+    Object? startAt = _undefined,
+    Object? endAt = _undefined,
+    Object? publishAt = _undefined,
+    String? locationMode,
+    String? publicationStatus,
+    Object? selectedVenue = _undefined,
+    Object? selectedTypeSlug = _undefined,
+    List<String>? selectedRelatedAccountProfileIds,
+    List<TenantAdminNestedProfileGroup>? profileGroups,
+    List<TenantAdminEventOccurrence>? occurrences,
+    List<String>? occurrenceLocalIds,
+    Map<String, List<String>>? programmingItemLocalIdsByOccurrenceKey,
+    Map<String, Set<String>>? selectedTaxonomyTerms,
+    bool? hasHydratedDefaultVenue,
+  }) {
+    return TenantAdminEventFormState(
+      startAt: startAt == _undefined ? this.startAt : startAt as DateTime?,
+      endAt: endAt == _undefined ? this.endAt : endAt as DateTime?,
+      publishAt: publishAt == _undefined
+          ? this.publishAt
+          : publishAt as DateTime?,
+      locationMode: locationMode ?? this.locationMode,
+      publicationStatus: publicationStatus ?? this.publicationStatus,
+      selectedVenue: selectedVenue == _undefined
+          ? this.selectedVenue
+          : selectedVenue as TenantAdminAccountProfile?,
+      selectedTypeSlug: selectedTypeSlug == _undefined
+          ? this.selectedTypeSlug
+          : selectedTypeSlug as String?,
+      selectedRelatedAccountProfileIds:
+          selectedRelatedAccountProfileIds ??
+          this.selectedRelatedAccountProfileIds,
+      profileGroups: profileGroups ?? this.profileGroups,
+      occurrences: occurrences ?? this.occurrences,
+      occurrenceLocalIds: occurrenceLocalIds ?? this.occurrenceLocalIds,
+      programmingItemLocalIdsByOccurrenceKey:
+          programmingItemLocalIdsByOccurrenceKey ??
+          this.programmingItemLocalIdsByOccurrenceKey,
+      selectedTaxonomyTerms:
+          selectedTaxonomyTerms ?? this.selectedTaxonomyTerms,
+      hasHydratedDefaultVenue:
+          hasHydratedDefaultVenue ?? this.hasHydratedDefaultVenue,
+    );
+  }
+}

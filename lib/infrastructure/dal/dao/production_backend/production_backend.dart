@@ -1,0 +1,80 @@
+import 'package:festou_app/infrastructure/dal/dao/app_data_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/auth_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/backend_context.dart';
+import 'package:festou_app/infrastructure/dal/dao/favorite_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/app_data_backend/app_data_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/auth_backend/auth_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/favorite_backend/laravel_favorite_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/partners_backend/laravel_account_profiles_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/schedule_backend/laravel_schedule_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/laravel_backend/static_assets_backend/laravel_static_assets_backend.dart';
+import 'package:festou_app/infrastructure/dal/dao/account_profiles_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/static_assets_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/tenant_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/event_backend_contract.dart';
+import 'package:festou_app/infrastructure/dal/dao/production_backend/live_only_unsupported_backends.dart';
+import 'package:festou_app/infrastructure/services/schedule_backend_contract.dart';
+
+class ProductionBackend extends BackendContract {
+  ProductionBackend({
+    AppDataBackendContract? appData,
+    AuthBackendContract? auth,
+    TenantBackendContract? tenant,
+    AccountProfilesBackendContract? accountProfiles,
+    StaticAssetsBackendContract? staticAssets,
+    FavoriteBackendContract? favorites,
+    EventBackendContract? events,
+    ScheduleBackendContract? schedule,
+  })  : _appData = appData ?? AppDataBackend(),
+        _auth = auth ?? LaravelAuthBackend(),
+        _tenant = tenant ?? const LiveOnlyUnsupportedTenantBackend(),
+        _accountProfiles = accountProfiles ?? LaravelAccountProfilesBackend(),
+        _staticAssets = staticAssets ?? LaravelStaticAssetsBackend(),
+        _favorites = favorites ?? LaravelFavoriteBackend(),
+        _events =
+            events ?? const LiveOnlyUnsupportedEventBackend(),
+        _schedule = schedule ?? LaravelScheduleBackend();
+
+  BackendContext? _context;
+  final AppDataBackendContract _appData;
+  final AuthBackendContract _auth;
+  final TenantBackendContract _tenant;
+  final AccountProfilesBackendContract _accountProfiles;
+  final StaticAssetsBackendContract _staticAssets;
+  final FavoriteBackendContract _favorites;
+  final EventBackendContract _events;
+  final ScheduleBackendContract _schedule;
+
+  @override
+  BackendContext? get context => _context;
+
+  @override
+  void setContext(BackendContext context) {
+    _context = context;
+  }
+
+  @override
+  AppDataBackendContract get appData => _appData;
+
+  @override
+  AuthBackendContract get auth => _auth;
+
+  @override
+  TenantBackendContract get tenant => _tenant;
+
+  @override
+  AccountProfilesBackendContract get accountProfiles => _accountProfiles;
+
+  @override
+  StaticAssetsBackendContract get staticAssets => _staticAssets;
+
+  @override
+  FavoriteBackendContract get favorites => _favorites;
+
+  @override
+  EventBackendContract get events => _events;
+
+  @override
+  ScheduleBackendContract get schedule => _schedule;
+}

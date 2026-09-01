@@ -1,0 +1,15 @@
+name: lint_matrix_fixture
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  belluga_contact_channels:
+    path: ../../../../packages/belluga_contact_channels
+  get_it: ^9.0.5
+
+dev_dependencies:
+  belluga_analysis_plugin:
+    path: ../..

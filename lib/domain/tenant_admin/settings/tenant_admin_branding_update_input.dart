@@ -1,0 +1,48 @@
+import 'package:festou_app/domain/tenant_admin/settings/tenant_admin_branding_brightness.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_media_upload.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_hex_color_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_optional_text_value.dart';
+import 'package:festou_app/domain/tenant_admin/value_objects/tenant_admin_required_text_value.dart';
+
+class TenantAdminBrandingUpdateInput {
+  TenantAdminBrandingUpdateInput({
+    required TenantAdminRequiredTextValue tenantName,
+    required this.brightnessDefault,
+    required TenantAdminHexColorValue primarySeedColor,
+    required TenantAdminHexColorValue secondarySeedColor,
+    this.lightLogoUpload,
+    this.darkLogoUpload,
+    this.lightIconUpload,
+    this.darkIconUpload,
+    this.faviconUpload,
+    this.pwaIconUpload,
+    TenantAdminOptionalTextValue? publicWebDefaultTitle,
+    TenantAdminOptionalTextValue? publicWebDefaultDescription,
+    this.publicWebDefaultImageUpload,
+  })  : tenantNameValue = tenantName,
+        primarySeedColorValue = primarySeedColor,
+        secondarySeedColorValue = secondarySeedColor,
+        publicWebDefaultTitleValue = publicWebDefaultTitle,
+        publicWebDefaultDescriptionValue = publicWebDefaultDescription;
+
+  final TenantAdminRequiredTextValue tenantNameValue;
+  final TenantAdminBrandingBrightness brightnessDefault;
+  final TenantAdminHexColorValue primarySeedColorValue;
+  final TenantAdminHexColorValue secondarySeedColorValue;
+  final TenantAdminMediaUpload? lightLogoUpload;
+  final TenantAdminMediaUpload? darkLogoUpload;
+  final TenantAdminMediaUpload? lightIconUpload;
+  final TenantAdminMediaUpload? darkIconUpload;
+  final TenantAdminMediaUpload? faviconUpload;
+  final TenantAdminMediaUpload? pwaIconUpload;
+  final TenantAdminOptionalTextValue? publicWebDefaultTitleValue;
+  final TenantAdminOptionalTextValue? publicWebDefaultDescriptionValue;
+  final TenantAdminMediaUpload? publicWebDefaultImageUpload;
+
+  String get tenantName => tenantNameValue.value;
+  String get primarySeedColor => primarySeedColorValue.value;
+  String get secondarySeedColor => secondarySeedColorValue.value;
+  String? get publicWebDefaultTitle => publicWebDefaultTitleValue?.nullableValue;
+  String? get publicWebDefaultDescription =>
+      publicWebDefaultDescriptionValue?.nullableValue;
+}

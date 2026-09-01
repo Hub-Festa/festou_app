@@ -4,30 +4,48 @@
     "configurations": [
         {
             // O nome que vai aparecer no menu do VS Code
-            "name": "Belluga",
+            "name": "GuarAppari (Debug)",
             "request": "launch",
             "type": "dart",
             "flutterMode": "debug",
             // Aqui está a mágica: os argumentos que você usava no terminal
             "args": [
                 "--flavor",
-                "belluga",
-                "--dart-define=FLAVOR=belluga"
+                "guarappari",
+                "--dart-define=FLAVOR=guarappari",
+                "--dart-define-from-file=config/defines/dev.json",
+                "--dart-define-from-file=config/defines/local.override.json"
             ]
         },
         {
             // O nome que vai aparecer no menu do VS Code
-            "name": "Platform Boilerplate - Landlord (Debug)",
+            "name": "Alfredo Chaves (Debug)",
             "request": "launch",
             "type": "dart",
             "flutterMode": "debug",
             // Aqui está a mágica: os argumentos que você usava no terminal
             "args": [
                 "--flavor",
-                "landlord",
-                "--dart-define=FLAVOR=landlord"
+                "alfredochaves",
+                "--dart-define=FLAVOR=alfredochaves",
+                "--dart-define-from-file=config/defines/dev.json",
+                "--dart-define-from-file=config/defines/local.override.json"
             ]
         },
+        {
+            // Exemplo para um segundo flavor
+            "name": "Belluga (Debug)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "debug",
+            "args": [
+                "--flavor",
+                "belluga",
+                "--dart-define=FLAVOR=belluga",
+                "--dart-define-from-file=config/defines/dev.json",
+                "--dart-define-from-file=config/defines/local.override.json"
+            ]
+        }
         // Você pode adicionar mais configurações para "profile" ou "release" aqui
     ]
 }

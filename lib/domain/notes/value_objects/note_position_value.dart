@@ -1,4 +1,4 @@
-import 'package:belluga_boilerplate/application/extensions/duration_to_format.dart';
+import 'package:festou_app/application/extensions/duration_to_format.dart';
 import 'package:value_object_pattern/value_object.dart';
 
 class NotePositionValue extends ValueObject<Duration?> {

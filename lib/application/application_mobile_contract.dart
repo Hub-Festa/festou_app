@@ -1,8 +1,9 @@
+// ignore_for_file: must_be_immutable
+
 import 'package:flutter/services.dart';
-import 'package:belluga_boilerplate/application/application_contract.dart';
+import 'package:festou_app/application/application_contract.dart';
 
 abstract class ApplicationMobileContract extends ApplicationContract {
-
   ApplicationMobileContract({super.key});
 
   @override

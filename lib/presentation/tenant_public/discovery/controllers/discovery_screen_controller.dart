@@ -1,0 +1,1012 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:belluga_discovery_filters/belluga_discovery_filters.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/app_data/discovery_filter_selection_snapshot.dart';
+import 'package:festou_app/domain/app_data/location_origin_resolution.dart';
+import 'package:festou_app/domain/app_data/value_object/app_data_discovery_filter_token_value.dart';
+import 'package:festou_app/domain/partners/account_profile_model.dart';
+import 'package:festou_app/domain/partners/profile_type_registry.dart';
+import 'package:festou_app/domain/partners/value_objects/profile_type_key_value.dart';
+import 'package:festou_app/domain/repositories/account_profiles_repository_contract.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/schedule_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/account_profiles_repository_contract_values.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:festou_app/domain/services/location_origin_service_contract.dart';
+import 'package:festou_app/infrastructure/services/location_origin_resolution_request_factory.dart';
+import 'package:festou_app/presentation/shared/discovery_filters/public_discovery_filter_controller_mixin.dart';
+import 'package:festou_app/presentation/shared/visuals/account_profile_visual_resolver.dart';
+import 'package:festou_app/presentation/shared/visuals/resolved_account_profile_visual.dart';
+import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+enum FavoriteToggleOutcome { toggled, requiresAuthentication }
+
+final StreamValue<List<EventModel>?> _emptyDiscoveryLiveNowEventsStreamValue =
+    StreamValue<List<EventModel>?>(defaultValue: null);
+
+class DiscoveryScreenController extends Object
+    with PublicDiscoveryFilterControllerMixin
+    implements Disposable {
+  DiscoveryScreenController({
+    AccountProfilesRepositoryContract? accountProfilesRepository,
+    AppDataRepositoryContract? appDataRepository,
+    ScheduleRepositoryContract? scheduleRepository,
+    LocationOriginServiceContract? locationOriginService,
+    AuthRepositoryContract? authRepository,
+  }) : this._internal(
+         accountProfilesRepository ??
+             GetIt.I.get<AccountProfilesRepositoryContract>(),
+         appDataRepository ??
+             (GetIt.I.isRegistered<AppDataRepositoryContract>()
+                 ? GetIt.I.get<AppDataRepositoryContract>()
+                 : null),
+         scheduleRepository,
+         locationOriginService ?? GetIt.I.get<LocationOriginServiceContract>(),
+         authRepository ??
+             (GetIt.I.isRegistered<AuthRepositoryContract>()
+                 ? GetIt.I.get<AuthRepositoryContract>()
+                 : null),
+       );
+
+  DiscoveryScreenController._internal(
+    this._accountProfilesRepository,
+    this._appDataRepository,
+    this._scheduleRepository,
+    this._locationOriginService,
+    this._authRepository,
+  );
+
+  final AccountProfilesRepositoryContract _accountProfilesRepository;
+  final AppDataRepositoryContract? _appDataRepository;
+  ScheduleRepositoryContract? _scheduleRepository;
+  final LocationOriginServiceContract _locationOriginService;
+  final AuthRepositoryContract? _authRepository;
+
+  static const Duration _searchDebounceDuration = Duration(milliseconds: 350);
+  static const int _minimumSearchGraphemes = 2;
+  static const String _discoveryAccountProfilesSurface =
+      'discovery.account_profiles';
+  static const DiscoveryFilterPolicy _discoveryAccountProfilesFilterPolicy =
+      DiscoveryFilterPolicy(
+        primarySelectionMode: DiscoveryFilterSelectionMode.single,
+        taxonomySelectionMode: DiscoveryFilterSelectionMode.multiple,
+        primaryLayoutMode: DiscoveryFilterLayoutMode.row,
+        taxonomyLayoutMode: DiscoveryFilterLayoutMode.row,
+      );
+  static const double _filterPanelScrollHideEpsilon = 0.5;
+
+  StreamSubscription<Set<AccountProfilesRepositoryContractPrimString>>?
+  _favoriteIdsSubscription;
+  StreamSubscription<LocationOriginResolution?>? _effectiveOriginSubscription;
+  Timer? _searchDebounce;
+  bool _initialized = false;
+  bool _isDisposed = false;
+  int _lifecycleToken = 0;
+  int _reloadRequestToken = 0;
+  int? _activeReloadRequestToken;
+  bool _isFetchingPage = false;
+  bool _isFetchingLiveNow = false;
+  bool _hasPendingLiveNowReload = false;
+  bool _scrollListenerAttached = false;
+  bool _isProgrammaticSearchTextChange = false;
+  bool _isRevealingDiscoveryFilterPanel = false;
+  String? _lastOriginSignature;
+  AppDataDiscoveryFilterSelectionSnapshot?
+  _persistedDiscoveryFilterSelectionSnapshot;
+  final ScrollController scrollController = ScrollController();
+  final searchQueryStreamValue = StreamValue<String>(defaultValue: '');
+  final selectedTypeFilterStreamValue = StreamValue<String?>();
+  @override
+  final discoveryFilterCatalogStreamValue = StreamValue<DiscoveryFilterCatalog>(
+    defaultValue: const DiscoveryFilterCatalog(
+      surface: _discoveryAccountProfilesSurface,
+    ),
+  );
+  @override
+  final discoveryFilterSelectionStreamValue =
+      StreamValue<DiscoveryFilterSelection>(
+        defaultValue: const DiscoveryFilterSelection(),
+      );
+  @override
+  final isDiscoveryFilterPanelVisibleStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  @override
+  final isDiscoveryFilterCatalogLoadingStreamValue = StreamValue<bool>(
+    defaultValue: false,
+  );
+  final availableTypesStreamValue = StreamValue<List<String>>(
+    defaultValue: const [],
+  );
+  final favoriteIdsStreamValue = StreamValue<Set<String>>(
+    defaultValue: const {},
+  );
+  final isLoadingStreamValue = StreamValue<bool>(defaultValue: false);
+  final isRefreshingStreamValue = StreamValue<bool>(defaultValue: false);
+  final isPageLoadingStreamValue = StreamValue<bool>(defaultValue: false);
+  final hasMoreStreamValue = StreamValue<bool>(defaultValue: true);
+  final hasLoadedStreamValue = StreamValue<bool>(defaultValue: false);
+  final isSearchingStreamValue = StreamValue<bool>(defaultValue: false);
+  final TextEditingController searchController = TextEditingController();
+
+  StreamValue<List<EventModel>?> get liveNowEventsStreamValue =>
+      _resolveScheduleRepository()?.discoveryLiveNowEventsStreamValue ??
+      _emptyDiscoveryLiveNowEventsStreamValue;
+  StreamValue<List<AccountProfileModel>> get filteredPartnersStreamValue =>
+      _accountProfilesRepository.discoveryFilteredAccountProfilesStreamValue;
+  StreamValue<List<AccountProfileModel>> get nearbyStreamValue =>
+      _accountProfilesRepository.discoveryNearbyAccountProfilesStreamValue;
+
+  @override
+  AppDataRepositoryContract? get publicDiscoveryFilterAppDataRepository =>
+      _appDataRepository;
+
+  @override
+  String get publicDiscoveryFilterSurface => _discoveryAccountProfilesSurface;
+
+  @override
+  bool get isPublicDiscoveryFilterDisposed => _isDisposed;
+
+  @override
+  String get publicDiscoveryFilterLogLabel => 'DiscoveryScreenController';
+
+  @override
+  void onPublicDiscoveryFilterSelectionChanged(
+    DiscoveryFilterSelection selection,
+  ) {
+    _persistedDiscoveryFilterSelectionSnapshot =
+        discoveryFilterSelectionSnapshot(selection);
+    _scheduleReload(immediate: true);
+  }
+
+  Future<void> init() async {
+    if (_initialized) {
+      await _loadFavoriteIds();
+      if (!hasLoadedStreamValue.value && !_isFetchingPage) {
+        await _reloadPartners(showFullScreenLoader: false);
+      }
+      unawaited(_reloadLiveNowSection());
+      return;
+    }
+    _initialized = true;
+
+    searchController.addListener(_handleSearchControllerChanged);
+    _attachScrollListener();
+    _attachCanonicalOriginListeners();
+
+    try {
+      await _accountProfilesRepository.init();
+    } catch (error) {
+      debugPrint(
+        'DiscoveryScreenController.init repository init failed: $error',
+      );
+    }
+    _favoriteIdsSubscription ??= _accountProfilesRepository
+        .favoriteAccountProfileIdsStreamValue
+        .stream
+        .listen((ids) {
+          favoriteIdsStreamValue.addValue(
+            ids.map((entry) => entry.value).toSet(),
+          );
+        });
+    await _loadFavoriteIds();
+    _hydrateFromRepositoryCache();
+    final restoredSelectionSnapshot =
+        await loadPersistedPublicDiscoveryFilterSelectionSnapshot();
+    _persistedDiscoveryFilterSelectionSnapshot = restoredSelectionSnapshot;
+    final restoredSelection = restoredSelectionSnapshot == null
+        ? null
+        : discoveryFilterSelectionFromSnapshot(restoredSelectionSnapshot);
+    if (restoredSelection != null &&
+        !samePublicDiscoveryFilterSelection(
+          discoveryFilterSelectionStreamValue.value,
+          restoredSelection,
+        )) {
+      discoveryFilterSelectionStreamValue.addValue(restoredSelection);
+    }
+    await _reloadPartners(showFullScreenLoader: false);
+  }
+
+  void _handleSearchControllerChanged() {
+    if (_isProgrammaticSearchTextChange) {
+      return;
+    }
+    setSearchQuery(searchController.text);
+  }
+
+  void _attachScrollListener() {
+    if (_scrollListenerAttached) return;
+    _scrollListenerAttached = true;
+    scrollController.addListener(() {
+      if (!scrollController.hasClients) {
+        return;
+      }
+      if (!_isRevealingDiscoveryFilterPanel) {
+        updateDiscoveryFilterPanelVisibilityFromScroll(
+          scrollController.position.pixels,
+          epsilon: _filterPanelScrollHideEpsilon,
+        );
+      }
+      if (_isFetchingPage ||
+          isLoadingStreamValue.value ||
+          isRefreshingStreamValue.value ||
+          !hasMoreStreamValue.value) {
+        return;
+      }
+      const threshold = 280.0;
+      final position = scrollController.position;
+      if (position.pixels + threshold >= position.maxScrollExtent) {
+        unawaited(loadNextPage());
+      }
+    });
+  }
+
+  void openDiscoveryFilterPanelForReveal() {
+    _isRevealingDiscoveryFilterPanel = true;
+    setDiscoveryFilterPanelVisible(true);
+  }
+
+  void closeDiscoveryFilterPanel() {
+    _isRevealingDiscoveryFilterPanel = false;
+    setDiscoveryFilterPanelVisible(false);
+  }
+
+  void completeDiscoveryFilterPanelReveal() {
+    _isRevealingDiscoveryFilterPanel = false;
+  }
+
+  void _attachCanonicalOriginListeners() {
+    _lastOriginSignature = _originSignature(
+      _locationOriginService.effectiveOriginStreamValue.value,
+    );
+    _effectiveOriginSubscription ??= _locationOriginService
+        .effectiveOriginStreamValue
+        .stream
+        .listen((resolution) {
+          _onCanonicalOriginUpdated(resolution);
+        });
+  }
+
+  void _onCanonicalOriginUpdated(LocationOriginResolution? resolution) {
+    final signature = _originSignature(resolution);
+    if (signature == null || signature == _lastOriginSignature) {
+      return;
+    }
+    _lastOriginSignature = signature;
+    unawaited(_reloadLiveNowSection());
+  }
+
+  Future<void> _reloadPartners({bool showFullScreenLoader = false}) async {
+    final requestToken = ++_reloadRequestToken;
+    await _runPartnersReload(
+      requestToken: requestToken,
+      showFullScreenLoader: showFullScreenLoader,
+    );
+  }
+
+  Future<void> _runPartnersReload({
+    required int requestToken,
+    required bool showFullScreenLoader,
+  }) async {
+    if (_isDisposed) {
+      return;
+    }
+    final lifecycleToken = _lifecycleToken;
+    _activeReloadRequestToken = requestToken;
+    final useFullScreenLoader =
+        showFullScreenLoader ||
+        (!hasLoadedStreamValue.value &&
+            filteredPartnersStreamValue.value.isEmpty);
+
+    hasMoreStreamValue.addValue(true);
+
+    if (useFullScreenLoader) {
+      _clearVisibleData();
+      isLoadingStreamValue.addValue(true);
+      hasLoadedStreamValue.addValue(false);
+    } else {
+      isRefreshingStreamValue.addValue(true);
+    }
+
+    try {
+      await _fetchNextPage(isInitial: true, requestToken: requestToken);
+    } catch (error) {
+      if (_isLifecycleTokenActive(lifecycleToken)) {
+        debugPrint('DiscoveryScreenController._reloadPartners failed: $error');
+      }
+    } finally {
+      if (_isLifecycleTokenActive(lifecycleToken) &&
+          _activeReloadRequestToken == requestToken) {
+        hasLoadedStreamValue.addValue(true);
+        isLoadingStreamValue.addValue(false);
+        isRefreshingStreamValue.addValue(false);
+        unawaited(_reloadLiveNowSection());
+      }
+      if (_activeReloadRequestToken == requestToken) {
+        _activeReloadRequestToken = null;
+      }
+    }
+  }
+
+  void _clearVisibleData() {
+    _updateAvailableTypes();
+  }
+
+  Future<void> loadNextPage() async {
+    await _fetchNextPage(isInitial: false, requestToken: _reloadRequestToken);
+  }
+
+  Future<void> _fetchNextPage({
+    required bool isInitial,
+    required int requestToken,
+  }) async {
+    if (!isInitial && _isFetchingPage) return;
+    if (!isInitial && !hasMoreStreamValue.value) return;
+
+    final lifecycleToken = _lifecycleToken;
+    if (!isInitial) {
+      _isFetchingPage = true;
+      isPageLoadingStreamValue.addValue(true);
+    }
+
+    try {
+      final query = searchQueryStreamValue.value.trim();
+      final effectiveQuery = _effectiveSearchQuery(query);
+      final selectedType = selectedTypeFilterStreamValue.value;
+      final typeFilters = _selectedAccountProfileTypeFilters();
+      final taxonomyFilters = _selectedAccountProfileTaxonomyFilters();
+      final shouldLoadFirstPage =
+          isInitial ||
+          _accountProfilesRepository.currentPagedAccountProfilesPage.value <= 0;
+      if (shouldLoadFirstPage) {
+        await _accountProfilesRepository.loadAccountProfilesPage(
+          query: effectiveQuery == null
+              ? null
+              : AccountProfilesRepositoryContractPrimString.fromRaw(
+                  effectiveQuery,
+                ),
+          typeFilter: selectedType == null
+              ? null
+              : AccountProfilesRepositoryContractPrimString.fromRaw(
+                  selectedType,
+                ),
+          typeFilters: typeFilters,
+          taxonomyFilters: taxonomyFilters,
+        );
+      } else {
+        await _accountProfilesRepository.loadNextAccountProfilesPage(
+          query: effectiveQuery == null
+              ? null
+              : AccountProfilesRepositoryContractPrimString.fromRaw(
+                  effectiveQuery,
+                ),
+          typeFilter: selectedType == null
+              ? null
+              : AccountProfilesRepositoryContractPrimString.fromRaw(
+                  selectedType,
+                ),
+          typeFilters: typeFilters,
+          taxonomyFilters: taxonomyFilters,
+        );
+      }
+
+      final pageResult =
+          _accountProfilesRepository.pagedAccountProfilesStreamValue.value;
+      if (pageResult == null) {
+        return;
+      }
+
+      final loadedPage =
+          _accountProfilesRepository.currentPagedAccountProfilesPage;
+      if (loadedPage.value <= 0) {
+        return;
+      }
+
+      if (!_isLifecycleTokenActive(lifecycleToken) ||
+          requestToken != _reloadRequestToken) {
+        return;
+      }
+
+      hasMoreStreamValue.addValue(pageResult.hasMore);
+
+      _updateAvailableTypes();
+      if (_reconcileRuntimeDiscoveryFilterCatalog()) {
+        return;
+      }
+      if (_shouldSyncNearby(
+        query: effectiveQuery ?? '',
+        selectedType: selectedType,
+        typeFilters: typeFilters,
+        taxonomyFilters: taxonomyFilters,
+      )) {
+        await _accountProfilesRepository.syncDiscoveryNearbyAccountProfiles();
+      }
+    } finally {
+      if (_isLifecycleTokenActive(lifecycleToken) && !isInitial) {
+        _isFetchingPage = false;
+        isPageLoadingStreamValue.addValue(false);
+      }
+    }
+  }
+
+  void setSearchQuery(String query) {
+    if (searchQueryStreamValue.value == query) {
+      return;
+    }
+    searchQueryStreamValue.addValue(query);
+    _scheduleReload(immediate: false);
+  }
+
+  void setTypeFilter(String? type) {
+    if (selectedTypeFilterStreamValue.value == type) {
+      return;
+    }
+    selectedTypeFilterStreamValue.addValue(type);
+    _scheduleReload(immediate: true);
+  }
+
+  @override
+  DiscoveryFilterPolicy get discoveryFilterPolicy =>
+      _discoveryAccountProfilesFilterPolicy;
+
+  bool get hasActiveFilterState {
+    final selectedType = selectedTypeFilterStreamValue.value;
+    if (selectedType != null && selectedType.isNotEmpty) {
+      return true;
+    }
+    if (discoveryFilterSelectionStreamValue.value.isNotEmpty) {
+      return true;
+    }
+    return searchQueryStreamValue.value.trim().isNotEmpty;
+  }
+
+  bool consumeBackNavigationIfNeeded() {
+    if (!hasActiveFilterState) {
+      return false;
+    }
+    resetToDefaultDiscoveryState();
+    return true;
+  }
+
+  void resetToDefaultDiscoveryState() {
+    _searchDebounce?.cancel();
+
+    var changed = false;
+    final selectedType = selectedTypeFilterStreamValue.value;
+    if (selectedType != null && selectedType.isNotEmpty) {
+      selectedTypeFilterStreamValue.addValue(null);
+      changed = true;
+    }
+
+    if (discoveryFilterSelectionStreamValue.value.isNotEmpty) {
+      const emptySelection = DiscoveryFilterSelection();
+      discoveryFilterSelectionStreamValue.addValue(emptySelection);
+      unawaited(persistPublicDiscoveryFilterSelection(emptySelection));
+      changed = true;
+    }
+
+    if (searchQueryStreamValue.value.isNotEmpty) {
+      searchQueryStreamValue.addValue('');
+      changed = true;
+    }
+
+    if (searchController.text.isNotEmpty) {
+      _setSearchControllerText('');
+    }
+
+    if (isSearchingStreamValue.value) {
+      isSearchingStreamValue.addValue(false);
+    }
+    if (isDiscoveryFilterPanelVisibleStreamValue.value) {
+      isDiscoveryFilterPanelVisibleStreamValue.addValue(false);
+    }
+
+    if (changed) {
+      _scheduleReload(immediate: true);
+    }
+  }
+
+  void _setSearchControllerText(String value) {
+    if (searchController.text == value) {
+      return;
+    }
+    _isProgrammaticSearchTextChange = true;
+    searchController.text = value;
+    searchController.selection = TextSelection.collapsed(offset: value.length);
+    _isProgrammaticSearchTextChange = false;
+  }
+
+  void _scheduleReload({required bool immediate}) {
+    _searchDebounce?.cancel();
+    if (immediate) {
+      unawaited(_reloadPartners());
+      return;
+    }
+    _searchDebounce = Timer(_searchDebounceDuration, () {
+      unawaited(_reloadPartners());
+    });
+  }
+
+  String? _effectiveSearchQuery(String query) {
+    final normalized = query.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+
+    return normalized.characters.length < _minimumSearchGraphemes
+        ? null
+        : normalized;
+  }
+
+  void toggleSearch() {
+    final next = !isSearchingStreamValue.value;
+    isSearchingStreamValue.addValue(next);
+    if (next) {
+      if (selectedTypeFilterStreamValue.value != null) {
+        setTypeFilter(null);
+      }
+      if (discoveryFilterSelectionStreamValue.value.isNotEmpty) {
+        setDiscoveryFilterSelection(const DiscoveryFilterSelection());
+      }
+      return;
+    }
+    if (!next) {
+      if (searchController.text.isNotEmpty ||
+          searchQueryStreamValue.value.isNotEmpty) {
+        _setSearchControllerText('');
+        setSearchQuery('');
+      }
+    }
+  }
+
+  FavoriteToggleOutcome toggleFavorite(String accountProfileId) {
+    if (!isAuthorized) {
+      return FavoriteToggleOutcome.requiresAuthentication;
+    }
+    final current = Set<String>.from(favoriteIdsStreamValue.value);
+    if (current.contains(accountProfileId)) {
+      current.remove(accountProfileId);
+    } else {
+      current.add(accountProfileId);
+    }
+    favoriteIdsStreamValue.addValue(current);
+
+    unawaited(
+      _accountProfilesRepository.toggleFavorite(
+        AccountProfilesRepositoryContractPrimString.fromRaw(accountProfileId),
+      ),
+    );
+    return FavoriteToggleOutcome.toggled;
+  }
+
+  bool isFavorite(String accountProfileId) {
+    return favoriteIdsStreamValue.value.contains(accountProfileId);
+  }
+
+  StreamValue<Set<String>> get favoriteIdsStream => favoriteIdsStreamValue;
+
+  bool get isAuthorized => _authRepository?.isAuthorized ?? false;
+
+  Future<void> _loadFavoriteIds() async {
+    final ids = Set<String>.from(
+      _accountProfilesRepository.favoriteAccountProfileIdsStreamValue.value.map(
+        (entry) => entry.value,
+      ),
+    );
+    favoriteIdsStreamValue.addValue(ids);
+  }
+
+  String? _originSignature(LocationOriginResolution? resolution) {
+    final coordinate =
+        resolution?.effectiveCoordinate ??
+        _locationOriginService.resolveCached().effectiveCoordinate;
+    if (coordinate == null) {
+      return null;
+    }
+    return '${coordinate.latitude.toStringAsFixed(6)}:'
+        '${coordinate.longitude.toStringAsFixed(6)}';
+  }
+
+  Future<void> _reloadLiveNowSection() async {
+    final scheduleRepository = _resolveScheduleRepository();
+    if (scheduleRepository == null) {
+      return;
+    }
+    if (_isFetchingLiveNow) {
+      _hasPendingLiveNowReload = true;
+      return;
+    }
+
+    final resolution = await _locationOriginService.resolve(
+      LocationOriginResolutionRequestFactory.create(warmUpIfPossible: true),
+    );
+    final origin = resolution.effectiveCoordinate;
+    final maxDistanceMeters = _resolveDiscoveryMaxDistanceMeters();
+
+    _isFetchingLiveNow = true;
+    try {
+      await scheduleRepository.refreshDiscoveryLiveNowEvents(
+        originLat: origin == null
+            ? null
+            : ScheduleRepoDouble.fromRaw(
+                origin.latitude,
+                defaultValue: origin.latitude,
+              ),
+        originLng: origin == null
+            ? null
+            : ScheduleRepoDouble.fromRaw(
+                origin.longitude,
+                defaultValue: origin.longitude,
+              ),
+        maxDistanceMeters: maxDistanceMeters == null
+            ? null
+            : ScheduleRepoDouble.fromRaw(
+                maxDistanceMeters,
+                defaultValue: maxDistanceMeters,
+              ),
+      );
+    } catch (error) {
+      debugPrint(
+        'DiscoveryScreenController._reloadLiveNowSection failed: $error',
+      );
+    } finally {
+      _isFetchingLiveNow = false;
+      if (_hasPendingLiveNowReload) {
+        _hasPendingLiveNowReload = false;
+        unawaited(_reloadLiveNowSection());
+      }
+    }
+  }
+
+  void _hydrateFromRepositoryCache() {
+    final cachedPage =
+        _accountProfilesRepository.pagedAccountProfilesStreamValue.value;
+    if (cachedPage == null) {
+      return;
+    }
+    final cachedProfiles = cachedPage.profiles;
+    if (cachedProfiles.isEmpty) {
+      return;
+    }
+
+    hasLoadedStreamValue.addValue(true);
+    hasMoreStreamValue.addValue(cachedPage.hasMore);
+    _reconcileRuntimeDiscoveryFilterCatalog();
+    _updateAvailableTypes();
+  }
+
+  bool _shouldSyncNearby({
+    required String query,
+    required String? selectedType,
+    required List<AccountProfilesRepositoryContractPrimString> typeFilters,
+    required List<AccountProfilesRepositoryTaxonomyFilter> taxonomyFilters,
+  }) {
+    return query.isEmpty &&
+        (selectedType == null || selectedType.isEmpty) &&
+        discoveryFilterSelectionStreamValue.value.isEmpty &&
+        typeFilters.isEmpty &&
+        taxonomyFilters.isEmpty;
+  }
+
+  List<AccountProfilesRepositoryContractPrimString>
+  _selectedAccountProfileTypeFilters({
+    DiscoveryFilterCatalog? catalogOverride,
+    DiscoveryFilterSelection? selectionOverride,
+    bool allowPersistedFallback = true,
+  }) {
+    final selection =
+        selectionOverride ?? discoveryFilterSelectionStreamValue.value;
+    final payload = DiscoveryFilterQueryPayload.compile(
+      catalog: catalogOverride ?? discoveryFilterCatalogStreamValue.value,
+      selection: selection,
+    );
+    final values = <String>{...payload.typesForEntity('account_profile')};
+    if (values.isEmpty &&
+        allowPersistedFallback &&
+        _canUsePersistedDiscoveryFilterSelectionSnapshot(selection)) {
+      values.addAll(
+        _persistedDiscoveryFilterSelectionSnapshot!
+            .typeFiltersForEntity(
+              AppDataDiscoveryFilterTokenValue.fromRaw('account_profile'),
+            )
+            .map((value) => value.value),
+      );
+    }
+
+    return values
+        .map(
+          (value) => AccountProfilesRepositoryContractPrimString.fromRaw(
+            value,
+            defaultValue: value,
+          ),
+        )
+        .where((value) => value.value.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  List<AccountProfilesRepositoryTaxonomyFilter>
+  _selectedAccountProfileTaxonomyFilters({
+    DiscoveryFilterCatalog? catalogOverride,
+    DiscoveryFilterSelection? selectionOverride,
+    bool allowPersistedFallback = true,
+  }) {
+    final selection =
+        selectionOverride ?? discoveryFilterSelectionStreamValue.value;
+    final payload = DiscoveryFilterQueryPayload.compile(
+      catalog: catalogOverride ?? discoveryFilterCatalogStreamValue.value,
+      selection: selection,
+    );
+    final payloadTaxonomyEntries = payload.taxonomyEntries
+        .map((entry) => (type: entry.type, value: entry.value))
+        .toList(growable: false);
+    final taxonomyEntries =
+        payloadTaxonomyEntries.isNotEmpty ||
+            !allowPersistedFallback ||
+            !_canUsePersistedDiscoveryFilterSelectionSnapshot(selection)
+        ? payloadTaxonomyEntries
+        : selection.taxonomyTermKeys.entries
+              .expand(
+                (entry) =>
+                    entry.value.map((value) => (type: entry.key, value: value)),
+              )
+              .toList(growable: false);
+    return taxonomyEntries
+        .map(
+          (entry) => AccountProfilesRepositoryTaxonomyFilter.fromRaw(
+            type: entry.type,
+            value: entry.value,
+          ),
+        )
+        .where((entry) => entry.isValid)
+        .toList(growable: false);
+  }
+
+  bool _reconcileRuntimeDiscoveryFilterCatalog() {
+    return _consumeCanonicalRuntimeDiscoveryFilterCatalog();
+  }
+
+  bool _consumeCanonicalRuntimeDiscoveryFilterCatalog() {
+    final runtimeCatalog = _accountProfilesRepository
+        .publicDiscoveryFilterCatalogStreamValue
+        .value;
+    if (runtimeCatalog == null) {
+      return false;
+    }
+
+    final selection = discoveryFilterSelectionStreamValue.value;
+    final currentTypeFilters = _selectedAccountProfileTypeFilters(
+      selectionOverride: selection,
+    );
+    final currentTaxonomyFilters = _selectedAccountProfileTaxonomyFilters(
+      selectionOverride: selection,
+    );
+    if (!_sameDiscoveryFilterCatalog(
+      discoveryFilterCatalogStreamValue.value,
+      runtimeCatalog,
+    )) {
+      discoveryFilterCatalogStreamValue.addValue(runtimeCatalog);
+    }
+
+    final repairedSelection = repairPublicDiscoveryFilterSelection(
+      selection,
+      catalogOverride: runtimeCatalog,
+    );
+    final selectionChanged = !samePublicDiscoveryFilterSelection(
+      selection,
+      repairedSelection,
+    );
+    if (selectionChanged) {
+      discoveryFilterSelectionStreamValue.addValue(repairedSelection);
+    }
+    final repairedTypeFilters = _selectedAccountProfileTypeFilters(
+      catalogOverride: runtimeCatalog,
+      selectionOverride: repairedSelection,
+      allowPersistedFallback: false,
+    );
+    final repairedTaxonomyFilters = _selectedAccountProfileTaxonomyFilters(
+      catalogOverride: runtimeCatalog,
+      selectionOverride: repairedSelection,
+      allowPersistedFallback: false,
+    );
+    final queryChanged =
+        !_sameAccountProfileTypeFilters(
+          currentTypeFilters,
+          repairedTypeFilters,
+        ) ||
+        !_sameAccountProfileTaxonomyFilters(
+          currentTaxonomyFilters,
+          repairedTaxonomyFilters,
+        );
+    if (selectionChanged || queryChanged) {
+      unawaited(persistPublicDiscoveryFilterSelection(repairedSelection));
+      _persistedDiscoveryFilterSelectionSnapshot =
+          discoveryFilterSelectionSnapshot(repairedSelection);
+    }
+    if (!queryChanged) {
+      return false;
+    }
+
+    final effectiveQuery =
+        _effectiveSearchQuery(searchQueryStreamValue.value.trim()) ?? '';
+    if (_shouldSyncNearby(
+      query: effectiveQuery,
+      selectedType: selectedTypeFilterStreamValue.value,
+      typeFilters: repairedTypeFilters,
+      taxonomyFilters: repairedTaxonomyFilters,
+    )) {
+      unawaited(_accountProfilesRepository.syncDiscoveryNearbyAccountProfiles());
+    }
+    return false;
+  }
+
+  bool _sameDiscoveryFilterCatalog(
+    DiscoveryFilterCatalog left,
+    DiscoveryFilterCatalog right,
+  ) {
+    return jsonEncode(left.toJson()) == jsonEncode(right.toJson());
+  }
+
+  bool _canUsePersistedDiscoveryFilterSelectionSnapshot(
+    DiscoveryFilterSelection selection,
+  ) {
+    final snapshot = _persistedDiscoveryFilterSelectionSnapshot;
+    if (snapshot == null || !snapshot.hasTypeFilterSelections) {
+      return false;
+    }
+    return samePublicDiscoveryFilterSelection(
+      selection,
+      discoveryFilterSelectionFromSnapshot(snapshot),
+    );
+  }
+
+  bool _sameAccountProfileTypeFilters(
+    List<AccountProfilesRepositoryContractPrimString> left,
+    List<AccountProfilesRepositoryContractPrimString> right,
+  ) {
+    final leftValues = left.map((value) => value.value).toSet();
+    final rightValues = right.map((value) => value.value).toSet();
+    return leftValues.length == rightValues.length &&
+        leftValues.containsAll(rightValues);
+  }
+
+  bool _sameAccountProfileTaxonomyFilters(
+    List<AccountProfilesRepositoryTaxonomyFilter> left,
+    List<AccountProfilesRepositoryTaxonomyFilter> right,
+  ) {
+    final leftValues = left
+        .map((value) => '${value.type.value}:${value.term.value}')
+        .toSet();
+    final rightValues = right
+        .map((value) => '${value.type.value}:${value.term.value}')
+        .toSet();
+    return leftValues.length == rightValues.length &&
+        leftValues.containsAll(rightValues);
+  }
+
+  void _updateAvailableTypes() {
+    final registry = _resolveRegistry();
+    if (registry == null || registry.isEmpty) {
+      availableTypesStreamValue.addValue(const []);
+      return;
+    }
+    final allowed = registry
+        .enabledAccountProfileTypes()
+        .where(registry.isPubliclyDiscoverableFor)
+        .map((type) => type.value)
+        .toList(growable: false);
+    availableTypesStreamValue.addValue(allowed);
+  }
+
+  bool isFavoritable(AccountProfileModel accountProfile) {
+    final registry = _resolveRegistry();
+    if (registry == null || registry.isEmpty) return false;
+    return registry.isFavoritableFor(ProfileTypeKeyValue(accountProfile.type));
+  }
+
+  String labelForAccountProfileType(String type) {
+    final registry = _resolveRegistry();
+    if (registry == null || registry.isEmpty) {
+      return _fallbackLabelForType(type);
+    }
+    return registry.labelForType(ProfileTypeKeyValue(type));
+  }
+
+  ResolvedAccountProfileVisual resolvedVisualForAccountProfile(
+    AccountProfileModel accountProfile,
+  ) {
+    return AccountProfileVisualResolver.resolve(
+      accountProfile: accountProfile,
+      registry: _resolveRegistry(),
+    );
+  }
+
+  ProfileTypeRegistry? _resolveRegistry() {
+    return appData?.profileTypeRegistry;
+  }
+
+  double? _resolveDiscoveryMaxDistanceMeters() {
+    final repository = _appDataRepository;
+    if (repository != null) {
+      final preferred = repository.maxRadiusMetersStreamValue.value;
+      if (preferred.value > 0) {
+        return preferred.value;
+      }
+    }
+    return appData?.mapRadiusDefaultMeters;
+  }
+
+  AppData? get appData {
+    if (!GetIt.I.isRegistered<AppData>()) {
+      return null;
+    }
+    return GetIt.I.get<AppData>();
+  }
+
+  ScheduleRepositoryContract? _resolveScheduleRepository() {
+    final cached = _scheduleRepository;
+    if (cached != null) {
+      return cached;
+    }
+    if (!GetIt.I.isRegistered<ScheduleRepositoryContract>()) {
+      return null;
+    }
+    final resolved = GetIt.I.get<ScheduleRepositoryContract>();
+    _scheduleRepository = resolved;
+    return resolved;
+  }
+
+  String _fallbackLabelForType(String type) {
+    switch (type) {
+      case 'artist':
+        return 'Artista';
+      case 'venue':
+        return 'Local';
+      case 'restaurant':
+        return 'Restaurante';
+      case 'experience_provider':
+        return 'Experiência';
+      case 'influencer':
+        return 'Influenciador';
+      case 'curator':
+        return 'Curador';
+      case 'personal':
+        return 'Pessoal';
+    }
+    return type;
+  }
+
+  bool _isLifecycleTokenActive(int lifecycleToken) {
+    return !_isDisposed && lifecycleToken == _lifecycleToken;
+  }
+
+  @override
+  void onDispose() {
+    _isDisposed = true;
+    _lifecycleToken++;
+    _searchDebounce?.cancel();
+    searchController.removeListener(_handleSearchControllerChanged);
+    _effectiveOriginSubscription?.cancel();
+    _favoriteIdsSubscription?.cancel();
+    searchQueryStreamValue.dispose();
+    selectedTypeFilterStreamValue.dispose();
+    discoveryFilterCatalogStreamValue.dispose();
+    discoveryFilterSelectionStreamValue.dispose();
+    isDiscoveryFilterPanelVisibleStreamValue.dispose();
+    isDiscoveryFilterCatalogLoadingStreamValue.dispose();
+    availableTypesStreamValue.dispose();
+    favoriteIdsStreamValue.dispose();
+    isRefreshingStreamValue.dispose();
+    isPageLoadingStreamValue.dispose();
+    hasMoreStreamValue.dispose();
+    hasLoadedStreamValue.dispose();
+    isSearchingStreamValue.dispose();
+    isLoadingStreamValue.dispose();
+    searchController.dispose();
+    scrollController.dispose();
+  }
+}

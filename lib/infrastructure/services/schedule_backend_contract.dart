@@ -1,17 +1,37 @@
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_dto.dart';
-import 'package:belluga_boilerplate/infrastructure/services/dal/dto/schedule/event_summary_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_delta_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_page_dto.dart';
 
 abstract class ScheduleBackendContract {
+  Future<EventDTO?> fetchEventDetail({
+    required String eventIdOrSlug,
+    String? occurrenceId,
+  });
+  Future<EventPageDTO> fetchEventsPage({
+    required int page,
+    int? pageSize,
+    required bool showPastOnly,
+    bool liveNowOnly = false,
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+  });
 
-  Future<EventSummaryDTO> getScheduleSummary();
-
-  Future<EventDTO> getEvent(String eventId);
-
-  Future<List<EventDTO>> getEventsByDate(DateTime date);
-
-  Future<List<EventDTO>> filterEvents({String? typeId, String? itemId});
-
-  Future<List<EventDTO>> getFutureEvents();
-
-  Future<List<EventDTO>> getAllEvents();
+  Stream<EventDeltaDTO> watchEventsStream({
+    String? searchQuery,
+    List<String>? categories,
+    List<Map<String, String>>? taxonomy,
+    bool confirmedOnly = false,
+    List<String>? occurrenceIds,
+    double? originLat,
+    double? originLng,
+    double? maxDistanceMeters,
+    String? lastEventId,
+    bool showPastOnly = false,
+  });
 }

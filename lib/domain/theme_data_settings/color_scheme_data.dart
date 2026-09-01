@@ -1,6 +1,5 @@
-import 'package:belluga_boilerplate/application/extensions/to_hex.dart';
-import 'package:belluga_boilerplate/domain/theme_data_settings/value_objects/brightness_value.dart';
-import 'package:belluga_boilerplate/domain/value_objects/color_required_value.dart';
+import 'package:festou_app/domain/theme_data_settings/value_objects/brightness_value.dart';
+import 'package:festou_app/domain/value_objects/color_required_value.dart';
 import 'package:flutter/material.dart';
 import 'package:material_color_utilities/material_color_utilities.dart';
 
@@ -40,16 +39,4 @@ class ColorSchemeData {
       );
     }
   }
-
-  // Add this factory constructor inside your ColorSchemeData class
-factory ColorSchemeData.fromJson(Map<String, dynamic> json) {
-
-  return ColorSchemeData(
-    brightnessValue: BrightnessValue()..parse(json['brightness']),
-    primarySeedColorValue:
-        ColorRequiredValue(defaultValue: (json['primary_seed_color'] as String).toColor()),
-    secondarySeedColorValue:
-        ColorRequiredValue(defaultValue: (json['secondary_seed_color'] as String).toColor()),
-  );
-}
 }

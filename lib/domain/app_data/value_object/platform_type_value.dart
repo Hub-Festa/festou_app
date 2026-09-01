@@ -1,4 +1,4 @@
-import 'package:belluga_boilerplate/domain/app_data/platform_type.dart';
+import 'package:festou_app/domain/app_data/platform_type.dart';
 import 'package:value_object_pattern/value_object.dart';
 
 class PlatformTypeValue extends ValueObject<PlatformType?> {

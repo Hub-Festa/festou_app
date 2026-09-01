@@ -1,0 +1,582 @@
+import 'dart:async';
+
+import 'package:auto_route/auto_route.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/application/router/guards/landlord_route_guard.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_account_by_slug_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_account_profile_edit_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_event_edit_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_organization_detail_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_profile_type_detail_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_static_asset_detail_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_static_profile_type_detail_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_taxonomy_detail_route_resolver.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_taxonomy_term_route_model.dart';
+import 'package:festou_app/application/router/resolvers/tenant_admin_taxonomy_term_route_resolver.dart';
+import 'package:festou_app/application/router/support/canonical_route_family.dart';
+import 'package:festou_app/application/router/support/canonical_route_meta.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_event.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_organization.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_static_asset.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_static_profile_type.dart';
+import 'package:festou_app/domain/tenant_admin/tenant_admin_taxonomy_definition.dart';
+import 'package:festou_app/domain/services/tenant_admin_external_image_proxy_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_location_selection_contract.dart';
+import 'package:festou_app/domain/services/tenant_admin_tenant_scope_contract.dart';
+import 'package:festou_app/infrastructure/services/tenant_admin/tenant_admin_external_image_proxy_service.dart';
+import 'package:festou_app/presentation/landlord_area/auth/controllers/tenant_admin_landlord_login_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/account_profiles/controllers/tenant_admin_account_profiles_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/accounts/controllers/tenant_admin_account_create_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/accounts/controllers/tenant_admin_account_detail_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/accounts/controllers/tenant_admin_accounts_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/accounts/controllers/tenant_admin_location_picker_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/discovery_filters/controllers/tenant_admin_discovery_filters_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/events/controllers/tenant_admin_events_controller.dart';
+import 'package:festou_app/infrastructure/services/tenant_admin/tenant_admin_location_selection_service.dart';
+import 'package:festou_app/presentation/tenant_admin/organizations/controllers/tenant_admin_organizations_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/profile_types/controllers/tenant_admin_profile_types_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/settings/controllers/tenant_admin_settings_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/shell/controllers/tenant_admin_shell_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/shell/controllers/tenant_admin_shell_login_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/static_assets/controllers/tenant_admin_static_assets_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/static_profile_types/controllers/tenant_admin_static_profile_types_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/taxonomies/controllers/tenant_admin_taxonomies_controller.dart';
+import 'package:festou_app/presentation/tenant_admin/shared/utils/tenant_admin_image_ingestion_service.dart';
+import 'package:festou_app/domain/repositories/tenant_admin_selected_tenant_repository_contract.dart';
+import 'package:get_it/get_it.dart';
+import 'package:get_it_modular_with_auto_route/get_it_modular_with_auto_route.dart';
+
+class TenantAdminModule extends ModuleContract {
+  @override
+  FutureOr<void> registerDependencies() async {
+    _registerResolvers();
+    _registerControllersAndServices();
+  }
+
+  void _registerResolvers() {
+    registerRouteResolver<TenantAdminAccount>(
+      TenantAdminAccountBySlugRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminAccountProfile>(
+      TenantAdminAccountProfileEditRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminEvent>(
+      TenantAdminEventEditRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminStaticAsset>(
+      TenantAdminStaticAssetDetailRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminOrganization>(
+      TenantAdminOrganizationDetailRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminProfileTypeDefinition>(
+      TenantAdminProfileTypeDetailRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminStaticProfileTypeDefinition>(
+      TenantAdminStaticProfileTypeDetailRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminTaxonomyDefinition>(
+      TenantAdminTaxonomyDetailRouteResolver.new,
+    );
+    registerRouteResolver<TenantAdminTaxonomyTermRouteModel>(
+      TenantAdminTaxonomyTermRouteResolver.new,
+    );
+  }
+
+  void _registerControllersAndServices() {
+    registerLazySingleton<TenantAdminLandlordLoginController>(
+      () => TenantAdminLandlordLoginController(),
+    );
+    registerLazySingleton<TenantAdminShellLoginController>(
+      () => TenantAdminShellLoginController(),
+    );
+
+    registerLazySingleton<TenantAdminShellController>(
+      () => TenantAdminShellController(),
+    );
+    registerFactory<TenantAdminAccountsController>(
+      () => TenantAdminAccountsController(),
+    );
+    registerFactory<TenantAdminAccountCreateController>(
+      () => TenantAdminAccountCreateController(),
+    );
+    registerLazySingleton<TenantAdminEventsController>(
+      () => TenantAdminEventsController(),
+    );
+    registerLazySingleton<TenantAdminLocationSelectionContract>(
+      () => TenantAdminLocationSelectionService(),
+    );
+    registerLazySingleton<TenantAdminTenantScopeContract>(
+      () => GetIt.I.get<TenantAdminSelectedTenantRepositoryContract>()
+          as TenantAdminTenantScopeContract,
+    );
+    registerLazySingleton<TenantAdminExternalImageProxyContract>(
+      () => TenantAdminExternalImageProxyService(),
+    );
+    registerLazySingleton<TenantAdminImageIngestionService>(
+      () => TenantAdminImageIngestionService(),
+    );
+    registerFactory<TenantAdminLocationPickerController>(
+      () => TenantAdminLocationPickerController(),
+    );
+    registerLazySingleton<TenantAdminAccountProfilesController>(
+      () => TenantAdminAccountProfilesController(),
+    );
+    registerFactory<TenantAdminAccountDetailController>(
+      () => TenantAdminAccountDetailController(),
+    );
+    registerFactory<TenantAdminOrganizationsController>(
+      () => TenantAdminOrganizationsController(),
+    );
+    registerFactory<TenantAdminProfileTypesController>(
+      () => TenantAdminProfileTypesController(),
+    );
+    registerFactory<TenantAdminTaxonomiesController>(
+      () => TenantAdminTaxonomiesController(),
+    );
+    registerFactory<TenantAdminStaticProfileTypesController>(
+      () => TenantAdminStaticProfileTypesController(),
+    );
+    registerFactory<TenantAdminSettingsController>(
+      () => TenantAdminSettingsController(),
+    );
+    registerLazySingleton<TenantAdminDiscoveryFiltersController>(
+      () => TenantAdminDiscoveryFiltersController(),
+    );
+    registerLazySingleton<TenantAdminStaticAssetsController>(
+      () => TenantAdminStaticAssetsController(),
+    );
+  }
+
+  @override
+  List<AutoRoute> get routes => [
+        AutoRoute(
+          path: '/admin',
+          page: TenantAdminShellRoute.page,
+          guards: [LandlordRouteGuard()],
+          meta: canonicalRouteMeta(
+            family: CanonicalRouteFamily.tenantAdminDashboard,
+          ),
+          children: [
+            AutoRoute(
+              path: '',
+              page: TenantAdminDashboardRoute.page,
+              initial: true,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminDashboard,
+              ),
+            ),
+            AutoRoute(
+              path: 'events',
+              page: TenantAdminEventsRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsRoot,
+              ),
+            ),
+            CustomRoute(
+              path: 'events/create',
+              page: TenantAdminEventCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'events/:eventId/edit',
+              page: TenantAdminEventEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path:
+                  'events/:eventId/occurrences/:occurrenceId/groups/:groupId/:occurrenceKey',
+              page: TenantAdminEventOccurrenceGroupMembersRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'events/types',
+              page: TenantAdminEventTypesRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+              ),
+            ),
+            CustomRoute(
+              path: 'events/types/create',
+              page: TenantAdminEventTypeCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'events/types/edit',
+              page: TenantAdminEventTypeEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminEventsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'accounts',
+              page: TenantAdminAccountsListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsRoot,
+              ),
+            ),
+            CustomRoute(
+              path: 'accounts/create',
+              page: TenantAdminAccountCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'accounts/location-picker',
+              page: TenantAdminLocationPickerRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'accounts/:accountSlug',
+              page: TenantAdminAccountDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'accounts/:accountSlug/profiles/create',
+              page: TenantAdminAccountProfileCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'accounts/:accountSlug/profiles/:accountProfileId/edit',
+              page: TenantAdminAccountProfileEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path:
+                  'accounts/:accountSlug/profiles/:accountProfileId/profile-groups/:groupId',
+              page: TenantAdminAccountProfileGroupMembersRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'organizations',
+              page: TenantAdminOrganizationsListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+              ),
+            ),
+            CustomRoute(
+              path: 'organizations/create',
+              page: TenantAdminOrganizationCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'organizations/:organizationId',
+              page: TenantAdminOrganizationDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'profile-types',
+              page: TenantAdminProfileTypesListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+              ),
+            ),
+            AutoRoute(
+              path: 'profile-types/:profileType',
+              page: TenantAdminProfileTypeDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'profile-types/create',
+              page: TenantAdminProfileTypeCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'profile-types/:profileType/edit',
+              page: TenantAdminProfileTypeEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAccountsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'static_profile_types',
+              page: TenantAdminStaticProfileTypesListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+              ),
+            ),
+            AutoRoute(
+              path: 'static_profile_types/:profileType',
+              page: TenantAdminStaticProfileTypeDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'static_profile_types/create',
+              page: TenantAdminStaticProfileTypeCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'static_profile_types/:profileType/edit',
+              page: TenantAdminStaticProfileTypeEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'taxonomies',
+              page: TenantAdminTaxonomiesListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+              ),
+            ),
+            CustomRoute(
+              path: 'taxonomies/create',
+              page: TenantAdminTaxonomyCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'taxonomies/:taxonomyId/edit',
+              page: TenantAdminTaxonomyEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'taxonomies/:taxonomyId/terms',
+              page: TenantAdminTaxonomyTermsRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'taxonomies/:taxonomyId/terms/:termId',
+              page: TenantAdminTaxonomyTermDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'taxonomies/:taxonomyId/terms/create',
+              page: TenantAdminTaxonomyTermCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'taxonomies/:taxonomyId/terms/:termId/edit',
+              page: TenantAdminTaxonomyTermEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'static_assets',
+              page: TenantAdminStaticAssetsListRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsRoot,
+              ),
+            ),
+            AutoRoute(
+              path: 'static_assets/:assetId',
+              page: TenantAdminStaticAssetDetailRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'static_assets/create',
+              page: TenantAdminStaticAssetCreateRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            CustomRoute(
+              path: 'static_assets/:assetId/edit',
+              page: TenantAdminStaticAssetEditRoute.page,
+              transitionsBuilder: TransitionsBuilders.slideBottom,
+              duration: const Duration(milliseconds: 260),
+              reverseDuration: const Duration(milliseconds: 220),
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminAssetsInternal,
+                chromeMode: RouteChromeMode.fullscreen,
+              ),
+            ),
+            AutoRoute(
+              path: 'filters',
+              page: TenantAdminDiscoveryFiltersRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminFiltersRoot,
+              ),
+            ),
+            AutoRoute(
+              path: 'filters/surface',
+              page: TenantAdminDiscoveryFilterSurfaceRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminFiltersInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings',
+              page: TenantAdminSettingsRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsRoot,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings/local-preferences',
+              page: TenantAdminSettingsLocalPreferencesRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings/visual-identity',
+              page: TenantAdminSettingsVisualIdentityRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings/domains',
+              page: TenantAdminSettingsDomainsRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings/technical-integrations',
+              page: TenantAdminSettingsTechnicalIntegrationsRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+            AutoRoute(
+              path: 'settings/environment-snapshot',
+              page: TenantAdminSettingsEnvironmentSnapshotRoute.page,
+              meta: canonicalRouteMeta(
+                family: CanonicalRouteFamily.tenantAdminSettingsInternal,
+                chromeMode: RouteChromeMode.scopedSectionAppBar,
+              ),
+            ),
+          ],
+        ),
+      ];
+}

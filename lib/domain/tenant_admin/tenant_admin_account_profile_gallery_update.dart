@@ -1,0 +1,2 @@
+export 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile_gallery_update_group.dart';
+export 'package:festou_app/domain/tenant_admin/tenant_admin_account_profile_gallery_update_item.dart';

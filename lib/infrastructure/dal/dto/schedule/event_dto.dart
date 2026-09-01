@@ -1,0 +1,1129 @@
+import 'package:festou_app/application/rich_text/safe_rich_html.dart';
+import 'package:festou_app/domain/invites/invite_partner_type.dart';
+import 'package:festou_app/domain/map/value_objects/city_coordinate.dart';
+import 'package:festou_app/domain/map/value_objects/latitude_value.dart';
+import 'package:festou_app/domain/map/value_objects/longitude_value.dart';
+import 'package:festou_app/domain/partner/partner_resume.dart';
+import 'package:festou_app/domain/partner/value_objects/invite_partner_hero_image_value.dart';
+import 'package:festou_app/domain/partner/value_objects/invite_partner_logo_image_value.dart';
+import 'package:festou_app/domain/partner/value_objects/invite_partner_name_value.dart';
+import 'package:festou_app/domain/partner/value_objects/invite_partner_tagline_value.dart';
+import 'package:festou_app/domain/partners/account_profile_gallery_group.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_nested_group_fields.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_nested_group_member_text_value.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_public_detail_path_value.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_tag_value.dart';
+import 'package:festou_app/domain/partners/value_objects/account_profile_type_value.dart';
+import 'package:festou_app/domain/schedule/event_linked_account_profile.dart';
+import 'package:festou_app/domain/schedule/event_model.dart';
+import 'package:festou_app/domain/schedule/event_occurrence_option.dart';
+import 'package:festou_app/domain/schedule/event_profile_group.dart';
+import 'package:festou_app/domain/schedule/event_programming_item.dart';
+import 'package:festou_app/domain/schedule/event_type_model.dart';
+import 'package:festou_app/domain/schedule/friend_resume.dart';
+import 'package:festou_app/domain/schedule/invite_status.dart';
+import 'package:festou_app/domain/schedule/sent_invite_status.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_linked_account_profile_text_value.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_counterpart_count_value.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_is_confirmed_value.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_occurrence_values.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_total_confirmed_value.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_type_id_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_avatar_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_display_name_value.dart';
+import 'package:festou_app/domain/user/value_objects/user_id_value.dart';
+import 'package:festou_app/domain/value_objects/domain_boolean_value.dart';
+import 'package:festou_app/domain/value_objects/color_value.dart';
+import 'package:festou_app/domain/value_objects/description_value.dart';
+import 'package:festou_app/domain/value_objects/domain_optional_date_time_value.dart';
+import 'package:festou_app/domain/value_objects/slug_value.dart';
+import 'package:festou_app/domain/value_objects/title_value.dart';
+import 'package:festou_app/domain/value_objects/thumb_uri_value.dart';
+import 'package:festou_app/domain/schedule/value_objects/event_tag_value.dart';
+import 'package:festou_app/infrastructure/dal/dto/invites/invite_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_public_profile_payload_decoder.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/event_type_dto.dart';
+import 'package:festou_app/infrastructure/dal/dto/schedule/support/public_media_url_normalizer.dart';
+import 'package:festou_app/infrastructure/dal/dto/thumb_dto.dart';
+import 'package:flutter/material.dart';
+import 'package:value_object_pattern/domain/value_objects/date_time_value.dart';
+import 'package:value_object_pattern/domain/value_objects/html_content_value.dart';
+import 'package:value_object_pattern/domain/value_objects/mongo_id_value.dart';
+
+class EventDTO {
+  const EventDTO({
+    required this.id,
+    required this.slug,
+    required this.type,
+    required this.title,
+    required this.content,
+    required this.location,
+    this.venue,
+    this.latitude,
+    this.longitude,
+    this.thumb,
+    required this.dateTimeStart,
+    this.dateTimeEnd,
+    this.linkedAccountProfiles = const [],
+    this.counterpartPreview = const [],
+    this.counterpartCount,
+    this.profileGroups = const [],
+    this.occurrences = const [],
+    this.programmingItems = const [],
+    this.isConfirmed = false,
+    this.totalConfirmed = 0,
+    this.receivedInvites,
+    this.sentInvites,
+    this.friendsGoing,
+    this.tags = const [],
+    this.taxonomyTerms = const [],
+  });
+
+  final String id;
+  final String slug;
+  final EventTypeDTO type;
+  final String title;
+  final String content;
+  final String location;
+  final Map<String, dynamic>? venue;
+  final double? latitude;
+  final double? longitude;
+  final ThumbDTO? thumb;
+  final String dateTimeStart;
+  final String? dateTimeEnd;
+  final List<EventLinkedAccountProfile> linkedAccountProfiles;
+  final List<EventLinkedAccountProfile> counterpartPreview;
+  final int? counterpartCount;
+  final List<EventProfileGroup> profileGroups;
+  final List<EventOccurrenceOption> occurrences;
+  final List<EventProgrammingItem> programmingItems;
+  final bool isConfirmed;
+  final int totalConfirmed;
+  final List<Map<String, dynamic>>? receivedInvites;
+  final List<Map<String, dynamic>>? sentInvites;
+  final List<Map<String, dynamic>>? friendsGoing;
+  final List<String> tags;
+  final List<Map<String, dynamic>> taxonomyTerms;
+
+  factory EventDTO.fromJson(Map<String, dynamic> json) {
+    final typePayload = _asMap(json['type']);
+    final venuePayload = _asMap(json['venue']);
+    final locationPayload = _asMap(json['location']);
+    final geoLocationPayload = _asMap(json['geo_location']);
+    final thumbPayload = _resolveCanonicalThumbPayload(json);
+    final location = _resolveLocation(
+      rawLocation: json['location'],
+      venuePayload: venuePayload,
+    );
+    final coordinates = _resolveCoordinates(
+      latitude: _asDouble(json['latitude']),
+      longitude: _asDouble(json['longitude']),
+      locationPayload: locationPayload,
+      geoLocationPayload: geoLocationPayload,
+    );
+    const linkedProfiles = <EventLinkedAccountProfile>[];
+    final counterpartPreview = _resolveLinkedAccountProfiles(
+      linkedProfilesRaw: json['counterpart_preview'],
+    );
+    final selectedOccurrenceId = _asNullableString(json['occurrence_id']);
+
+    final taxonomyTerms = _resolveCanonicalTaxonomyTerms(
+      json['taxonomy_terms'],
+    );
+
+    return EventDTO(
+      id:
+          _asString(json['id']) ??
+          _asString(json['event_id']) ??
+          _asString(json['occurrence_id']) ??
+          '',
+      slug: _asString(json['slug']) ?? '',
+      type: EventTypeDTO(
+        id: _asString(typePayload['id']) ?? '',
+        name: _asString(typePayload['name']) ?? '',
+        slug: _asString(typePayload['slug']) ?? '',
+        description: _asString(typePayload['description']) ?? '',
+        icon: _asNullableString(typePayload['icon']),
+        color: _asNullableString(typePayload['color']),
+      ),
+      title: _asString(json['title']) ?? '',
+      content: _asString(json['content']) ?? '',
+      venue: venuePayload.isEmpty ? null : venuePayload,
+      location: location,
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+      thumb: thumbPayload.isNotEmpty ? ThumbDTO.fromJson(thumbPayload) : null,
+      dateTimeStart:
+          _asString(json['date_time_start']) ??
+          _asString(json['starts_at']) ??
+          _asString(json['start_time']) ??
+          '',
+      dateTimeEnd:
+          _asNullableString(json['date_time_end']) ??
+          _asNullableString(json['ends_at']) ??
+          _asNullableString(json['end_time']),
+      linkedAccountProfiles: linkedProfiles,
+      counterpartPreview: counterpartPreview,
+      counterpartCount: json.containsKey('counterpart_count')
+          ? _asInt(json['counterpart_count'])
+          : null,
+      profileGroups: _resolveProfileGroups(
+        json['profile_groups'],
+        linkedAccountProfiles: linkedProfiles,
+      ),
+      occurrences: _resolveOccurrences(
+        occurrencesRaw: json['occurrences'],
+        linkedAccountProfiles: linkedProfiles,
+        fallbackOccurrenceId: selectedOccurrenceId,
+        fallbackDateTimeStart:
+            _asNullableString(json['date_time_start']) ??
+            _asNullableString(json['starts_at']) ??
+            _asNullableString(json['start_time']),
+        fallbackDateTimeEnd:
+            _asNullableString(json['date_time_end']) ??
+            _asNullableString(json['ends_at']) ??
+            _asNullableString(json['end_time']),
+      ),
+      programmingItems: _resolveProgrammingItems(json['programming_items']),
+      isConfirmed: _asBool(json['is_confirmed']),
+      totalConfirmed: _asInt(json['total_confirmed']),
+      receivedInvites: _asMapList(json['received_invites']),
+      sentInvites: _asMapList(json['sent_invites']),
+      friendsGoing: _asMapList(json['friends_going']),
+      tags: _resolveCanonicalTaxonomyLabels(taxonomyTerms),
+      taxonomyTerms: taxonomyTerms,
+    );
+  }
+
+  EventModel toDomain() {
+    final thumbDomain = thumb?.toDomain();
+    final coordinate = (latitude != null && longitude != null)
+        ? CityCoordinate(
+            latitudeValue: LatitudeValue()..parse(latitude!.toString()),
+            longitudeValue: LongitudeValue()..parse(longitude!.toString()),
+          )
+        : null;
+    final venueDomain = venue != null ? _mapPartnerResume(venue!) : null;
+    final selectedOccurrenceId = _selectedOccurrenceIdForInvites();
+
+    final receivedInvitesDomain = receivedInvites
+        ?.map((entry) {
+          final inviteMap = Map<String, dynamic>.from(entry);
+          inviteMap.putIfAbsent('event_id', () => id);
+          if (selectedOccurrenceId != null && selectedOccurrenceId.isNotEmpty) {
+            inviteMap.putIfAbsent('occurrence_id', () => selectedOccurrenceId);
+          }
+          return InviteDto.fromJson(inviteMap).toDomain();
+        })
+        .toList(growable: false);
+
+    final sentInvitesDomain = sentInvites
+        ?.map(_mapSentInviteStatus)
+        .toList(growable: false);
+    final friendsGoingDomain = friendsGoing
+        ?.map(_mapEventFriendResume)
+        .toList(growable: false);
+
+    return eventModelFromRaw(
+      id: MongoIDValue()..parse(id),
+      slugValue: SlugValue()..parse(slug),
+      type: EventTypeModel(
+        id: EventTypeIdValue()..parse(type.id),
+        name: TitleValue(minLenght: 1)..parse(type.name),
+        slug: SlugValue()..parse(type.slug),
+        description: DescriptionValue(minLenght: 0)..parse(type.description),
+        icon: SlugValue()..parse(type.icon ?? 'default-icon'),
+        color: ColorValue(defaultValue: const Color(0xFF000000))
+          ..parse(type.color ?? '#000000'),
+      ),
+      title: TitleValue()..parse(title),
+      content: _htmlContentValue(content),
+      location: DescriptionValue(minLenght: 1)..parse(location),
+      thumb: thumbDomain,
+      dateTimeStart: DateTimeValue()..parse(dateTimeStart),
+      dateTimeEnd: dateTimeEnd != null
+          ? (DateTimeValue()..parse(dateTimeEnd!))
+          : null,
+      venue: venueDomain,
+      linkedAccountProfiles: linkedAccountProfiles,
+      counterpartPreviewProfiles: counterpartPreview,
+      counterpartCountValue: counterpartCount == null
+          ? null
+          : EventCounterpartCountValue(counterpartCount),
+      profileGroups: profileGroups,
+      occurrences: occurrences,
+      programmingItems: programmingItems,
+      coordinate: coordinate,
+      tags: tags,
+      isConfirmedValue: EventIsConfirmedValue()..parse(isConfirmed.toString()),
+      totalConfirmedValue: EventTotalConfirmedValue()
+        ..parse(totalConfirmed.toString()),
+      receivedInvites: receivedInvitesDomain,
+      sentInvites: sentInvitesDomain,
+      friendsGoing: friendsGoingDomain,
+    );
+  }
+
+  String? _selectedOccurrenceIdForInvites() {
+    for (final occurrence in occurrences) {
+      final occurrenceId = occurrence.occurrenceId.trim();
+      if (occurrence.isSelected && occurrenceId.isNotEmpty) {
+        return occurrenceId;
+      }
+    }
+
+    if (occurrences.isEmpty) {
+      return null;
+    }
+
+    final firstOccurrenceId = occurrences.first.occurrenceId.trim();
+    return firstOccurrenceId.isEmpty ? null : firstOccurrenceId;
+  }
+
+  static HTMLContentValue _htmlContentValue(String rawContent) {
+    final canonicalContent = SafeRichHtml.canonicalize(
+      rawContent,
+      allowExplicitHttpsLinks: true,
+    );
+    final value = HTMLContentValue(minLenght: 0);
+    value.validate(canonicalContent);
+    value.set(canonicalContent);
+    return value;
+  }
+
+  DateTime? dateOnly() {
+    final parsed = DateTime.tryParse(dateTimeStart);
+    if (parsed == null) {
+      return null;
+    }
+    return DateTime(parsed.year, parsed.month, parsed.day);
+  }
+
+  static Map<String, dynamic> _asMap(dynamic value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+    return <String, dynamic>{};
+  }
+
+  static String? _asString(dynamic value) {
+    if (value == null) return null;
+    if (value is String) {
+      return value;
+    }
+    if (value is num || value is bool) {
+      return value.toString();
+    }
+    return null;
+  }
+
+  static String? _asNullableString(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+    if (value is String) {
+      return value;
+    }
+    if (value is num || value is bool) {
+      return value.toString();
+    }
+    return null;
+  }
+
+  static List<EventLinkedAccountProfile> _resolveLinkedAccountProfiles({
+    required Object? linkedProfilesRaw,
+  }) => EventPublicProfilePayloadDecoder.resolveLinkedAccountProfiles(
+    linkedProfilesRaw: linkedProfilesRaw,
+  );
+
+  static List<EventProfileGroup> _resolveProfileGroups(
+    Object? raw, {
+    List<EventLinkedAccountProfile> linkedAccountProfiles = const [],
+  }) => EventPublicProfilePayloadDecoder.resolveProfileGroups(
+    raw,
+    linkedAccountProfiles: linkedAccountProfiles,
+  );
+
+  static List<EventOccurrenceOption> _resolveOccurrences({
+    required Object? occurrencesRaw,
+    required List<EventLinkedAccountProfile> linkedAccountProfiles,
+    required String? fallbackOccurrenceId,
+    required String? fallbackDateTimeStart,
+    required String? fallbackDateTimeEnd,
+  }) {
+    final rows = <Map<String, dynamic>>[];
+    if (occurrencesRaw is List) {
+      for (final entry in occurrencesRaw) {
+        final occurrence = _asMap(entry);
+        if (occurrence.isNotEmpty) {
+          rows.add(occurrence);
+        }
+      }
+    }
+
+    if (rows.isEmpty &&
+        fallbackOccurrenceId != null &&
+        fallbackOccurrenceId.trim().isNotEmpty &&
+        fallbackDateTimeStart != null &&
+        fallbackDateTimeStart.trim().isNotEmpty) {
+      rows.add({
+        'occurrence_id': fallbackOccurrenceId,
+        'date_time_start': fallbackDateTimeStart,
+        'date_time_end': fallbackDateTimeEnd,
+        'is_selected': true,
+      });
+    }
+
+    final resolved = <EventOccurrenceOption>[];
+    for (final row in rows) {
+      final occurrenceId =
+          _asNullableString(row['occurrence_id'])?.trim() ?? '';
+      final start = _asNullableString(row['date_time_start'])?.trim() ?? '';
+      if (occurrenceId.isEmpty || start.isEmpty) {
+        continue;
+      }
+
+      final isSelected =
+          _asBool(row['is_selected']) ||
+          (fallbackOccurrenceId != null &&
+              fallbackOccurrenceId.trim().isNotEmpty &&
+              occurrenceId == fallbackOccurrenceId.trim());
+      final dateTimeEndValue = DomainOptionalDateTimeValue();
+      dateTimeEndValue.parse(_asNullableString(row['date_time_end']));
+      final occurrenceLinkedAccountProfiles = linkedAccountProfiles;
+      final occurrenceTaxonomyTerms = _resolveCanonicalTaxonomyTerms(
+        row['taxonomy_terms'],
+      );
+
+      resolved.add(
+        EventOccurrenceOption(
+          occurrenceIdValue: EventLinkedAccountProfileTextValue(occurrenceId),
+          occurrenceSlugValue: EventLinkedAccountProfileTextValue(
+            _asNullableString(row['occurrence_slug'])?.trim() ?? '',
+          ),
+          dateTimeStartValue: DateTimeValue(isRequired: true)..parse(start),
+          dateTimeEndValue: dateTimeEndValue,
+          isSelectedValue: EventOccurrenceFlagValue()
+            ..parse(isSelected.toString()),
+          hasLocationOverrideValue: EventOccurrenceFlagValue()
+            ..parse(_asBool(row['has_location_override']).toString()),
+          programmingCountValue: EventProgrammingCountValue()
+            ..parse(_asInt(row['programming_count']).toString()),
+          linkedAccountProfiles: occurrenceLinkedAccountProfiles,
+          programmingItems: _resolveProgrammingItems(row['programming_items']),
+          profileGroups: _resolveProfileGroups(
+            row['profile_groups'],
+            linkedAccountProfiles: occurrenceLinkedAccountProfiles,
+          ),
+          tags: _resolveCanonicalTaxonomyLabels(
+            occurrenceTaxonomyTerms,
+          ).map(EventTagValue.new).toList(growable: false),
+        ),
+      );
+    }
+
+    return List<EventOccurrenceOption>.unmodifiable(resolved);
+  }
+
+  static List<EventProgrammingItem> _resolveProgrammingItems(Object? raw) {
+    final entries = _asOrderedList(raw);
+    if (entries.isEmpty) {
+      return const [];
+    }
+
+    final resolved = <EventProgrammingItem>[];
+    for (final entry in entries) {
+      final item = _asMap(entry);
+      final time = _asNullableString(item['time'])?.trim() ?? '';
+
+      final title = _asNullableString(item['title'])?.trim() ?? '';
+      final endTime = _asNullableString(item['end_time'])?.trim() ?? '';
+      final locationProfile = _toLinkedAccountProfile(
+        _asMap(
+          item['location_profile'] ??
+              item['location_account_profile'] ??
+              item['place_profile'],
+        ),
+      );
+      resolved.add(
+        EventProgrammingItem(
+          timeValue: EventProgrammingTimeValue(time),
+          endTimeValue: endTime.isEmpty
+              ? null
+              : EventProgrammingTimeValue(endTime),
+          titleValue: title.isEmpty
+              ? null
+              : EventLinkedAccountProfileTextValue(title),
+          linkedAccountProfiles: _resolveLinkedAccountProfiles(
+            linkedProfilesRaw: item['linked_account_profiles'],
+          ),
+          locationProfile: locationProfile,
+        ),
+      );
+    }
+
+    return List<EventProgrammingItem>.unmodifiable(resolved);
+  }
+
+  static List<Object?> _asOrderedList(dynamic value) {
+    if (value is List) {
+      return value;
+    }
+    if (value is Map) {
+      return value.values.toList(growable: false);
+    }
+    if (value is Iterable) {
+      return value.toList(growable: false);
+    }
+    return const <Object?>[];
+  }
+
+  static EventLinkedAccountProfile? _toLinkedAccountProfile(
+    Map<String, dynamic> profile,
+  ) {
+    final id = _asString(profile['id'])?.trim() ?? '';
+    if (id.isEmpty) {
+      return null;
+    }
+
+    final displayName =
+        _asString(profile['display_name'])?.trim() ??
+        _asString(profile['name'])?.trim() ??
+        '';
+    if (displayName.isEmpty) {
+      return null;
+    }
+
+    final taxonomyTermsRaw = profile['taxonomy_terms'];
+    final taxonomyTerms = EventLinkedAccountProfileTaxonomyTerms();
+    if (taxonomyTermsRaw is List) {
+      for (final entry in taxonomyTermsRaw) {
+        final term = _asMap(entry);
+        final type = _asString(term['type'])?.trim() ?? '';
+        final value = _asString(term['value'])?.trim() ?? '';
+        if (type.isEmpty || value.isEmpty) {
+          continue;
+        }
+        taxonomyTerms.addTerm(
+          typeValue: AccountProfileTagValue(type),
+          valueValue: AccountProfileTagValue(value),
+          nameValue: AccountProfileTagValue(
+            _asString(term['name'])?.trim() ??
+                _asString(term['label'])?.trim() ??
+                value,
+          ),
+          taxonomyNameValue: AccountProfileTagValue(
+            _asString(term['taxonomy_name'])?.trim() ?? '',
+          ),
+          labelValue: AccountProfileTagValue(
+            _asString(term['label'])?.trim() ?? '',
+          ),
+        );
+      }
+    }
+
+    final profileType =
+        _asString(profile['profile_type'])?.trim().isNotEmpty == true
+        ? _asString(profile['profile_type'])!.trim()
+        : (_asString(profile['party_type'])?.trim() ?? '');
+    final locationCoordinates = _resolveProfileCoordinates(profile);
+
+    return EventLinkedAccountProfile(
+      idValue: EventLinkedAccountProfileTextValue(id),
+      displayNameValue: EventLinkedAccountProfileTextValue(displayName),
+      profileTypeValue: AccountProfileTypeValue(profileType),
+      slugValue: _optionalLinkedAccountProfileSlugValue(profile: profile),
+      avatarUrlValue: _thumbUriValueOrNull(
+        _asNullableString(profile['avatar_url'] ?? profile['logo_url']),
+      ),
+      coverUrlValue: _thumbUriValueOrNull(
+        _asNullableString(profile['cover_url'] ?? profile['hero_image_url']),
+      ),
+      partyTypeValue: _textValueOrNull(
+        _asNullableString(profile['party_type']),
+      ),
+      locationAddressValue: _textValueOrNull(
+        _resolveProfileLocationAddress(profile),
+      ),
+      locationLatitudeValue: _latitudeValueOrNull(locationCoordinates.latitude),
+      locationLongitudeValue: _longitudeValueOrNull(
+        locationCoordinates.longitude,
+      ),
+      canOpenPublicDetailValue: _booleanValue(
+        _resolveCanOpenPublicDetail(profile),
+      ),
+      publicDetailPathValue: _textValueOrNull(
+        _resolvePublicDetailPath(profile),
+      ),
+      taxonomyTerms: taxonomyTerms,
+    );
+  }
+
+  static dynamic _extractProfileSlug(Map<String, dynamic> profile) {
+    return profile['slug'] ??
+        profile['account_profile_slug'] ??
+        profile['profile_slug'];
+  }
+
+  static ({double? latitude, double? longitude}) _resolveProfileCoordinates(
+    Map<String, dynamic> profile,
+  ) {
+    final directLatitude = _asDouble(profile['latitude'] ?? profile['lat']);
+    final directLongitude = _asDouble(profile['longitude'] ?? profile['lng']);
+    if (directLatitude != null && directLongitude != null) {
+      return (latitude: directLatitude, longitude: directLongitude);
+    }
+
+    final location = _asMap(profile['location']);
+    final locationLatitude = _asDouble(location['latitude'] ?? location['lat']);
+    final locationLongitude = _asDouble(
+      location['longitude'] ?? location['lng'],
+    );
+    if (locationLatitude != null && locationLongitude != null) {
+      return (latitude: locationLatitude, longitude: locationLongitude);
+    }
+
+    for (final geoSource in [location, _asMap(location['geo'])]) {
+      final coordinates = geoSource['coordinates'];
+      if (coordinates is List && coordinates.length >= 2) {
+        final lng = _asDouble(coordinates[0]);
+        final lat = _asDouble(coordinates[1]);
+        if (lat != null && lng != null) {
+          return (latitude: lat, longitude: lng);
+        }
+      }
+    }
+
+    return (latitude: directLatitude, longitude: directLongitude);
+  }
+
+  static String? _resolveProfileLocationAddress(Map<String, dynamic> profile) {
+    final location = _asMap(profile['location']);
+    return _asNullableString(
+      profile['location_address'] ??
+          profile['address'] ??
+          location['address'] ??
+          location['address_line'] ??
+          location['display_name'] ??
+          location['label'],
+    );
+  }
+
+  static SlugValue? _optionalLinkedAccountProfileSlugValue({
+    required Map<String, dynamic> profile,
+  }) {
+    final slug = _asNullableString(_extractProfileSlug(profile))?.trim() ?? '';
+    if (slug.isEmpty) {
+      return null;
+    }
+    return SlugValue()..parse(slug);
+  }
+
+  static bool _resolveCanOpenPublicDetail(Map<String, dynamic> profile) {
+    if (!_asBool(profile['can_open_public_detail'])) {
+      return false;
+    }
+
+    final publicDetailPath = _resolvePublicDetailPath(profile);
+    return publicDetailPath != null && publicDetailPath.isNotEmpty;
+  }
+
+  static String? _resolvePublicDetailPath(Map<String, dynamic> profile) {
+    final path = _asNullableString(profile['public_detail_path'])?.trim();
+    if (path == null || path.isEmpty) {
+      return null;
+    }
+    return path;
+  }
+
+  static EventLinkedAccountProfileTextValue? _textValueOrNull(String? raw) {
+    final normalized = raw?.trim();
+    if (normalized == null || normalized.isEmpty) {
+      return null;
+    }
+    return EventLinkedAccountProfileTextValue(normalized);
+  }
+
+  static DomainBooleanValue _booleanValue(bool raw) {
+    return DomainBooleanValue(defaultValue: false, isRequired: false)
+      ..parse(raw.toString());
+  }
+
+  static LatitudeValue? _latitudeValueOrNull(double? value) {
+    if (value == null) {
+      return null;
+    }
+    return LatitudeValue()..parse(value.toString());
+  }
+
+  static LongitudeValue? _longitudeValueOrNull(double? value) {
+    if (value == null) {
+      return null;
+    }
+    return LongitudeValue()..parse(value.toString());
+  }
+
+  static ThumbUriValue? _thumbUriValueOrNull(String? rawUrl) {
+    final normalized = normalizeTenantPublicMediaUrl(rawUrl);
+    if (normalized == null || normalized.isEmpty) {
+      return null;
+    }
+    final parsed = Uri.tryParse(normalized);
+    if (parsed == null) {
+      return null;
+    }
+    return ThumbUriValue(defaultValue: parsed, isRequired: true)
+      ..parse(normalized);
+  }
+
+  static int _asInt(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value) ?? 0;
+    }
+    return 0;
+  }
+
+  static double? _asDouble(dynamic value) {
+    if (value is double) {
+      return value;
+    }
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
+  }
+
+  static bool _asBool(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    if (value is num) {
+      return value != 0;
+    }
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' || normalized == '1';
+    }
+    return false;
+  }
+
+  static List<Map<String, dynamic>>? _asMapList(dynamic value) {
+    if (value is! List) {
+      return null;
+    }
+
+    return value
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
+
+  static String _resolveLocation({
+    required dynamic rawLocation,
+    required Map<String, dynamic> venuePayload,
+  }) {
+    final locationAsString = _asString(rawLocation);
+    if (locationAsString != null) {
+      return locationAsString;
+    }
+
+    final locationMap = _asMap(rawLocation);
+    final locationFromMap =
+        _asString(locationMap['display_name']) ??
+        _asString(locationMap['name']) ??
+        _asString(locationMap['label']) ??
+        _asString(locationMap['address']) ??
+        _asString(locationMap['address_line']);
+    if (locationFromMap != null) {
+      return locationFromMap;
+    }
+
+    final onlinePayload = _asMap(locationMap['online']);
+    final onlineLocation =
+        _asString(onlinePayload['label']) ??
+        _asString(onlinePayload['name']) ??
+        _asString(onlinePayload['title']) ??
+        _asString(onlinePayload['url']);
+    if (onlineLocation != null && onlineLocation.trim().isNotEmpty) {
+      return onlineLocation;
+    }
+
+    final mode = _asString(locationMap['mode'])?.trim().toLowerCase();
+    if (mode == 'online') {
+      return 'Online';
+    }
+
+    final venueName =
+        _asString(venuePayload['display_name']) ??
+        _asString(venuePayload['name']);
+    if (venueName != null && venueName.trim().isNotEmpty) {
+      return venueName;
+    }
+
+    if (locationMap.isNotEmpty) {
+      return 'Local a definir';
+    }
+
+    return '';
+  }
+
+  static ({double? latitude, double? longitude}) _resolveCoordinates({
+    required double? latitude,
+    required double? longitude,
+    required Map<String, dynamic> locationPayload,
+    required Map<String, dynamic> geoLocationPayload,
+  }) {
+    if (latitude != null && longitude != null) {
+      return (latitude: latitude, longitude: longitude);
+    }
+
+    final locationGeo = _asMap(locationPayload['geo']);
+    final geoSource = locationGeo.isNotEmpty ? locationGeo : geoLocationPayload;
+    final coordinates = geoSource['coordinates'];
+    if (coordinates is List && coordinates.length >= 2) {
+      final lng = _asDouble(coordinates[0]);
+      final lat = _asDouble(coordinates[1]);
+      if (lat != null && lng != null) {
+        return (latitude: lat, longitude: lng);
+      }
+    }
+
+    return (latitude: latitude, longitude: longitude);
+  }
+
+  static Map<String, dynamic> _resolveCanonicalThumbPayload(
+    Map<String, dynamic> json,
+  ) {
+    final heroImageUrl = _asNullableString(json['hero_image_url']);
+    if (heroImageUrl == null || heroImageUrl.isEmpty) {
+      return const <String, dynamic>{};
+    }
+
+    return <String, dynamic>{
+      'type': 'image',
+      'data': <String, dynamic>{'url': heroImageUrl},
+    };
+  }
+
+  EventFriendResume _mapEventFriendResume(Map<String, dynamic> dto) {
+    final displayName =
+        (dto['display_name'] as String?) ?? (dto['name'] as String?) ?? '';
+    final avatarUrlValue = UserAvatarValue();
+    final normalizedAvatarUrl = normalizeTenantPublicMediaUrl(
+      dto['avatar_url'] as String?,
+    );
+    if (normalizedAvatarUrl != null && normalizedAvatarUrl.isNotEmpty) {
+      avatarUrlValue.parse(normalizedAvatarUrl);
+    }
+
+    return EventFriendResume(
+      idValue: UserIdValue()..parse(dto['id'] as String? ?? ''),
+      displayNameValue: UserDisplayNameValue()..parse(displayName),
+      avatarUrlValue: avatarUrlValue,
+    );
+  }
+
+  SentInviteStatus _mapSentInviteStatus(Map<String, dynamic> dto) {
+    final friendMap = dto['friend'] as Map<String, dynamic>? ?? {};
+    final sentAtValue = DateTimeValue()..parse(dto['sent_at'] as String);
+    final respondedAtRaw = dto['responded_at'] as String?;
+    final respondedAtValue = respondedAtRaw == null
+        ? null
+        : (DateTimeValue()..parse(respondedAtRaw));
+    return SentInviteStatus(
+      friend: _mapEventFriendResume(friendMap),
+      status: _parseInviteStatus(dto['status'] as String?),
+      sentAtValue: sentAtValue,
+      respondedAtValue: respondedAtValue,
+    );
+  }
+
+  InviteStatus _parseInviteStatus(String? rawStatus) {
+    switch (rawStatus?.toLowerCase()) {
+      case 'accepted':
+        return InviteStatus.accepted;
+      case 'declined':
+        return InviteStatus.declined;
+      case 'viewed':
+        return InviteStatus.viewed;
+      case 'expired':
+        return InviteStatus.expired;
+      case 'superseded':
+        return InviteStatus.superseded;
+      case 'suppressed':
+        return InviteStatus.suppressed;
+      default:
+        return InviteStatus.pending;
+    }
+  }
+
+  PartnerResume _mapPartnerResume(Map<String, dynamic> dto) {
+    SlugValue? slugValue;
+    final slugRaw = dto['slug']?.toString();
+    if (slugRaw != null && slugRaw.isNotEmpty) {
+      slugValue = SlugValue()..parse(slugRaw);
+    }
+
+    InvitePartnerTaglineValue? taglineValue;
+    final taglineRaw = dto['tagline']?.toString();
+    if (taglineRaw != null && taglineRaw.isNotEmpty) {
+      taglineValue = InvitePartnerTaglineValue()..parse(taglineRaw);
+    }
+
+    InvitePartnerLogoImageValue? logoImageValue;
+    final logoUrl = normalizeTenantPublicMediaUrl(
+      dto['logo_url']?.toString() ?? dto['avatar_url']?.toString(),
+    );
+    if (logoUrl != null && logoUrl.isNotEmpty) {
+      logoImageValue = InvitePartnerLogoImageValue()..parse(logoUrl);
+    }
+
+    InvitePartnerHeroImageValue? heroImageValue;
+    final heroUrl = normalizeTenantPublicMediaUrl(
+      dto['hero_image_url']?.toString() ?? dto['cover_url']?.toString(),
+    );
+    if (heroUrl != null && heroUrl.isNotEmpty) {
+      heroImageValue = InvitePartnerHeroImageValue()..parse(heroUrl);
+    }
+    final publicDetailPath = dto['public_detail_path']?.toString().trim() ?? '';
+    final bio = _asNullableString(dto['bio'])?.trim();
+    final taxonomyLabels = _extractTaxonomyLabels(dto['taxonomy_terms']);
+    final galleryGroups = _mapAccountProfileGalleryGroups(
+      dto['gallery_groups'],
+    );
+
+    return PartnerResume(
+      idValue: MongoIDValue()..parse(dto['id']?.toString() ?? ''),
+      nameValue: InvitePartnerNameValue()
+        ..parse(dto['display_name']?.toString() ?? ''),
+      slugValue: slugValue,
+      type: InviteAccountProfileType.mercadoProducer,
+      profileTypeValue: AccountProfileTypeValue(
+        _asNullableString(dto['profile_type'])?.trim() ?? '',
+      ),
+      canOpenPublicDetailValue:
+          DomainBooleanValue(defaultValue: false, isRequired: false)..parse(
+            (_asBool(dto['can_open_public_detail']) &&
+                    publicDetailPath.isNotEmpty)
+                .toString(),
+          ),
+      publicDetailPathValue: AccountProfilePublicDetailPathValue(
+        publicDetailPath,
+      ),
+      taglineValue: taglineValue,
+      logoImageValue: logoImageValue,
+      heroImageValue: heroImageValue,
+      bioValue: bio == null || bio.isEmpty
+          ? null
+          : (DescriptionValue(defaultValue: '', minLenght: 0)..parse(bio)),
+      taxonomyLabelValues: taxonomyLabels
+          .map(AccountProfileTagValue.new)
+          .toList(growable: false),
+      galleryGroupValues: galleryGroups,
+      supportsPublicNavigationValue:
+          DomainBooleanValue(defaultValue: true, isRequired: false)..parse(
+            (_asBool(dto['supports_public_navigation']) ||
+                    !dto.containsKey('supports_public_navigation'))
+                .toString(),
+          ),
+    );
+  }
+
+  static List<String> _extractTaxonomyLabels(Object? raw) {
+    if (raw is! List) {
+      return const <String>[];
+    }
+
+    final labels = <String>[];
+    final seen = <String>{};
+    for (final entry in raw) {
+      final term = _asMap(entry);
+      final label =
+          _asNullableString(term['label'])?.trim() ??
+          _asNullableString(term['name'])?.trim() ??
+          _asNullableString(term['value'])?.trim() ??
+          '';
+      if (label.isEmpty || !seen.add(label.toLowerCase())) {
+        continue;
+      }
+      labels.add(label);
+    }
+
+    return List<String>.unmodifiable(labels);
+  }
+
+  static List<AccountProfileGalleryGroup> _mapAccountProfileGalleryGroups(
+    Object? raw,
+  ) {
+    if (raw is! List) {
+      return const <AccountProfileGalleryGroup>[];
+    }
+
+    final groups = <AccountProfileGalleryGroup>[];
+    for (var groupIndex = 0; groupIndex < raw.length; groupIndex++) {
+      final group = _asMap(raw[groupIndex]);
+      final subtitle = _asNullableString(group['subtitle'])?.trim() ?? '';
+      final itemsRaw = _asOrderedList(group['items']);
+      if (subtitle.isEmpty || itemsRaw.isEmpty) {
+        continue;
+      }
+
+      final items = <AccountProfileGalleryItem>[];
+      for (var itemIndex = 0; itemIndex < itemsRaw.length; itemIndex++) {
+        final item = _asMap(itemsRaw[itemIndex]);
+        final imageUrl = normalizeTenantPublicMediaUrl(
+          _asNullableString(item['image_url']),
+        );
+        final thumbUrl = normalizeTenantPublicMediaUrl(
+          _asNullableString(item['thumb_url']),
+        );
+        final cardUrl = normalizeTenantPublicMediaUrl(
+          _asNullableString(item['card_url']),
+        );
+        final modalUrl = normalizeTenantPublicMediaUrl(
+          _asNullableString(item['modal_url']),
+        );
+        if (imageUrl == null &&
+            thumbUrl == null &&
+            cardUrl == null &&
+            modalUrl == null) {
+          continue;
+        }
+
+        items.add(
+          AccountProfileGalleryItem(
+            itemIdValue: AccountProfileNestedGroupIdValue(
+              _asNullableString(item['item_id'])?.trim() ??
+                  'gallery-item-$groupIndex-$itemIndex',
+            ),
+            descriptionValue: AccountProfileNestedGroupMemberTextValue(
+              _asNullableString(item['description']) ?? '',
+            ),
+            orderValue: AccountProfileNestedGroupOrderValue(
+              _asInt(item['order']),
+            ),
+            imageUrlValue: _optionalThumbUriValue(imageUrl),
+            thumbUrlValue: _optionalThumbUriValue(thumbUrl),
+            cardUrlValue: _optionalThumbUriValue(cardUrl),
+            modalUrlValue: _optionalThumbUriValue(modalUrl),
+          ),
+        );
+      }
+
+      if (items.isEmpty) {
+        continue;
+      }
+
+      groups.add(
+        AccountProfileGalleryGroup(
+          groupIdValue: AccountProfileNestedGroupIdValue(
+            _asNullableString(group['group_id'])?.trim() ??
+                'gallery-group-$groupIndex',
+          ),
+          subtitleValue: AccountProfileNestedGroupLabelValue(subtitle),
+          orderValue: AccountProfileNestedGroupOrderValue(
+            _asInt(group['order']),
+          ),
+          items: items,
+        ),
+      );
+    }
+
+    return List<AccountProfileGalleryGroup>.unmodifiable(groups);
+  }
+
+  static ThumbUriValue _optionalThumbUriValue(String? url) {
+    final value = ThumbUriValue(defaultValue: Uri());
+    if (url != null && url.isNotEmpty) {
+      value.parse(url);
+    }
+    return value;
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'slug': slug,
+      'type': {
+        'id': type.id,
+        'name': type.name,
+        'slug': type.slug,
+        'description': type.description,
+        'icon': type.icon,
+        'color': type.color,
+      },
+      'title': title,
+      'content': content,
+      'location': location,
+      'venue': venue,
+      'latitude': latitude,
+      'longitude': longitude,
+      'thumb': thumb != null
+          ? {'type': thumb!.type, 'data': thumb!.data}
+          : null,
+      'date_time_start': dateTimeStart,
+      'date_time_end': dateTimeEnd,
+      'is_confirmed': isConfirmed,
+      'total_confirmed': totalConfirmed,
+      'received_invites': receivedInvites,
+      'sent_invites': sentInvites,
+      'friends_going': friendsGoing,
+      'taxonomy_terms': taxonomyTerms
+          .map((term) => Map<String, dynamic>.from(term))
+          .toList(growable: false),
+    };
+  }
+
+  static List<Map<String, dynamic>> _resolveCanonicalTaxonomyTerms(
+    Object? raw,
+  ) {
+    if (raw is! List) {
+      return const <Map<String, dynamic>>[];
+    }
+
+    final terms = <Map<String, dynamic>>[];
+    for (final entry in raw) {
+      final term = _asMap(entry);
+      if (term.isEmpty) {
+        continue;
+      }
+      terms.add(Map<String, dynamic>.unmodifiable(term));
+    }
+
+    return List<Map<String, dynamic>>.unmodifiable(terms);
+  }
+
+  static List<String> _resolveCanonicalTaxonomyLabels(Object? raw) {
+    if (raw is! List) {
+      return const <String>[];
+    }
+
+    final labels = <String>{};
+    for (final entry in raw) {
+      final term = _asMap(entry);
+      final label =
+          _asString(term['name'])?.trim() ??
+          _asString(term['label'])?.trim() ??
+          _asString(term['value'])?.trim() ??
+          '';
+      if (label.isEmpty) {
+        continue;
+      }
+      labels.add(label);
+    }
+
+    return List<String>.unmodifiable(labels);
+  }
+}

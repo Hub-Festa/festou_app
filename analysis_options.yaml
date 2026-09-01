@@ -1,5 +1,14 @@
+include: package:flutter_lints/flutter.yaml
+
+plugins:
+  belluga_analysis_plugin:
+    path: tool/belluga_analysis_plugin
+
 analyzer:
   exclude:
+    - lib/application/configurations/belluga_nattive_icons.dart
+    - "**/*.mocks.dart"
+    - "**/test_fixtures/**"
     - build/**
     - android/**
     - ios/**
@@ -7,7 +16,6 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
-include: package:flutter_lints/flutter.yaml
 
 linter:
   rules:

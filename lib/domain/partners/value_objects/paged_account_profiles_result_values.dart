@@ -1,0 +1,20 @@
+import 'package:belluga_discovery_filters/belluga_discovery_filters.dart';
+import 'package:festou_app/domain/partners/account_profile_model.dart';
+import 'package:festou_app/domain/partners/paged_account_profiles_result.dart';
+import 'package:festou_app/domain/value_objects/domain_boolean_value.dart';
+
+PagedAccountProfilesResult pagedAccountProfilesResultFromRaw({
+  required List<AccountProfileModel> profiles,
+  required Object? hasMore,
+  DiscoveryFilterRuntimeFacets? discoveryFilterFacets,
+  DiscoveryFilterCatalog? discoveryFilterCatalog,
+}) {
+  final hasMoreValue = DomainBooleanValue();
+  hasMoreValue.parse(hasMore.toString());
+  return PagedAccountProfilesResult(
+    profiles: profiles,
+    hasMoreValue: hasMoreValue,
+    discoveryFilterFacets: discoveryFilterFacets,
+    discoveryFilterCatalog: discoveryFilterCatalog,
+  );
+}

@@ -1,0 +1,55 @@
+part of '../tenant_admin_event.dart';
+
+class TenantAdminEventOccurrence {
+  TenantAdminEventOccurrence({
+    required this.dateTimeStartValue,
+    TenantAdminOptionalDateTimeValue? dateTimeEndValue,
+    TenantAdminOptionalTextValue? occurrenceIdValue,
+    TenantAdminOptionalTextValue? occurrenceSlugValue,
+    List<TenantAdminAccountProfileIdValue> relatedAccountProfileIdValues =
+        const <TenantAdminAccountProfileIdValue>[],
+    List<TenantAdminAccountProfile> relatedAccountProfiles =
+        const <TenantAdminAccountProfile>[],
+    List<TenantAdminNestedProfileGroup> profileGroups =
+        const <TenantAdminNestedProfileGroup>[],
+    List<TenantAdminEventProgrammingItem> programmingItems =
+        const <TenantAdminEventProgrammingItem>[],
+    TenantAdminTaxonomyTerms? taxonomyTerms,
+  })  : dateTimeEndValue =
+            dateTimeEndValue ?? TenantAdminOptionalDateTimeValue(null),
+        occurrenceIdValue = occurrenceIdValue ?? TenantAdminOptionalTextValue(),
+        occurrenceSlugValue =
+            occurrenceSlugValue ?? TenantAdminOptionalTextValue(),
+        relatedAccountProfileIdValues =
+            List<TenantAdminAccountProfileIdValue>.unmodifiable(
+          relatedAccountProfileIdValues,
+        ),
+        relatedAccountProfiles = List<TenantAdminAccountProfile>.unmodifiable(
+          relatedAccountProfiles,
+        ),
+        profileGroups = List<TenantAdminNestedProfileGroup>.unmodifiable(
+          profileGroups,
+        ),
+        programmingItems = List<TenantAdminEventProgrammingItem>.unmodifiable(
+          programmingItems,
+        ),
+        taxonomyTerms = taxonomyTerms ?? const TenantAdminTaxonomyTerms.empty();
+
+  final TenantAdminDateTimeValue dateTimeStartValue;
+  final TenantAdminOptionalDateTimeValue dateTimeEndValue;
+  final TenantAdminOptionalTextValue occurrenceIdValue;
+  final TenantAdminOptionalTextValue occurrenceSlugValue;
+  final List<TenantAdminAccountProfileIdValue> relatedAccountProfileIdValues;
+  final List<TenantAdminAccountProfile> relatedAccountProfiles;
+  final List<TenantAdminNestedProfileGroup> profileGroups;
+  final List<TenantAdminEventProgrammingItem> programmingItems;
+  final TenantAdminTaxonomyTerms taxonomyTerms;
+
+  DateTime get dateTimeStart => dateTimeStartValue.value;
+  DateTime? get dateTimeEnd => dateTimeEndValue.value;
+  String? get occurrenceId => occurrenceIdValue.nullableValue;
+  String? get occurrenceSlug => occurrenceSlugValue.nullableValue;
+  List<TenantAdminAccountProfileIdValue> get relatedAccountProfileIds =>
+      relatedAccountProfileIdValues;
+  int get programmingCount => programmingItems.length;
+}

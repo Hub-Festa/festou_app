@@ -1,0 +1,760 @@
+import 'dart:async';
+
+import 'package:belluga_contact_channels/belluga_contact_channels.dart';
+import 'package:festou_app/application/proximity_preferences/account_profile_reference_point_resolver.dart';
+import 'package:festou_app/application/rich_text/account_profile_rich_text_block.dart';
+import 'package:festou_app/application/rich_text/safe_rich_html.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/proximity_preferences/proximity_preference.dart';
+import 'package:festou_app/domain/partners/account_profile_model.dart';
+import 'package:festou_app/domain/partners/account_profile_nested_group.dart';
+import 'package:festou_app/domain/partners/profile_type_capabilities.dart';
+import 'package:festou_app/domain/partners/profile_type_registry.dart';
+import 'package:festou_app/domain/partners/projections/partner_profile_config.dart';
+import 'package:festou_app/domain/partners/projections/partner_profile_module_data.dart';
+import 'package:festou_app/domain/partners/projections/value_objects/partner_projection_text_values.dart';
+import 'package:festou_app/domain/repositories/telemetry_repository_contract.dart';
+import 'package:festou_app/domain/partners/services/partner_profile_config_builder.dart';
+import 'package:festou_app/domain/partners/value_objects/profile_type_key_value.dart';
+import 'package:festou_app/domain/repositories/account_profiles_repository_contract.dart';
+import 'package:festou_app/domain/repositories/auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/invites_repository_contract.dart';
+import 'package:festou_app/domain/repositories/proximity_preferences_repository_contract.dart';
+import 'package:festou_app/domain/repositories/user_events_repository_contract.dart';
+import 'package:festou_app/domain/repositories/value_objects/telemetry_repository_contract_values.dart';
+import 'package:festou_app/domain/repositories/value_objects/user_events_repository_contract_values.dart';
+import 'package:festou_app/presentation/tenant_public/partners/controllers/account_profile_detail_state.dart';
+import 'package:festou_app/presentation/tenant_public/partners/controllers/account_profile_agenda_presentation.dart';
+import 'package:festou_app/domain/upcoming_ocurrence/projections/upcoming_ocurrence_resume.dart';
+import 'package:festou_app/presentation/shared/visuals/account_profile_visual_resolver.dart';
+import 'package:festou_app/presentation/shared/visuals/resolved_account_profile_visual.dart';
+import 'package:event_tracker_handler/event_tracker_handler.dart';
+import 'package:get_it/get_it.dart';
+import 'package:stream_value/core/stream_value.dart';
+import 'package:value_object_pattern/domain/value_objects/mongo_id_value.dart';
+import 'package:festou_app/domain/value_objects/title_value.dart';
+
+enum AccountProfileFavoriteToggleOutcome { toggled, requiresAuthentication }
+
+class AccountProfileDetailController implements Disposable {
+  AccountProfileDetailController({
+    AccountProfilesRepositoryContract? accountProfilesRepository,
+    PartnerProfileConfigBuilder? profileConfigBuilder,
+    AuthRepositoryContract? authRepository,
+    UserEventsRepositoryContract? userEventsRepository,
+    InvitesRepositoryContract? invitesRepository,
+    ProximityPreferencesRepositoryContract? proximityPreferencesRepository,
+    TelemetryRepositoryContract? telemetryRepository,
+  }) : _accountProfilesRepository =
+           accountProfilesRepository ??
+           GetIt.I.get<AccountProfilesRepositoryContract>(),
+       _profileConfigBuilder =
+           profileConfigBuilder ??
+           (GetIt.I.isRegistered<PartnerProfileConfigBuilder>()
+               ? GetIt.I.get<PartnerProfileConfigBuilder>()
+               : PartnerProfileConfigBuilder()),
+       _authRepository =
+           authRepository ??
+           (GetIt.I.isRegistered<AuthRepositoryContract>()
+               ? GetIt.I.get<AuthRepositoryContract>()
+               : null),
+       _userEventsRepository =
+           userEventsRepository ??
+           (GetIt.I.isRegistered<UserEventsRepositoryContract>()
+               ? GetIt.I.get<UserEventsRepositoryContract>()
+               : null),
+       _invitesRepository =
+           invitesRepository ??
+           (GetIt.I.isRegistered<InvitesRepositoryContract>()
+               ? GetIt.I.get<InvitesRepositoryContract>()
+               : null),
+       _proximityPreferencesRepository =
+           proximityPreferencesRepository ??
+           (GetIt.I.isRegistered<ProximityPreferencesRepositoryContract>()
+               ? GetIt.I.get<ProximityPreferencesRepositoryContract>()
+               : null),
+       _telemetryRepository =
+           telemetryRepository ??
+           (GetIt.I.isRegistered<TelemetryRepositoryContract>()
+               ? GetIt.I.get<TelemetryRepositoryContract>()
+               : null) {
+    _favoriteIdsSubscription = _accountProfilesRepository
+        .favoriteAccountProfileIdsStreamValue
+        .stream
+        .listen((ids) {
+          favoriteIdsStreamValue.addValue(
+            ids.map((entry) => entry.value).toSet(),
+          );
+        });
+    favoriteIdsStreamValue.addValue(
+      _accountProfilesRepository.favoriteAccountProfileIdsStreamValue.value
+          .map((entry) => entry.value)
+          .toSet(),
+    );
+    _confirmedEventIdsSubscription = _userEventsRepository
+        ?.confirmedOccurrenceIdsStream
+        .stream
+        .listen((_) {
+          _bumpAgendaStatusRevision();
+        });
+    _pendingInvitesSubscription = _invitesRepository
+        ?.pendingInvitesStreamValue
+        .stream
+        .listen((_) {
+          _bumpAgendaStatusRevision();
+        });
+  }
+
+  final AccountProfilesRepositoryContract _accountProfilesRepository;
+  final PartnerProfileConfigBuilder _profileConfigBuilder;
+  final AuthRepositoryContract? _authRepository;
+  final UserEventsRepositoryContract? _userEventsRepository;
+  final InvitesRepositoryContract? _invitesRepository;
+  final ProximityPreferencesRepositoryContract? _proximityPreferencesRepository;
+  final TelemetryRepositoryContract? _telemetryRepository;
+  StreamSubscription<Set<AccountProfilesRepositoryContractPrimString>>?
+  _favoriteIdsSubscription;
+  StreamSubscription<Set<UserEventsRepositoryContractPrimString>>?
+  _confirmedEventIdsSubscription;
+  StreamSubscription<dynamic>? _pendingInvitesSubscription;
+
+  final _detailStateStreamValue = StreamValue<AccountProfileDetailState>(
+    defaultValue: AccountProfileDetailState.empty,
+  );
+  StreamValue<AccountProfileDetailState> get detailStateStreamValue =>
+      _detailStateStreamValue;
+  final isLoadingStreamValue = StreamValue<bool>(defaultValue: false);
+  final favoriteIdsStreamValue = StreamValue<Set<String>>(
+    defaultValue: const {},
+  );
+  StreamValue<Set<String>> get favoriteIdsStream => favoriteIdsStreamValue;
+  final agendaStatusRevisionStreamValue = StreamValue<int>(defaultValue: 0);
+  final errorMessageStreamValue = StreamValue<String>(defaultValue: '');
+  final profileConfigStreamValue = StreamValue<PartnerProfileConfig?>(
+    defaultValue: null,
+  );
+  final moduleDataStreamValue = StreamValue<Map<ProfileModuleId, Object?>>(
+    defaultValue: const {},
+  );
+  final StreamValue<ProximityPreference?> _emptyProximityPreferenceStreamValue =
+      StreamValue<ProximityPreference?>(defaultValue: null);
+  final Set<String> _contactBubbleImpressionKeys = <String>{};
+
+  StreamValue<ProximityPreference?> get proximityPreferenceStreamValue =>
+      _proximityPreferencesRepository?.proximityPreferenceStreamValue ??
+      _emptyProximityPreferenceStreamValue;
+
+  bool get isAuthorized => _authRepository?.isAuthorized ?? false;
+
+  Future<void> loadResolvedAccountProfile(
+    AccountProfileModel accountProfile,
+  ) async {
+    errorMessageStreamValue.addValue('');
+    _detailStateStreamValue.addValue(
+      AccountProfileDetailState(accountProfile: accountProfile),
+    );
+    final capabilities = _resolveRegistry()?.capabilitiesFor(
+      ProfileTypeKeyValue(accountProfile.type),
+    );
+    final rawConfig = _profileConfigBuilder.build(
+      accountProfile,
+      capabilities: capabilities,
+    );
+    try {
+      final moduleData = await _buildModuleData(
+        accountProfile,
+        capabilities: capabilities,
+      );
+      profileConfigStreamValue.addValue(
+        _filterConfigToAvailableModules(rawConfig, moduleData),
+      );
+      moduleDataStreamValue.addValue(moduleData);
+    } catch (_) {
+      errorMessageStreamValue.addValue('Falha ao preparar o perfil');
+      profileConfigStreamValue.addValue(
+        _filterConfigToAvailableModules(rawConfig, const {}),
+      );
+      moduleDataStreamValue.addValue(const {});
+    }
+  }
+
+  Future<void> ensureNestedGroupMembersLoaded(
+    AccountProfileNestedGroup group,
+  ) async {
+    final membersPath = group.membersPath?.trim();
+    if (membersPath == null || membersPath.isEmpty) {
+      return;
+    }
+
+    await _accountProfilesRepository.loadNestedGroupMembersByPath(
+      AccountProfilesRepositoryContractPrimString.fromRaw(
+        membersPath,
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+  }
+
+  Future<void> loadMoreNestedGroupMembers(
+    AccountProfileNestedGroup group,
+  ) async {
+    final membersPath = group.membersPath?.trim();
+    if (membersPath == null || membersPath.isEmpty) {
+      return;
+    }
+
+    await _accountProfilesRepository.loadMoreNestedGroupMembersByPath(
+      AccountProfilesRepositoryContractPrimString.fromRaw(
+        membersPath,
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+  }
+
+  StreamValue<List<AccountProfileNestedGroupMember>>
+  nestedGroupMembersStreamValue(AccountProfileNestedGroup group) {
+    return _accountProfilesRepository.nestedGroupMembersStreamValue(
+      AccountProfilesRepositoryContractPrimString.fromRaw(
+        group.membersPath?.trim() ?? '',
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+  }
+
+  StreamValue<AccountProfilesRepositoryContractPrimBool>
+  hasMoreNestedGroupMembersStreamValue(AccountProfileNestedGroup group) {
+    return _accountProfilesRepository.hasMoreNestedGroupMembersStreamValue(
+      AccountProfilesRepositoryContractPrimString.fromRaw(
+        group.membersPath?.trim() ?? '',
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+  }
+
+  StreamValue<AccountProfilesRepositoryContractPrimBool>
+  isNestedGroupMembersPageLoadingStreamValue(AccountProfileNestedGroup group) {
+    return _accountProfilesRepository
+        .isNestedGroupMembersPageLoadingStreamValue(
+          AccountProfilesRepositoryContractPrimString.fromRaw(
+            group.membersPath?.trim() ?? '',
+            defaultValue: '',
+            isRequired: true,
+          ),
+        );
+  }
+
+  StreamValue<AccountProfilesRepositoryContractPrimString?>
+  nestedGroupMembersErrorStreamValue(AccountProfileNestedGroup group) {
+    return _accountProfilesRepository.nestedGroupMembersErrorStreamValue(
+      AccountProfilesRepositoryContractPrimString.fromRaw(
+        group.membersPath?.trim() ?? '',
+        defaultValue: '',
+        isRequired: true,
+      ),
+    );
+  }
+
+  AccountProfileFavoriteToggleOutcome toggleFavorite(String accountProfileId) {
+    if (!isAuthorized) {
+      return AccountProfileFavoriteToggleOutcome.requiresAuthentication;
+    }
+    _accountProfilesRepository.toggleFavorite(
+      AccountProfilesRepositoryContractPrimString.fromRaw(accountProfileId),
+    );
+    return AccountProfileFavoriteToggleOutcome.toggled;
+  }
+
+  bool isFavorite(String accountProfileId) {
+    return _accountProfilesRepository
+        .isFavorite(
+          AccountProfilesRepositoryContractPrimString.fromRaw(accountProfileId),
+        )
+        .value;
+  }
+
+  bool isFavoritable(AccountProfileModel accountProfile) {
+    final registry = _resolveRegistry();
+    if (registry == null || registry.isEmpty) return false;
+    return registry.isFavoritableFor(ProfileTypeKeyValue(accountProfile.type));
+  }
+
+  bool canUseAsReferencePoint(AccountProfileModel accountProfile) {
+    return AccountProfileReferencePointResolver.canUseAccountProfile(
+      accountProfile,
+      capabilities: _capabilitiesFor(accountProfile),
+    );
+  }
+
+  bool isCurrentReferencePoint(AccountProfileModel accountProfile) {
+    return AccountProfileReferencePointResolver.matchesAccountProfile(
+      _proximityPreferencesRepository
+          ?.proximityPreference
+          ?.locationPreference
+          .fixedReference,
+      accountProfile,
+    );
+  }
+
+  Future<bool> setAsReferencePoint(AccountProfileModel accountProfile) async {
+    final repository = _proximityPreferencesRepository;
+    if (repository == null || !canUseAsReferencePoint(accountProfile)) {
+      return false;
+    }
+    final fixedReference =
+        AccountProfileReferencePointResolver.buildFromAccountProfile(
+          accountProfile,
+        );
+    if (fixedReference == null) {
+      return false;
+    }
+    await repository.setFixedReference(fixedReference: fixedReference);
+    return true;
+  }
+
+  Future<bool> clearReferencePoint() async {
+    final repository = _proximityPreferencesRepository;
+    if (repository == null) {
+      return false;
+    }
+    await repository.clearFixedReference();
+    return true;
+  }
+
+  ResolvedAccountProfileVisual resolvedVisualFor(
+    AccountProfileModel accountProfile,
+  ) {
+    return AccountProfileVisualResolver.resolve(
+      accountProfile: accountProfile,
+      registry: _resolveRegistry(),
+    );
+  }
+
+  String typeLabelFor(AccountProfileModel accountProfile) {
+    return resolvedVisualFor(accountProfile).typeLabel;
+  }
+
+  bool hasContactChannels(AccountProfileModel accountProfile) {
+    return _capabilitiesFor(accountProfile)?.hasContactChannels ?? false;
+  }
+
+  List<BellugaContactChannel> availableContactChannelsFor(
+    AccountProfileModel accountProfile,
+  ) {
+    if (!hasContactChannels(accountProfile)) {
+      return const <BellugaContactChannel>[];
+    }
+    return accountProfile.effectiveContactChannels
+        .where((channel) => resolveContactChannel(channel) != null)
+        .toList(growable: false);
+  }
+
+  bool shouldRenderContactTab(AccountProfileModel accountProfile) {
+    return availableContactChannelsFor(accountProfile).isNotEmpty;
+  }
+
+  BellugaContactChannel? resolvedBubbleChannelFor(
+    AccountProfileModel accountProfile,
+  ) {
+    final channel = accountProfile.effectiveContactBubbleChannel;
+    if (channel == null ||
+        !channel.isBubbleEligible ||
+        !hasContactChannels(accountProfile)) {
+      return null;
+    }
+    return resolveContactChannel(channel) == null ? null : channel;
+  }
+
+  BellugaContactResolution? resolveContactChannel(
+    BellugaContactChannel channel, {
+    BellugaContactInitialMessage? initialMessage,
+  }) {
+    return BellugaContactChannelResolver.resolveChannel(
+      channel,
+      prefilledMessage: initialMessage?.message,
+    );
+  }
+
+  void trackContactBubbleImpression(AccountProfileModel accountProfile) {
+    final channel = resolvedBubbleChannelFor(accountProfile);
+    if (channel == null) {
+      return;
+    }
+    final impressionKey = '${accountProfile.id}:${channel.id}';
+    if (!_contactBubbleImpressionKeys.add(impressionKey)) {
+      return;
+    }
+    _logContactTelemetry(
+      EventTrackerEvents.viewContent,
+      eventName: 'account_profile_contact_bubble_impression',
+      accountProfile: accountProfile,
+      channel: channel,
+      origin: 'bubble',
+    );
+  }
+
+  void trackContactBubbleTap(AccountProfileModel accountProfile) {
+    final channel = resolvedBubbleChannelFor(accountProfile);
+    if (channel == null) {
+      return;
+    }
+    _logContactTelemetry(
+      EventTrackerEvents.buttonClick,
+      eventName: 'account_profile_contact_bubble_tap',
+      accountProfile: accountProfile,
+      channel: channel,
+      origin: 'bubble',
+    );
+  }
+
+  void trackContactChooserOpen(
+    AccountProfileModel accountProfile, {
+    required BellugaContactChannel channel,
+    required String origin,
+  }) {
+    _logContactTelemetry(
+      EventTrackerEvents.buttonClick,
+      eventName: 'account_profile_contact_chooser_open',
+      accountProfile: accountProfile,
+      channel: channel,
+      origin: origin,
+    );
+  }
+
+  void trackContactCtaTap(
+    AccountProfileModel accountProfile, {
+    required BellugaContactChannel channel,
+    required BellugaContactInitialMessage initialMessage,
+    required String origin,
+  }) {
+    _logContactTelemetry(
+      EventTrackerEvents.buttonClick,
+      eventName: 'account_profile_contact_cta_tap',
+      accountProfile: accountProfile,
+      channel: channel,
+      origin: origin,
+      cta: initialMessage,
+    );
+  }
+
+  void trackContactDirectClick(
+    AccountProfileModel accountProfile, {
+    required BellugaContactChannel channel,
+    required String origin,
+  }) {
+    _logContactTelemetry(
+      EventTrackerEvents.buttonClick,
+      eventName: 'account_profile_contact_direct_click',
+      accountProfile: accountProfile,
+      channel: channel,
+      origin: origin,
+    );
+  }
+
+  ProfileTypeRegistry? _resolveRegistry() {
+    if (!GetIt.I.isRegistered<AppData>()) {
+      return null;
+    }
+    return GetIt.I.get<AppData>().profileTypeRegistry;
+  }
+
+  ProfileTypeCapabilities? _capabilitiesFor(
+    AccountProfileModel accountProfile,
+  ) {
+    return _resolveRegistry()?.capabilitiesFor(
+      ProfileTypeKeyValue(accountProfile.type),
+    );
+  }
+
+  String? get authenticatedUserDisplayName {
+    final raw = _authRepository?.userStreamValue.value?.profile.nameValue?.value
+        .trim();
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+    return raw;
+  }
+
+  Uri? buildTenantPublicUriFromPath(String? rawPath) {
+    final normalizedPath = rawPath?.trim();
+    if (normalizedPath == null || normalizedPath.isEmpty) {
+      return null;
+    }
+    if (!GetIt.I.isRegistered<AppData>()) {
+      return null;
+    }
+    return GetIt.I.get<AppData>().mainDomainValue.value.resolve(normalizedPath);
+  }
+
+  void _bumpAgendaStatusRevision() {
+    agendaStatusRevisionStreamValue.addValue(
+      agendaStatusRevisionStreamValue.value + 1,
+    );
+  }
+
+  bool isOccurrenceConfirmed(String occurrenceId) {
+    final repository = _userEventsRepository;
+    if (repository == null) {
+      return false;
+    }
+    return repository
+        .isOccurrenceConfirmed(
+          userEventsRepoString(
+            occurrenceId,
+            defaultValue: '',
+            isRequired: true,
+          ),
+        )
+        .value;
+  }
+
+  int pendingInviteCount(String occurrenceId) {
+    final repository = _invitesRepository;
+    if (repository == null) {
+      return 0;
+    }
+    return repository.pendingInvitesStreamValue.value
+        .where((invite) => invite.occurrenceId == occurrenceId)
+        .length;
+  }
+
+  String? distanceLabelFor(
+    AccountProfileModel accountProfile,
+    UpcomingOcurrenceResume event,
+  ) {
+    return _distanceLabelForVenueId(accountProfile, event.venueId);
+  }
+
+  String? distanceLabelForLiveOccurrence(
+    AccountProfileModel accountProfile,
+    PartnerEventView event,
+  ) {
+    return _distanceLabelForVenueId(accountProfile, event.venueId);
+  }
+
+  String? _distanceLabelForVenueId(
+    AccountProfileModel accountProfile,
+    String? venueId,
+  ) {
+    final distanceMeters = accountProfile.distanceMeters;
+    if (distanceMeters == null ||
+        venueId == null ||
+        venueId != accountProfile.id) {
+      return null;
+    }
+    if (distanceMeters < 1000) {
+      return '${distanceMeters.round()} m';
+    }
+    return '${(distanceMeters / 1000).toStringAsFixed(1)} km';
+  }
+
+  Future<Map<ProfileModuleId, Object?>> _buildModuleData(
+    AccountProfileModel accountProfile, {
+    ProfileTypeCapabilities? capabilities,
+  }) async {
+    final modules = <ProfileModuleId, Object?>{};
+    final richTextBlocks = _buildRichTextModuleData(
+      accountProfile,
+      capabilities: capabilities,
+    );
+    if (richTextBlocks.isNotEmpty) {
+      modules[ProfileModuleId.richText] = richTextBlocks;
+    }
+    final canRenderGallery = capabilities?.hasGallery ?? false;
+    if (canRenderGallery && accountProfile.galleryGroups.isNotEmpty) {
+      modules[ProfileModuleId.photoGallery] = accountProfile.galleryGroups;
+    }
+    final location = _buildLocationModuleData(accountProfile);
+    if (location != null) {
+      modules[ProfileModuleId.locationInfo] = location;
+    }
+    final agenda = _buildAgendaModuleData(accountProfile);
+    if (!agenda.isEmpty) {
+      modules[ProfileModuleId.agendaList] = agenda;
+    }
+    return modules;
+  }
+
+  PartnerProfileConfig _filterConfigToAvailableModules(
+    PartnerProfileConfig config,
+    Map<ProfileModuleId, Object?> moduleData,
+  ) {
+    final filteredTabs = config.tabs
+        .map((tab) {
+          final modules = tab.modules
+              .where((module) => moduleData.containsKey(module.id))
+              .toList(growable: false);
+          if (modules.isEmpty) {
+            return null;
+          }
+          return ProfileTabConfig(titleValue: tab.titleValue, modules: modules);
+        })
+        .whereType<ProfileTabConfig>()
+        .toList(growable: false);
+
+    return PartnerProfileConfig(partner: config.partner, tabs: filteredTabs);
+  }
+
+  List<AccountProfileRichTextBlock> _buildRichTextModuleData(
+    AccountProfileModel accountProfile, {
+    ProfileTypeCapabilities? capabilities,
+  }) {
+    final canRenderBio = capabilities?.hasBio ?? true;
+    final canRenderContent = capabilities?.hasContent ?? true;
+    final rawBio = accountProfile.bio?.trim() ?? '';
+    final rawContent = accountProfile.content?.trim() ?? '';
+    final canonicalBio = canRenderBio
+        ? SafeRichHtml.canonicalize(rawBio, allowExplicitHttpsLinks: true)
+        : '';
+    final canonicalContent = canRenderContent
+        ? SafeRichHtml.canonicalize(rawContent, allowExplicitHttpsLinks: true)
+        : '';
+    final hasBio = canonicalBio.isNotEmpty;
+    final hasContent = canonicalContent.isNotEmpty;
+
+    if (!hasBio && !hasContent) {
+      return const <AccountProfileRichTextBlock>[];
+    }
+
+    if (hasBio && hasContent) {
+      return [
+        AccountProfileRichTextBlock(title: 'Sobre', html: canonicalBio),
+        AccountProfileRichTextBlock(title: 'Conteúdo', html: canonicalContent),
+      ];
+    }
+
+    return [
+      AccountProfileRichTextBlock(
+        html: hasBio ? canonicalBio : canonicalContent,
+      ),
+    ];
+  }
+
+  PartnerLocationView? _buildLocationModuleData(
+    AccountProfileModel accountProfile,
+  ) {
+    final lat = accountProfile.locationLat;
+    final lng = accountProfile.locationLng;
+    final address = accountProfile.locationAddress?.trim();
+    final hasCoordinates = lat != null && lng != null;
+    final hasAddress = address != null && address.isNotEmpty;
+    if (!hasCoordinates && !hasAddress) {
+      return null;
+    }
+
+    return PartnerLocationView(
+      addressValue: partnerProjectionRequiredText(address ?? ''),
+      statusValue: partnerProjectionRequiredText('location_available'),
+      latValue: hasCoordinates
+          ? partnerProjectionOptionalText(lat.toString())
+          : null,
+      lngValue: hasCoordinates
+          ? partnerProjectionOptionalText(lng.toString())
+          : null,
+    );
+  }
+
+  AccountProfileAgendaPresentation _buildAgendaModuleData(
+    AccountProfileModel accountProfile,
+  ) {
+    return buildAgendaPresentation(accountProfile, accountProfile.agendaEvents);
+  }
+
+  AccountProfileAgendaPresentation buildAgendaPresentation(
+    AccountProfileModel accountProfile,
+    List<PartnerEventView> events, {
+    DateTime? now,
+  }) {
+    final referenceNow = now ?? DateTime.now();
+    final liveOccurrences =
+        events
+            .where((event) => _isHappeningNow(event, referenceNow))
+            .toList(growable: false)
+          ..sort(_compareAgendaEvents);
+    final liveIds = liveOccurrences.map((event) => event.uniqueId).toSet();
+    final upcomingOccurrences = events
+        .where((event) => !liveIds.contains(event.uniqueId))
+        .map(
+          (event) => UpcomingOcurrenceResume.fromPartnerEventView(
+            event,
+            viewedProfileId: MongoIDValue()..parse(accountProfile.id),
+            viewedProfileName: TitleValue(minLenght: 1)
+              ..parse(accountProfile.name),
+          ),
+        )
+        .toList(growable: false);
+
+    return AccountProfileAgendaPresentation(
+      liveOccurrences: liveOccurrences,
+      upcomingOccurrences: upcomingOccurrences,
+    );
+  }
+
+  bool _isHappeningNow(PartnerEventView event, DateTime now) {
+    final start = event.startDateTime;
+    final end = event.endDateTime ?? start.add(const Duration(hours: 3));
+    if (end.isBefore(start)) {
+      return false;
+    }
+    return !now.isBefore(start) && !now.isAfter(end);
+  }
+
+  int _compareAgendaEvents(PartnerEventView left, PartnerEventView right) {
+    final byStart = left.startDateTime.compareTo(right.startDateTime);
+    if (byStart != 0) {
+      return byStart;
+    }
+    return left.occurrenceId.compareTo(right.occurrenceId);
+  }
+
+  void _logContactTelemetry(
+    EventTrackerEvents event, {
+    required String eventName,
+    required AccountProfileModel accountProfile,
+    required BellugaContactChannel channel,
+    required String origin,
+    BellugaContactInitialMessage? cta,
+  }) {
+    final telemetry = _telemetryRepository;
+    if (telemetry == null) {
+      return;
+    }
+    final effectiveSource =
+        accountProfile.effectiveContactSourceProfile ??
+        accountProfile.contactSourceProfile;
+    unawaited(
+      telemetry.logEvent(
+        event,
+        eventName: telemetryRepoString(eventName),
+        properties: telemetryRepoMap(<String, Object?>{
+          'account_profile_id': accountProfile.id,
+          'channel_type': channel.type.rawValue,
+          'channel_id': channel.id,
+          'contact_source_mode': accountProfile.contactMode.rawValue,
+          'surface_origin': origin,
+          if (effectiveSource != null)
+            'contact_source_profile_id': effectiveSource.id,
+          if (cta != null) 'cta_id': cta.id,
+          if (cta != null) 'cta_label': cta.cta,
+        }),
+      ),
+    );
+  }
+
+  @override
+  void onDispose() {
+    _favoriteIdsSubscription?.cancel();
+    _confirmedEventIdsSubscription?.cancel();
+    _pendingInvitesSubscription?.cancel();
+    _detailStateStreamValue.dispose();
+    errorMessageStreamValue.dispose();
+    favoriteIdsStreamValue.dispose();
+    agendaStatusRevisionStreamValue.dispose();
+    isLoadingStreamValue.dispose();
+    profileConfigStreamValue.dispose();
+    moduleDataStreamValue.dispose();
+    _emptyProximityPreferenceStreamValue.dispose();
+  }
+}

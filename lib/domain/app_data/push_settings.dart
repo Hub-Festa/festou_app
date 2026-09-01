@@ -1,0 +1,19 @@
+import 'package:festou_app/domain/app_data/value_object/push_enabled_value.dart';
+import 'package:festou_app/domain/app_data/value_object/push_throttles_value.dart';
+import 'package:festou_app/domain/app_data/value_object/push_types_value.dart';
+
+class PushSettings {
+  PushSettings({
+    required this.enabledValue,
+    required this.typeValues,
+    required this.throttlesValue,
+  });
+
+  final PushEnabledValue enabledValue;
+  final PushTypesValue typeValues;
+  final PushThrottlesValue throttlesValue;
+
+  bool get enabled => enabledValue.value;
+  PushTypesValue get types => typeValues;
+  PushThrottlesValue get throttles => throttlesValue;
+}

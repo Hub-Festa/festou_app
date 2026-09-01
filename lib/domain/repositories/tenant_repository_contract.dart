@@ -1,0 +1,56 @@
+import 'package:festou_app/application/configurations/belluga_constants.dart';
+import 'package:festou_app/domain/app_data/app_data.dart';
+import 'package:festou_app/domain/tenant/tenant.dart';
+import 'package:festou_app/domain/tenant/value_objects/tenant_lookup_domain_value.dart';
+
+abstract class TenantRepositoryContract {
+  AppData get appData;
+
+  Future<Tenant> fetchTenant();
+
+  Tenant? tenant;
+
+  String get landlordDomain => BellugaConstants.landlordDomain;
+
+  String get landlordHost {
+    final raw = landlordDomain.trim();
+    if (raw.isEmpty) {
+      return '';
+    }
+
+    final parsed = Uri.tryParse(raw);
+    if (parsed != null && parsed.host.trim().isNotEmpty) {
+      return parsed.host.trim();
+    }
+
+    return raw;
+  }
+
+  Future<void> init() async {
+    final loadedTenant = await _getTenant();
+    _setTenant(loadedTenant);
+  }
+
+  bool get isLandlordRequest =>
+      landlordHost.isNotEmpty && landlordHost == appData.hostname;
+
+  bool get isProperTenantRegistered {
+    final currentTenant = tenant;
+    if (currentTenant == null) {
+      return false;
+    }
+
+    final hostnameValue = TenantLookupDomainValue()..parse(appData.hostname);
+    return currentTenant.hasDomain(hostnameValue).value;
+  }
+
+  Future<Tenant> _getTenant() async {
+    return fetchTenant();
+  }
+
+  void _setTenant(Tenant newTenant) => tenant = newTenant;
+
+  void clearTenant() {
+    tenant = null;
+  }
+}

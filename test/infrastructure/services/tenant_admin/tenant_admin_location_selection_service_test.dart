@@ -1,0 +1,18 @@
+import 'package:festou_app/domain/tenant_admin/tenant_admin_location.dart';
+import 'package:festou_app/infrastructure/services/tenant_admin/tenant_admin_location_selection_service.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('setInitialLocation(null) clears previous pending selection', () {
+    final service = TenantAdminLocationSelectionService();
+
+    service.setInitialLocation(
+      tenantAdminLocationFromRaw(latitude: -20.0, longitude: -40.0),
+    );
+    expect(service.currentLocation, isNotNull);
+
+    service.setInitialLocation(null);
+
+    expect(service.currentLocation, isNull);
+  });
+}

@@ -1,0 +1,30 @@
+import 'package:festou_app/domain/invites/projections/friend_resume.dart';
+import 'package:festou_app/domain/user/friend.dart';
+import 'package:festou_app/domain/repositories/value_objects/friends_repository_contract_bool_value.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+typedef FriendsRepositoryContractPrimString = String;
+typedef FriendsRepositoryContractPrimInt = int;
+typedef FriendsRepositoryContractPrimBool = bool;
+typedef FriendsRepositoryContractPrimDouble = double;
+typedef FriendsRepositoryContractPrimDateTime = DateTime;
+typedef FriendsRepositoryContractPrimDynamic = dynamic;
+
+/// Repository contract for managing friends data
+abstract class FriendsRepositoryContract {
+  /// Cached friends list (app-wide)
+  /// This stream holds the cached list of friends and can be subscribed to
+  /// for reactive updates across the app
+  StreamValue<List<InviteFriendResume>> get friendsStreamValue;
+
+  /// Fetch friends from data source and cache them
+  ///
+  /// [forceRefresh] - If true, fetches from source even if cache exists
+  /// If false and cache is populated, returns immediately without fetching
+  Future<void> fetchAndCacheFriends(
+      {FriendsRepositoryContractBoolValue? forceRefresh});
+
+  /// Get raw Friend objects (for internal repository use)
+  /// This is typically used by other repositories that need Friend domain objects
+  Future<List<Friend>> fetchFriends();
+}

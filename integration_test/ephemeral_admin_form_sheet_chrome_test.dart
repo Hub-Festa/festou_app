@@ -1,0 +1,211 @@
+import 'package:festou_app/application/application.dart';
+import 'package:festou_app/application/application_contract.dart';
+import 'package:festou_app/application/router/app_router.gr.dart';
+import 'package:festou_app/domain/repositories/admin_mode_repository_contract.dart';
+import 'package:festou_app/domain/repositories/app_data_repository_contract.dart';
+import 'package:festou_app/domain/repositories/landlord_auth_repository_contract.dart';
+import 'package:festou_app/domain/repositories/landlord_tenants_repository_contract.dart';
+import 'package:festou_app/infrastructure/platform/app_data_local_info_source/app_data_local_info_source.dart';
+import 'package:festou_app/infrastructure/repositories/app_data_repository.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:integration_test/integration_test.dart';
+import 'package:stream_value/core/stream_value.dart';
+
+import 'support/fake_landlord_app_data_backend.dart';
+import 'support/integration_test_bootstrap.dart';
+
+void main() {
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  IntegrationTestBootstrap.ensureNonProductionLandlordDomain();
+
+  Future<void> _waitForFinder(
+    WidgetTester tester,
+    Finder finder, {
+    Duration timeout = const Duration(seconds: 20),
+    Duration step = const Duration(milliseconds: 200),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await tester.pump(step);
+      if (finder.evaluate().isNotEmpty) {
+        return;
+      }
+    }
+    throw TestFailure(
+      'Timed out waiting for ${finder.describeMatch(Plurality.one)}.',
+    );
+  }
+
+  Future<void> _pumpFor(WidgetTester tester, Duration duration) async {
+    final end = DateTime.now().add(duration);
+    while (DateTime.now().isBefore(end)) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+  }
+
+  Finder _tenantAdminShellRouterFinder() {
+    return find.byWidgetPredicate((widget) {
+      final key = widget.key;
+      if (key is! ValueKey<String>) {
+        return false;
+      }
+      return key.value.startsWith('tenant-admin-shell-router-');
+    });
+  }
+
+  Future<void> _waitForResolvedTenantShell(WidgetTester tester) async {
+    try {
+      await _waitForFinder(tester, _tenantAdminShellRouterFinder());
+    } on TestFailure {
+      throw TestFailure(
+        'Tenant admin shell did not resolve before opening AccountCreate. '
+        'loadingGate=${find.text('Preparando tenant').evaluate().isNotEmpty}, '
+        'selectionGate=${find.text('Selecionar tenant').evaluate().isNotEmpty}, '
+        'emptyTenantGate=${find.text('Nenhum tenant disponível no bootstrap atual.').evaluate().isNotEmpty}.',
+      );
+    }
+  }
+
+  testWidgets(
+    'Admin form route hides shell header and bottom nav through the shell root boundary',
+    (tester) async {
+      if (GetIt.I.isRegistered<ApplicationContract>()) {
+        GetIt.I.unregister<ApplicationContract>();
+      }
+      if (GetIt.I.isRegistered<AppDataRepository>()) {
+        GetIt.I.unregister<AppDataRepository>();
+      }
+      if (GetIt.I.isRegistered<AdminModeRepositoryContract>()) {
+        GetIt.I.unregister<AdminModeRepositoryContract>();
+      }
+      if (GetIt.I.isRegistered<LandlordAuthRepositoryContract>()) {
+        GetIt.I.unregister<LandlordAuthRepositoryContract>();
+      }
+      if (GetIt.I.isRegistered<LandlordTenantsRepositoryContract>()) {
+        GetIt.I.unregister<LandlordTenantsRepositoryContract>();
+      }
+
+      GetIt.I.registerSingleton<AppDataRepositoryContract>(
+        AppDataRepository(
+          backend: const FakeLandlordAppDataBackend(),
+          localInfoSource: AppDataLocalInfoSource(),
+        ),
+      );
+      GetIt.I.registerSingleton<AdminModeRepositoryContract>(
+        _InMemoryAdminModeRepository(),
+      );
+      GetIt.I.registerSingleton<LandlordAuthRepositoryContract>(
+        _FakeLandlordAuthRepository(hasValidSession: true),
+      );
+      GetIt.I.registerSingleton<LandlordTenantsRepositoryContract>(
+        _FakeLandlordTenantsRepository(),
+      );
+
+      final app = Application();
+      GetIt.I.registerSingleton<ApplicationContract>(app);
+      await app.init();
+
+      await tester.pumpWidget(app);
+      await _pumpFor(tester, const Duration(seconds: 2));
+
+      await tester.runAsync(() async {
+        final adminModeRepo = GetIt.I<AdminModeRepositoryContract>();
+        await adminModeRepo.setLandlordMode();
+      });
+
+      app.appRouter.replaceAll([
+        const TenantAdminShellRoute(
+          children: [TenantAdminAccountsListRoute()],
+        ),
+      ]);
+      await _pumpFor(tester, const Duration(seconds: 2));
+
+      await _waitForResolvedTenantShell(tester);
+      app.appRouter.navigate(
+        const TenantAdminShellRoute(
+          children: [TenantAdminAccountCreateRoute()],
+        ),
+      );
+      await _pumpFor(tester, const Duration(seconds: 2));
+
+      await _waitForFinder(
+        tester,
+        find.byKey(const ValueKey('tenant_admin_account_create_save')),
+      );
+
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byIcon(Icons.close), findsOneWidget);
+    },
+  );
+}
+
+class _InMemoryAdminModeRepository implements AdminModeRepositoryContract {
+  final StreamValue<AdminMode> _modeStreamValue = StreamValue<AdminMode>(
+    defaultValue: AdminMode.user,
+  );
+
+  @override
+  StreamValue<AdminMode> get modeStreamValue => _modeStreamValue;
+
+  @override
+  AdminMode get mode => _modeStreamValue.value;
+
+  @override
+  bool get isLandlordMode => mode == AdminMode.landlord;
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> setLandlordMode() async {
+    _modeStreamValue.addValue(AdminMode.landlord);
+  }
+
+  @override
+  Future<void> setUserMode() async {
+    _modeStreamValue.addValue(AdminMode.user);
+  }
+}
+
+class _FakeLandlordAuthRepository implements LandlordAuthRepositoryContract {
+  _FakeLandlordAuthRepository({required this.hasValidSession});
+
+  @override
+  bool hasValidSession;
+
+  @override
+  String get token => hasValidSession ? 'token' : '';
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> loginWithEmailPassword(
+    LandlordAuthRepositoryContractPrimString email,
+    LandlordAuthRepositoryContractPrimString password,
+  ) async {
+    hasValidSession = true;
+  }
+
+  @override
+  Future<void> logout() async {
+    hasValidSession = false;
+  }
+}
+
+class _FakeLandlordTenantsRepository
+    implements LandlordTenantsRepositoryContract {
+  @override
+  Future<List<LandlordTenantOption>> fetchTenants() async {
+    return [
+      landlordTenantOptionFromRaw(
+        id: 'tenant-festou',
+        name: 'Festou',
+        mainDomain: 'festou.local.test',
+      ),
+    ];
+  }
+}
